@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.4
+# Strike Ruler Kalshi Bot v0.5
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -15,7 +15,8 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - Buy only when the predicted side costs 10–47 cents.
 - Entry checks run every 7 seconds from minute 2 until minute 6.
 - At minute 6, the third prediction is recorded, new entries stop, and unfilled entries are canceled.
-- Sell the maximum held position at 4 cents or lower or 96 cents or higher.
+- Sell the entire held position when its executable bid reaches a 15% gross gain over the weighted-average fill price.
+- The 15% target ignores fees; the 4-cent emergency exit remains active.
 - Exit monitoring continues after minute 6; otherwise positions are held through settlement.
 - No daily-loss limit.
 
