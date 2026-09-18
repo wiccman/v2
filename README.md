@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.5
+# Strike Ruler Kalshi Bot v0.5.1
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -12,6 +12,8 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - Gap average is observational only and never flips a prediction.
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
+- Buy only HIGH-confidence signals (all 3 prior settlements on the same side of the strike).
+- MODERATE 2-of-3 signals are recorded but never traded.
 - Buy only when the predicted side costs 10–47 cents.
 - Entry checks run every 7 seconds from minute 2 until minute 6.
 - At minute 6, the third prediction is recorded, new entries stop, and unfilled entries are canceled.
