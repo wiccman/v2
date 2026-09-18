@@ -1,0 +1,7 @@
+.env
+*.pem
+*.key
+*private_key*
+data/
+__pycache__/
+.pytest_cache/
