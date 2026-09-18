@@ -1,10 +1,10 @@
 import argparse, csv, json, os, time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
-from strategy import strike_ruler, quantity_for_budget
+from strategy import strike_ruler, quantity_for_budget, live_confidence
 
 load_dotenv()
 if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "production").lower() != "production":
@@ -18,6 +18,8 @@ MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 START = int(os.getenv("ENTRY_START_MINUTE", "2")) * 60
 END = int(os.getenv("ENTRY_END_MINUTE", "6")) * 60
+PREDICTION_MINUTES = tuple(int(x.strip()) for x in os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6").split(",") if x.strip())
+PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
 TARGET = Decimal(os.getenv("TAKE_PROFIT_CENTS", "96")) / 100
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
@@ -40,15 +42,16 @@ def write_log(event, ticker="", **values):
 
 def active_market(now):
     for market in client.markets(series_ticker="KXBTC15M", status="open", limit=100):
-        opened, closed = parse_time(market["open_time"]), parse_time(market["close_time"])
-        if opened <= now < closed: return market, opened, closed
+        closed = parse_time(market["close_time"])
+        started = closed - timedelta(minutes=15)
+        if started <= now < closed: return market, started, closed
     return None, None, None
 
-def prior_three(opened):
+def prior_three(started):
     found = []
     for market in client.markets(series_ticker="KXBTC15M", status="settled", limit=100):
         closed, value = parse_time(market["close_time"]), market.get("expiration_value")
-        if closed <= opened and value not in (None, ""): found.append((closed, Decimal(str(value))))
+        if closed <= started and value not in (None, ""): found.append((closed, Decimal(str(value))))
     found.sort()
     if len(found) < 3: raise RuntimeError("DATA UNAVAILABLE: fewer than 3 finalized KXBTC15M settlements")
     return [value for _, value in found[-3:]]
@@ -68,7 +71,7 @@ def manage_exit(ticker, market, signal):
     side = "YES" if held > 0 else "NO"; _, bid = quotes(market, side)
     if bid <= STOP or bid >= TARGET:
         result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
-        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(result))
+        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(result))
 
 def cancel_entries(record, ticker):
     resting = {item.get("order_id") for item in client.orders(ticker, "resting")}
@@ -76,26 +79,50 @@ def cancel_entries(record, ticker):
         if order_id in resting: client.cancel(order_id); write_log("CANCEL_ENTRY", ticker, details=order_id)
         record["orders"].remove(order_id)
 
+def update_prediction(record, ticker, current, elapsed):
+    completed = len(record["predictions"])
+    if completed >= len(PREDICTION_SECONDS) or elapsed < PREDICTION_SECONDS[completed]:
+        return False
+    number = completed + 1
+    prediction = record["signal"]["prediction"]
+    ask, bid = quotes(current, prediction)
+    confidence = live_confidence(ask)
+    snapshot = {
+        "number": number,
+        "scheduled_minute": PREDICTION_MINUTES[completed],
+        "prediction": prediction,
+        "confidence": confidence,
+        "ask": str(ask),
+        "bid": str(bid),
+    }
+    record["predictions"].append(snapshot)
+    record["signal"]["live_confidence"] = confidence
+    write_log("PREDICTION_UPDATE", ticker, prediction=prediction, confidence=confidence, price=str(ask), details=json.dumps(snapshot))
+    return True
+
 def cycle(state):
-    now = datetime.now(timezone.utc); market, opened, closed = active_market(now)
+    now = datetime.now(timezone.utc); market, started, closed = active_market(now)
     if not market: return
-    ticker = market["ticker"]; elapsed = (now - opened).total_seconds()
-    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "orders": []})
+    ticker = market["ticker"]; elapsed = (now - started).total_seconds()
+    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": []})
+    if "predictions" not in record: record["predictions"] = []
     if record["signal"] is None:
-        signal = strike_ruler(prior_three(opened) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
-        record["signal"] = {"prediction": signal.prediction, "confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
-        write_log("SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
-    signal = record["signal"]; current = client.market(ticker); manage_exit(ticker, current, signal)
+        signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
+        record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
+        write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
+    signal = record["signal"]; current = client.market(ticker)
+    if update_prediction(record, ticker, current, elapsed): save_state(state)
+    manage_exit(ticker, current, signal)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
-    can_buy = START <= elapsed < END and signal["confidence"] in ("HIGH", "MODERATE") and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
         if ENTRY_MIN <= ask <= ENTRY_MAX:
             quantity = quantity_for_budget(ask, BUDGET)
-            result = client.place_entry(ticker, signal["prediction"], quantity, ask, opened.timestamp() + END)
+            result = client.place_entry(ticker, signal["prediction"], quantity, ask, started.timestamp() + END)
             if result.get("order_id"): record["orders"].append(result["order_id"])
             record["buys"] += 1; record["last_buy"] = time.time()
-            write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal["confidence"], price=str(ask), quantity=str(quantity), details=f"purchase {record['buys']} of {MAX_BUYS}"); save_state(state)
+            write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(ask), quantity=str(quantity), details=f"purchase {record['buys']} of {MAX_BUYS}"); save_state(state)
 
 def check():
     balance = client.balance(); markets = client.markets(series_ticker="KXBTC15M", status="open", limit=1)
@@ -103,14 +130,13 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.3.0", flush=True)
+    print("Strike Ruler bot v0.4.0", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
         check()
         print("LOCKED: production service is online; live order routing is disabled", flush=True)
-        while True:
-            time.sleep(3600)
+        while True: time.sleep(3600)
     state = load_state()
     while True:
         try: cycle(state)
