@@ -61,6 +61,10 @@ class KalshiClient:
         params = {"ticker": ticker} if ticker else None
         return self.request("GET", "/portfolio/positions", params=params, auth=True).get("market_positions", [])
 
+    def fills(self, ticker=None):
+        params = {"ticker": ticker, "limit": 100} if ticker else {"limit": 100}
+        return self.request("GET", "/portfolio/fills", params=params, auth=True).get("fills", [])
+
     def orders(self, ticker=None, status="resting"):
         params = {"status": status}
         if ticker:
