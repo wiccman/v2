@@ -69,17 +69,20 @@ def manage_exit(ticker, market, signal):
     held = position(ticker)
     if held == 0: return
     side = "YES" if held > 0 else "NO"; _, bid = quotes(market, side)
+    if bid <= STOP:
+        result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
+        details = {"reason": "STOP", "order": result}
+        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
+        return
     average_entry = average_open_price(client.fills(ticker), side)
     if average_entry is None:
         write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
         return
     target = min(Decimal("1"), average_entry * (Decimal("1") + TAKE_PROFIT_RATE))
-    stop_hit = bid <= STOP
-    target_hit = bid >= target
-    if stop_hit or target_hit:
+    if bid >= target:
         gross_gain = (bid / average_entry - Decimal("1")) * 100
         result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
-        details = {"reason": "STOP" if stop_hit else "TAKE_PROFIT", "average_entry": str(average_entry), "target": str(target), "gross_gain_percent": str(gross_gain), "order": result}
+        details = {"reason": "TAKE_PROFIT", "average_entry": str(average_entry), "target": str(target), "gross_gain_percent": str(gross_gain), "order": result}
         write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
 
 def cancel_entries(record, ticker):
