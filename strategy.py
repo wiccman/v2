@@ -40,3 +40,31 @@ def quantity_for_budget(price, budget=Decimal("0.77")):
     if price <= 0:
         raise ValueError("price must be positive")
     return (Decimal(str(budget))/price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+def average_open_price(fills, outcome_side):
+    """Return the average-cost basis of the currently open YES or NO inventory."""
+    outcome_side = outcome_side.upper()
+    if outcome_side not in ("YES", "NO"):
+        raise ValueError("outcome_side must be YES or NO")
+
+    quantity = Decimal("0")
+    cost = Decimal("0")
+    for fill in sorted(fills, key=lambda item: item.get("created_time", "")):
+        fill_side = str(fill.get("outcome_side") or fill.get("side") or "").upper()
+        if fill_side != outcome_side:
+            continue
+        count = Decimal(str(fill.get("count_fp") or fill.get("count") or "0"))
+        price_key = "yes_price_dollars" if outcome_side == "YES" else "no_price_dollars"
+        price = Decimal(str(fill.get(price_key) or "0"))
+        action = str(fill.get("action") or "").lower()
+        if count <= 0 or price <= 0:
+            continue
+        if action == "buy":
+            quantity += count
+            cost += count * price
+        elif action == "sell" and quantity > 0:
+            removed = min(count, quantity)
+            cost -= (cost / quantity) * removed
+            quantity -= removed
+
+    return cost / quantity if quantity > 0 else None
