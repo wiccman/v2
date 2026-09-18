@@ -1,5 +1,5 @@
 from decimal import Decimal
-from strategy import strike_ruler, quantity_for_budget, live_confidence
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price
 
 def test_three_below_predicts_yes_high():
     signal = strike_ruler([100, 110, 120, 130], 1)
@@ -43,3 +43,24 @@ def test_live_confidence_cannot_change_direction():
 
 def test_budget():
     assert quantity_for_budget(Decimal("0.47")) == Decimal("1.63")
+
+def test_average_open_price_uses_weighted_fills():
+    fills = [
+        {"created_time": "2026-01-01T00:00:00Z", "outcome_side": "yes", "action": "buy", "count_fp": "2", "yes_price_dollars": "0.40"},
+        {"created_time": "2026-01-01T00:00:01Z", "outcome_side": "yes", "action": "buy", "count_fp": "1", "yes_price_dollars": "0.70"},
+    ]
+    assert average_open_price(fills, "YES") == Decimal("0.50")
+
+def test_average_open_price_preserves_basis_after_partial_sale():
+    fills = [
+        {"created_time": "2026-01-01T00:00:00Z", "side": "no", "action": "buy", "count_fp": "4", "no_price_dollars": "0.20"},
+        {"created_time": "2026-01-01T00:00:01Z", "side": "no", "action": "sell", "count_fp": "1", "no_price_dollars": "0.30"},
+    ]
+    assert average_open_price(fills, "NO") == Decimal("0.20")
+
+def test_average_open_price_returns_none_without_open_inventory():
+    fills = [
+        {"created_time": "2026-01-01T00:00:00Z", "side": "yes", "action": "buy", "count_fp": "1", "yes_price_dollars": "0.40"},
+        {"created_time": "2026-01-01T00:00:01Z", "side": "yes", "action": "sell", "count_fp": "1", "yes_price_dollars": "0.60"},
+    ]
+    assert average_open_price(fills, "YES") is None
