@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.7.2
+# Strike Ruler Kalshi Bot v0.7.3
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -40,5 +40,8 @@ Maximum planned entry principal is $6.93 per market before fees: one spot-trigge
 5. Keep `TRADING_ENABLED=false` during the first deployment.
 6. Run `python bot.py --check` in Railway. This only checks authentication and cannot place orders.
 7. If the check succeeds, change `TRADING_ENABLED=true` and redeploy.
+8. In Railway, attach a persistent volume to the service and set its mount path to `/data`.
+
+The `/data` volume preserves per-market purchase counters, one-time entry flags, and trade logs across restarts and deployments. Do not enable live trading without this volume; otherwise a restart during an active market can allow duplicate entries.
 
 Never upload or share your Kalshi private key.
