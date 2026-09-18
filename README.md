@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.6.0
+# Strike Ruler Kalshi Bot v0.7.0
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -10,6 +10,8 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - Each snapshot refreshes confidence from the current Kalshi ask price for the predicted side.
 - Live confidence cannot reverse YES to NO or NO to YES.
 - Gap average is observational only and never flips a prediction.
+- During minutes 0–2, buy YES once at the current ask if Coinbase BTC-USD spot is at least $80 above the Kalshi strike.
+- This one-time spot-trigger entry budgets $0.77 and does not use the normal 47-cent entry cap.
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
 - Buy only HIGH-confidence signals (all 3 prior settlements on the same side of the strike).
@@ -25,7 +27,7 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - Exit monitoring continues after minute 6; otherwise positions are held through settlement.
 - No daily-loss limit.
 
-Maximum planned entry principal is $6.16 per market before fees: seven regular $0.77 entries plus one final $0.77 entry.
+Maximum planned entry principal is $6.93 per market before fees: one spot-trigger entry, seven regular entries, and one final entry at $0.77 each.
 
 ## Railway setup
 
