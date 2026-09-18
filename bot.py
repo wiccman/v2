@@ -126,7 +126,7 @@ def cycle(state):
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     manage_exit(ticker, current, signal)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
-    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") == "HIGH" and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
         if ENTRY_MIN <= ask <= ENTRY_MAX:
@@ -142,7 +142,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.5.0", flush=True)
+    print("Strike Ruler bot v0.5.1", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
