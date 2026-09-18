@@ -5,6 +5,13 @@ import bot
 from kalshi import KalshiClient
 
 
+def test_entry_price_caps_depend_on_base_confidence():
+    assert bot.entry_price_allowed("HIGH", Decimal("0.47")) is True
+    assert bot.entry_price_allowed("HIGH", Decimal("0.48")) is False
+    assert bot.entry_price_allowed("MODERATE", Decimal("0.30")) is True
+    assert bot.entry_price_allowed("MODERATE", Decimal("0.31")) is False
+
+
 class RecordingClient(KalshiClient):
     def __init__(self):
         self.calls = []

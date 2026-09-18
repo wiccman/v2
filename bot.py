@@ -13,6 +13,7 @@ if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "produ
 ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 ENTRY_MIN = Decimal(os.getenv("ENTRY_MIN_CENTS", "10")) / 100
 ENTRY_MAX = Decimal(os.getenv("ENTRY_MAX_CENTS", "47")) / 100
+MODERATE_ENTRY_MAX = Decimal(os.getenv("MODERATE_ENTRY_MAX_CENTS", "30")) / 100
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
@@ -69,6 +70,14 @@ def position(ticker):
     for item in client.positions(ticker):
         if item.get("ticker") == ticker: return Decimal(str(item.get("position_fp", "0")))
     return Decimal("0")
+
+def entry_price_allowed(base_confidence, price):
+    price = Decimal(str(price))
+    if base_confidence == "HIGH":
+        return ENTRY_MIN <= price <= ENTRY_MAX
+    if base_confidence == "MODERATE":
+        return ENTRY_MIN <= price <= MODERATE_ENTRY_MAX
+    return False
 
 def manage_exit(record, ticker, market, signal, closed):
     held = position(ticker)
@@ -195,10 +204,10 @@ def cycle(state):
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     if manage_exit(record, ticker, current, signal, closed): save_state(state)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
-    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") == "HIGH" and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
-        if ENTRY_MIN <= ask <= ENTRY_MAX:
+        if entry_price_allowed(signal.get("base_confidence"), ask):
             quantity = quantity_for_budget(ask, BUDGET)
             result = client.place_entry(ticker, signal["prediction"], quantity, ask, started.timestamp() + END)
             if result.get("order_id"): record["orders"].append(result["order_id"])
@@ -221,7 +230,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.7", flush=True)
+    print("Strike Ruler bot v0.7.8", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)

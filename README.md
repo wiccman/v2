@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.7.7
+# Strike Ruler Kalshi Bot v0.7.8
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -15,9 +15,8 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - If the Kalshi account lacks CF Benchmarks passthrough access, no spot-trigger order is placed and the API error is logged.
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
-- Buy only HIGH-confidence signals (all 3 prior settlements on the same side of the strike).
-- MODERATE 2-of-3 signals are recorded but never traded.
-- Buy only when the predicted side costs 10–47 cents.
+- Buy HIGH-confidence signals (all 3 prior settlements on the same side of the strike) when the predicted side costs 10–47 cents.
+- Buy MODERATE 2-of-3 signals only when the predicted side costs 10–30 cents.
 - Entry checks run every 7 seconds from minute 2 until minute 6.
 - At minute 6, the third prediction is recorded, new entries stop, and unfilled entries are canceled.
 - The three predicted-side ask prices are averaged as the contract's final confidence.
