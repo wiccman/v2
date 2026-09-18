@@ -104,7 +104,10 @@ def check():
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     if args.check: check(); return
-    if not ENABLED: raise SystemExit("Set TRADING_ENABLED=true only after python bot.py --check succeeds")
+    if not ENABLED:
+        print("LOCKED: production service is online; live order routing is disabled", flush=True)
+        while True:
+            time.sleep(3600)
     state = load_state()
     while True:
         try: cycle(state)
