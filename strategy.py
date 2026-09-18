@@ -35,6 +35,21 @@ def live_confidence(predicted_side_ask):
         raise ValueError("Kalshi contract price must be between 0 and 1")
     return f"{(price * 100).quantize(Decimal('0.1'))}%"
 
+def seconds_from_minutes(value):
+    """Convert whole or decimal minutes to an exact whole-second offset."""
+    seconds = Decimal(str(value)) * Decimal("60")
+    if seconds < 0 or seconds != seconds.to_integral_value():
+        raise ValueError("minute settings must resolve to a non-negative whole number of seconds")
+    return int(seconds)
+
+def fixed_take_profit_target(average_entry, take_profit_cents):
+    """Return a fixed-cent contract target, capped at the $1 settlement value."""
+    entry = Decimal(str(average_entry))
+    cents = Decimal(str(take_profit_cents))
+    if entry < 0 or entry > 1 or cents < 0:
+        raise ValueError("entry must be between 0 and 1 and take-profit cents cannot be negative")
+    return min(Decimal("1"), entry + cents / Decimal("100"))
+
 def average_prediction_confidence(predictions):
     """Average the predicted-side ask prices captured in prediction snapshots."""
     if not predictions:
