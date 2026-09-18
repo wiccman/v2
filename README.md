@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.7.1
+# Strike Ruler Kalshi Bot v0.7.2
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -24,6 +24,7 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - From minute 12 until minute 15, place exactly one additional $0.77 entry when final average confidence is at least 65%.
 - The final entry uses the original fixed Strike Ruler direction. This final phase can trade either HIGH or MODERATE base signals when the 65% average threshold is met.
 - Sell the entire held position when its executable bid reaches a 15% gross gain over the weighted-average fill price.
+- Weighted-average entry price supports Kalshi's current `outcome_side` fill schema and legacy fills.
 - The 15% target ignores fees; the 4-cent emergency exit remains active.
 - Exit monitoring continues after minute 6; otherwise positions are held through settlement.
 - No daily-loss limit.
