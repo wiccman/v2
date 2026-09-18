@@ -15,7 +15,7 @@ ENTRY_MIN = Decimal(os.getenv("ENTRY_MIN_CENTS", "10")) / 100
 ENTRY_MAX = Decimal(os.getenv("ENTRY_MAX_CENTS", "47")) / 100
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
-INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "30"))
+INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 START = int(os.getenv("ENTRY_START_MINUTE", "2")) * 60
 END = int(os.getenv("ENTRY_END_MINUTE", "6")) * 60
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
@@ -87,7 +87,7 @@ def cycle(state):
         write_log("SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
     signal = record["signal"]; current = client.market(ticker); manage_exit(ticker, current, signal)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
-    can_buy = START <= elapsed < END and signal["confidence"] == "HIGH" and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = START <= elapsed < END and signal["confidence"] in ("HIGH", "MODERATE") and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
         if ENTRY_MIN <= ask <= ENTRY_MAX:
@@ -103,7 +103,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.2.2", flush=True)
+    print("Strike Ruler bot v0.3.0", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
