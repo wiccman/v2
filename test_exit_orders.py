@@ -85,21 +85,14 @@ def test_manage_exit_places_and_tracks_resting_take_profit(monkeypatch):
     assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.23"))
 
 
-def test_manage_exit_cancels_resting_take_profit_before_stop(monkeypatch):
+def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     fake = ExitClient()
-    fake.resting = [{"order_id": "tp-1"}]
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
-    record = {
-        "take_profit_order_id": "tp-1",
-        "take_profit_side": "YES",
-        "take_profit_quantity": "2",
-        "take_profit_target": "0.30",
-    }
+    record = {}
     market = {"yes_ask_dollars": "0.04", "yes_bid_dollars": "0.03", "no_ask_dollars": "0.97", "no_bid_dollars": "0.96"}
     closed = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
 
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
-    assert fake.actions[0] == ("cancel", "tp-1")
-    assert fake.actions[1][0] == "close"
-    assert "take_profit_order_id" not in record
+    assert fake.actions[0][0] == "take_profit"
+    assert all(action[0] != "close" for action in fake.actions)

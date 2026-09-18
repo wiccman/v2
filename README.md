@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.7.6
+# Strike Ruler Kalshi Bot v0.7.7
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -27,7 +27,7 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - The target rounds up to the next valid Kalshi price tick and never exceeds the market's highest tradable price.
 - Weighted-average entry price supports Kalshi's current `outcome_side` fill schema and legacy fills.
 - Added fills cancel and replace the resting sell so its quantity and weighted-average target stay current.
-- The gross target ignores fees; the 4-cent emergency exit cancels the resting sell before closing the position.
+- The gross target ignores fees; there is no automatic stop-loss sell.
 - Rejected take-profit orders log Kalshi's response details and wait 60 seconds before retrying the same order.
 - Exit monitoring continues after minute 6; otherwise positions are held through settlement.
 - No daily-loss limit.

@@ -25,7 +25,6 @@ FINAL_END = seconds_from_minutes(os.getenv("FINAL_ENTRY_END_MINUTE", "15"))
 FINAL_CONFIDENCE_MIN = Decimal(os.getenv("FINAL_CONFIDENCE_MIN_PERCENT", "65")) / 100
 SPOT_ENTRY_WINDOW = seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2"))
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
-STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
 TAKE_PROFIT_PERCENT = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15"))
 TAKE_PROFIT_RETRY_SECONDS = int(os.getenv("TAKE_PROFIT_RETRY_SECONDS", "60"))
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
@@ -86,16 +85,6 @@ def manage_exit(record, ticker, market, signal, closed):
         ))
         return changed
     side = "YES" if held > 0 else "NO"; _, bid = quotes(market, side)
-    if bid <= STOP:
-        if take_profit_order_id in resting:
-            client.cancel(take_profit_order_id)
-            write_log("CANCEL_TAKE_PROFIT", ticker, prediction=side, details=take_profit_order_id)
-        for key in ("take_profit_order_id", "take_profit_side", "take_profit_quantity", "take_profit_target"):
-            record.pop(key, None)
-        result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
-        details = {"reason": "STOP", "order": result}
-        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
-        return True
     average_entry = average_open_price(client.fills(ticker), side)
     if average_entry is None:
         write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
@@ -232,7 +221,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.6", flush=True)
+    print("Strike Ruler bot v0.7.7", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
