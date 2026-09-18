@@ -1,5 +1,5 @@
 from decimal import Decimal
-from strategy import strike_ruler, quantity_for_budget
+from strategy import strike_ruler, quantity_for_budget, live_confidence
 
 def test_three_below_predicts_yes_high():
     signal = strike_ruler([100, 110, 120, 130], 1)
@@ -31,6 +31,15 @@ def test_no_majority_skips():
     signal = strike_ruler([100, 130, 120, 120], 1)
     assert signal.prediction == "SKIP"
     assert signal.confidence == "NONE"
+
+def test_live_confidence_uses_kalshi_price():
+    assert live_confidence(Decimal("0.47")) == "47.0%"
+
+def test_live_confidence_cannot_change_direction():
+    signal = strike_ruler([100, 110, 120, 130], 1)
+    assert signal.prediction == "YES"
+    assert live_confidence(Decimal("0.12")) == "12.0%"
+    assert signal.prediction == "YES"
 
 def test_budget():
     assert quantity_for_budget(Decimal("0.47")) == Decimal("1.63")
