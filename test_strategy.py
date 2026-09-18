@@ -67,6 +67,20 @@ def test_average_open_price_uses_weighted_fills():
     ]
     assert average_open_price(fills, "YES") == Decimal("0.50")
 
+def test_average_open_price_supports_current_kalshi_fill_schema():
+    fills = [
+        {"created_time": "2026-01-01T00:00:00Z", "outcome_side": "yes", "count_fp": "2.00", "yes_price_dollars": "0.40", "no_price_dollars": "0.60"},
+        {"created_time": "2026-01-01T00:00:01Z", "outcome_side": "yes", "count_fp": "1.00", "yes_price_dollars": "0.70", "no_price_dollars": "0.30"},
+    ]
+    assert average_open_price(fills, "YES") == Decimal("0.50")
+
+def test_opposite_outcome_fill_reduces_open_inventory():
+    fills = [
+        {"created_time": "2026-01-01T00:00:00Z", "outcome_side": "yes", "count_fp": "4.00", "yes_price_dollars": "0.20", "no_price_dollars": "0.80"},
+        {"created_time": "2026-01-01T00:00:01Z", "outcome_side": "no", "count_fp": "1.00", "yes_price_dollars": "0.70", "no_price_dollars": "0.30"},
+    ]
+    assert average_open_price(fills, "YES") == Decimal("0.20")
+
 def test_average_open_price_preserves_basis_after_partial_sale():
     fills = [
         {"created_time": "2026-01-01T00:00:00Z", "side": "no", "action": "buy", "count_fp": "4", "no_price_dollars": "0.20"},
