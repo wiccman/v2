@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
-from strategy import strike_ruler, quantity_for_budget, live_confidence
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price
 
 load_dotenv()
 if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "production").lower() != "production":
@@ -21,7 +21,7 @@ END = int(os.getenv("ENTRY_END_MINUTE", "6")) * 60
 PREDICTION_MINUTES = tuple(int(x.strip()) for x in os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6").split(",") if x.strip())
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
-TARGET = Decimal(os.getenv("TAKE_PROFIT_CENTS", "96")) / 100
+TAKE_PROFIT_RATE = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15")) / 100
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
 STATE = Path(os.getenv("STATE_PATH", "data/state.json"))
 LOG = Path(os.getenv("LOG_PATH", "data/trades.csv"))
@@ -69,9 +69,18 @@ def manage_exit(ticker, market, signal):
     held = position(ticker)
     if held == 0: return
     side = "YES" if held > 0 else "NO"; _, bid = quotes(market, side)
-    if bid <= STOP or bid >= TARGET:
+    average_entry = average_open_price(client.fills(ticker), side)
+    if average_entry is None:
+        write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
+        return
+    target = min(Decimal("1"), average_entry * (Decimal("1") + TAKE_PROFIT_RATE))
+    stop_hit = bid <= STOP
+    target_hit = bid >= target
+    if stop_hit or target_hit:
+        gross_gain = (bid / average_entry - Decimal("1")) * 100
         result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
-        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(result))
+        details = {"reason": "STOP" if stop_hit else "TAKE_PROFIT", "average_entry": str(average_entry), "target": str(target), "gross_gain_percent": str(gross_gain), "order": result}
+        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
 
 def cancel_entries(record, ticker):
     resting = {item.get("order_id") for item in client.orders(ticker, "resting")}
@@ -130,7 +139,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.4.0", flush=True)
+    print("Strike Ruler bot v0.5.0", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
