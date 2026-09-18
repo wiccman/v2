@@ -1,4 +1,5 @@
 from decimal import Decimal
+from kalshi import _latest_index_value
 from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike
 
 def test_three_below_predicts_yes_high():
@@ -51,6 +52,10 @@ def test_average_prediction_confidence_returns_none_without_snapshots():
 def test_spot_trigger_at_eighty_dollars_above_strike():
     assert spot_is_above_strike("10080", "10000") is True
     assert spot_is_above_strike("10079.99", "10000") is False
+
+def test_kalshi_cf_benchmarks_value_response():
+    response = {"data": {"payload": [{"time": 1, "value": "68000.12"}, {"time": 2, "value": "68001.34"}]}}
+    assert _latest_index_value(response) == Decimal("68001.34")
 
 def test_budget():
     assert quantity_for_budget(Decimal("0.47")) == Decimal("1.63")
