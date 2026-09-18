@@ -1,5 +1,5 @@
 from decimal import Decimal
-from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence
 
 def test_three_below_predicts_yes_high():
     signal = strike_ruler([100, 110, 120, 130], 1)
@@ -40,6 +40,13 @@ def test_live_confidence_cannot_change_direction():
     assert signal.prediction == "YES"
     assert live_confidence(Decimal("0.12")) == "12.0%"
     assert signal.prediction == "YES"
+
+def test_average_prediction_confidence_uses_all_snapshots():
+    predictions = [{"ask": "0.60"}, {"ask": "0.70"}, {"ask": "0.65"}]
+    assert average_prediction_confidence(predictions) == Decimal("0.65")
+
+def test_average_prediction_confidence_returns_none_without_snapshots():
+    assert average_prediction_confidence([]) is None
 
 def test_budget():
     assert quantity_for_budget(Decimal("0.47")) == Decimal("1.63")
