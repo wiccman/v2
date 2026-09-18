@@ -131,7 +131,7 @@ def cycle(state):
         write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
     signal = record["signal"]; current = client.market(ticker)
     if 0 <= elapsed < SPOT_ENTRY_WINDOW and not record["spot_entry_attempted"]:
-        spot = client.btc_spot(); strike = Decimal(str(current["floor_strike"]))
+        spot = client.btc_reference_price(); strike = Decimal(str(current["floor_strike"]))
         if spot_is_above_strike(spot, strike, SPOT_ENTRY_THRESHOLD):
             ask, _ = quotes(current, "YES")
             if Decimal("0") < ask <= Decimal("1"):
@@ -169,7 +169,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.0", flush=True)
+    print("Strike Ruler bot v0.7.1", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
