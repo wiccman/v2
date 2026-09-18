@@ -44,6 +44,9 @@ def average_prediction_confidence(predictions):
         raise ValueError("Kalshi contract price must be between 0 and 1")
     return sum(prices, Decimal("0")) / Decimal(len(prices))
 
+def spot_is_above_strike(spot_price, strike_price, threshold=Decimal("80")):
+    return Decimal(str(spot_price)) >= Decimal(str(strike_price)) + Decimal(str(threshold))
+
 def quantity_for_budget(price, budget=Decimal("0.77")):
     price = Decimal(str(price))
     if price <= 0:
