@@ -11,7 +11,25 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
-COINBASE_SPOT_URL = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+
+def _latest_index_value(payload):
+    """Extract the newest numeric index value from a CF Benchmarks response."""
+    if isinstance(payload, dict):
+        if "value" in payload and not isinstance(payload["value"], (dict, list)):
+            return Decimal(str(payload["value"]))
+        for key in ("payload", "data", "BRTI", "values"):
+            if key in payload:
+                try:
+                    return _latest_index_value(payload[key])
+                except (KeyError, TypeError, ValueError):
+                    pass
+    elif isinstance(payload, list) and payload:
+        for item in reversed(payload):
+            try:
+                return _latest_index_value(item)
+            except (KeyError, TypeError, ValueError):
+                pass
+    raise ValueError("Kalshi CF Benchmarks response did not contain a BRTI value")
 
 class KalshiClient:
     def __init__(self, key_id="", private_key_path="", private_key_b64=""):
@@ -55,10 +73,9 @@ class KalshiClient:
     def market(self, ticker):
         return self.request("GET", "/markets/" + ticker)["market"]
 
-    def btc_spot(self):
-        response = requests.get(COINBASE_SPOT_URL, timeout=10)
-        response.raise_for_status()
-        return Decimal(response.json()["data"]["amount"])
+    def btc_reference_price(self):
+        response = self.request("GET", "/cfbenchmarks/values", params={"id": "BRTI"}, auth=True)
+        return _latest_index_value(response)
 
     def balance(self):
         return self.request("GET", "/portfolio/balance", auth=True)
