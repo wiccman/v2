@@ -115,6 +115,6 @@ def main():
     while True:
         try: cycle(state)
         except Exception as error: write_log("ERROR", details=repr(error))
-        time.sleep(int(os.getenv("POLL_SECONDS", "5")))
+        time.sleep(int(os.getenv("POLL_SECONDS", "7")))
 
 if __name__ == "__main__": main()
