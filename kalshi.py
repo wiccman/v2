@@ -64,7 +64,13 @@ class KalshiClient:
     def request(self, method, path, params=None, body=None, auth=False):
         response = requests.request(method, self.base + path, params=params, json=body,
             headers=self._headers(method, path) if auth else {}, timeout=20)
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as error:
+            details = response.text.strip() or "<empty response>"
+            raise RuntimeError(
+                f"Kalshi API {response.status_code} {method.upper()} {path}: {details}"
+            ) from error
         return response.json() if response.content else {}
 
     def markets(self, **params):

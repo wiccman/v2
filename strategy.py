@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN
 
 @dataclass(frozen=True)
 class Signal:
@@ -49,6 +49,38 @@ def fixed_take_profit_target(average_entry, take_profit_cents):
     if entry < 0 or entry > 1 or cents < 0:
         raise ValueError("entry must be between 0 and 1 and take-profit cents cannot be negative")
     return min(Decimal("1"), entry + cents / Decimal("100"))
+
+def gross_take_profit_target(average_entry, profit_percent, price_ranges=None):
+    """Return a gross-gain target snapped up to a valid Kalshi price tick."""
+    entry = Decimal(str(average_entry))
+    percent = Decimal(str(profit_percent))
+    if entry <= 0 or entry > 1 or percent < 0:
+        raise ValueError("entry must be above 0 and at most 1; profit percent cannot be negative")
+
+    ranges = price_ranges or [{"start": "0.01", "end": "0.99", "step": "0.01"}]
+    normalized = sorted(
+        (
+            Decimal(str(item["start"])),
+            Decimal(str(item["end"])),
+            Decimal(str(item["step"])),
+        )
+        for item in ranges
+    )
+    if any(start < 0 or end > 1 or start > end or step <= 0 for start, end, step in normalized):
+        raise ValueError("invalid Kalshi price range")
+
+    desired = entry * (Decimal("1") + percent / Decimal("100"))
+    maximum = max(end for _, end, _ in normalized)
+    desired = min(desired, maximum)
+    for start, end, step in normalized:
+        if desired > end:
+            continue
+        candidate = max(desired, start)
+        ticks = ((candidate - start) / step).to_integral_value(rounding=ROUND_CEILING)
+        snapped = start + ticks * step
+        if snapped <= end:
+            return snapped
+    return maximum
 
 def average_prediction_confidence(predictions):
     """Average the predicted-side ask prices captured in prediction snapshots."""

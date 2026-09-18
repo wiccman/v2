@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
-from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, fixed_take_profit_target
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, gross_take_profit_target
 
 load_dotenv()
 if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "production").lower() != "production":
@@ -26,7 +26,8 @@ FINAL_CONFIDENCE_MIN = Decimal(os.getenv("FINAL_CONFIDENCE_MIN_PERCENT", "65")) 
 SPOT_ENTRY_WINDOW = seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2"))
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
-TAKE_PROFIT_CENTS = Decimal(os.getenv("TAKE_PROFIT_CENTS", "10"))
+TAKE_PROFIT_PERCENT = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15"))
+TAKE_PROFIT_RETRY_SECONDS = int(os.getenv("TAKE_PROFIT_RETRY_SECONDS", "60"))
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
 STATE = Path(os.getenv("STATE_PATH", "/data/state.json"))
 LOG = Path(os.getenv("LOG_PATH", "/data/trades.csv"))
@@ -79,7 +80,9 @@ def manage_exit(record, ticker, market, signal, closed):
             client.cancel(take_profit_order_id)
             write_log("CANCEL_TAKE_PROFIT", ticker, details=take_profit_order_id)
         changed = any(record.pop(key, None) is not None for key in (
-            "take_profit_order_id", "take_profit_side", "take_profit_quantity", "take_profit_target"
+            "take_profit_order_id", "take_profit_side", "take_profit_quantity", "take_profit_target",
+            "take_profit_rejected_side", "take_profit_rejected_quantity",
+            "take_profit_rejected_target", "take_profit_retry_after",
         ))
         return changed
     side = "YES" if held > 0 else "NO"; _, bid = quotes(market, side)
@@ -97,7 +100,7 @@ def manage_exit(record, ticker, market, signal, closed):
     if average_entry is None:
         write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
         return False
-    target = fixed_take_profit_target(average_entry, TAKE_PROFIT_CENTS)
+    target = gross_take_profit_target(average_entry, TAKE_PROFIT_PERCENT, market.get("price_ranges"))
     quantity = abs(held)
     current_matches = (
         take_profit_order_id in resting
@@ -107,19 +110,46 @@ def manage_exit(record, ticker, market, signal, closed):
     )
     if current_matches:
         return False
+    rejected_matches = (
+        record.get("take_profit_rejected_side") == side
+        and Decimal(str(record.get("take_profit_rejected_quantity", "0"))) == quantity
+        and Decimal(str(record.get("take_profit_rejected_target", "-1"))) == target
+    )
+    if rejected_matches and time.time() < float(record.get("take_profit_retry_after", 0)):
+        return False
     if take_profit_order_id in resting:
         client.cancel(take_profit_order_id)
         write_log("CANCEL_TAKE_PROFIT", ticker, prediction=side, details=take_profit_order_id)
-    result = client.place_take_profit(ticker, held, target, closed.timestamp())
+    try:
+        result = client.place_take_profit(ticker, held, target, closed.timestamp())
+    except Exception as error:
+        record["take_profit_rejected_side"] = side
+        record["take_profit_rejected_quantity"] = str(quantity)
+        record["take_profit_rejected_target"] = str(target)
+        record["take_profit_retry_after"] = time.time() + TAKE_PROFIT_RETRY_SECONDS
+        write_log(
+            "TAKE_PROFIT_REJECTED", ticker, prediction=side, price=str(target),
+            quantity=str(quantity), details=repr(error),
+        )
+        return True
     order_id = result.get("order_id")
     if not order_id:
+        record["take_profit_rejected_side"] = side
+        record["take_profit_rejected_quantity"] = str(quantity)
+        record["take_profit_rejected_target"] = str(target)
+        record["take_profit_retry_after"] = time.time() + TAKE_PROFIT_RETRY_SECONDS
         write_log("TAKE_PROFIT_REJECTED", ticker, prediction=side, price=str(target), quantity=str(quantity), details=json.dumps(result))
-        return False
+        return True
     record["take_profit_order_id"] = order_id
     record["take_profit_side"] = side
     record["take_profit_quantity"] = str(quantity)
     record["take_profit_target"] = str(target)
-    details = {"average_entry": str(average_entry), "target": str(target), "take_profit_cents": str(TAKE_PROFIT_CENTS), "order": result}
+    for key in (
+        "take_profit_rejected_side", "take_profit_rejected_quantity",
+        "take_profit_rejected_target", "take_profit_retry_after",
+    ):
+        record.pop(key, None)
+    details = {"average_entry": str(average_entry), "target": str(target), "take_profit_percent": str(TAKE_PROFIT_PERCENT), "order": result}
     write_log("TAKE_PROFIT_RESTING", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(target), quantity=str(quantity), details=json.dumps(details))
     return True
 
@@ -202,7 +232,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.5", flush=True)
+    print("Strike Ruler bot v0.7.6", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)

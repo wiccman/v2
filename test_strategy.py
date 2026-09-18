@@ -1,6 +1,6 @@
 from decimal import Decimal
 from kalshi import _latest_index_value
-from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, gross_take_profit_target
 
 def test_three_below_predicts_yes_high():
     signal = strike_ruler([100, 110, 120, 130], 1)
@@ -59,6 +59,16 @@ def test_kalshi_cf_benchmarks_value_response():
 
 def test_budget():
     assert quantity_for_budget(Decimal("0.47")) == Decimal("1.63")
+
+def test_gross_take_profit_target_is_fifteen_percent():
+    assert gross_take_profit_target(Decimal("0.40"), Decimal("15")) == Decimal("0.46")
+
+def test_gross_take_profit_target_caps_at_highest_tradable_price():
+    assert gross_take_profit_target(Decimal("0.90"), Decimal("15")) == Decimal("0.99")
+
+def test_gross_take_profit_target_rounds_up_to_market_tick():
+    ranges = [{"start": "0.01", "end": "0.99", "step": "0.01"}]
+    assert gross_take_profit_target(Decimal("0.205"), Decimal("15"), ranges) == Decimal("0.24")
 
 def test_average_open_price_uses_weighted_fills():
     fills = [

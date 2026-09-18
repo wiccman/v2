@@ -81,8 +81,8 @@ def test_manage_exit_places_and_tracks_resting_take_profit(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
     assert record["take_profit_order_id"] == "tp-1"
     assert record["take_profit_quantity"] == "2"
-    assert record["take_profit_target"] == "0.30"
-    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.30"))
+    assert record["take_profit_target"] == "0.23"
+    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.23"))
 
 
 def test_manage_exit_cancels_resting_take_profit_before_stop(monkeypatch):
