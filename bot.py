@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
-from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike
 
 load_dotenv()
 if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "production").lower() != "production":
@@ -23,6 +23,8 @@ PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
 FINAL_START = int(os.getenv("FINAL_ENTRY_START_MINUTE", "12")) * 60
 FINAL_END = int(os.getenv("FINAL_ENTRY_END_MINUTE", "15")) * 60
 FINAL_CONFIDENCE_MIN = Decimal(os.getenv("FINAL_CONFIDENCE_MIN_PERCENT", "65")) / 100
+SPOT_ENTRY_WINDOW = int(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2")) * 60
+SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
 TAKE_PROFIT_RATE = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15")) / 100
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
@@ -119,14 +121,25 @@ def cycle(state):
     now = datetime.now(timezone.utc); market, started, closed = active_market(now)
     if not market: return
     ticker = market["ticker"]; elapsed = (now - started).total_seconds()
-    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "final_entry_attempted": False})
+    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False})
     if "predictions" not in record: record["predictions"] = []
+    if "spot_entry_attempted" not in record: record["spot_entry_attempted"] = False
     if "final_entry_attempted" not in record: record["final_entry_attempted"] = False
     if record["signal"] is None:
         signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
         record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
         write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
     signal = record["signal"]; current = client.market(ticker)
+    if 0 <= elapsed < SPOT_ENTRY_WINDOW and not record["spot_entry_attempted"]:
+        spot = client.btc_spot(); strike = Decimal(str(current["floor_strike"]))
+        if spot_is_above_strike(spot, strike, SPOT_ENTRY_THRESHOLD):
+            ask, _ = quotes(current, "YES")
+            if Decimal("0") < ask <= Decimal("1"):
+                quantity = quantity_for_budget(ask, BUDGET)
+                record["spot_entry_attempted"] = True; save_state(state)
+                result = client.place_entry(ticker, "YES", quantity, ask, started.timestamp() + SPOT_ENTRY_WINDOW)
+                details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
+                write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(ask), quantity=str(quantity), details=json.dumps(details))
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     manage_exit(ticker, current, signal)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
@@ -156,7 +169,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.6.0", flush=True)
+    print("Strike Ruler bot v0.7.0", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
