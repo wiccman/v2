@@ -62,19 +62,25 @@ def average_open_price(fills, outcome_side):
     quantity = Decimal("0")
     cost = Decimal("0")
     for fill in sorted(fills, key=lambda item: item.get("created_time", "")):
-        fill_side = str(fill.get("outcome_side") or fill.get("side") or "").upper()
-        if fill_side != outcome_side:
-            continue
+        fill_side = str(fill.get("outcome_side") or "").upper()
+        if not fill_side:
+            legacy_side = str(fill.get("side") or "").upper()
+            action = str(fill.get("action") or "").lower()
+            if legacy_side in ("YES", "NO") and action == "buy":
+                fill_side = legacy_side
+            elif legacy_side in ("YES", "NO") and action == "sell":
+                fill_side = "NO" if legacy_side == "YES" else "YES"
         count = Decimal(str(fill.get("count_fp") or fill.get("count") or "0"))
-        price_key = "yes_price_dollars" if outcome_side == "YES" else "no_price_dollars"
-        price = Decimal(str(fill.get(price_key) or "0"))
-        action = str(fill.get("action") or "").lower()
-        if count <= 0 or price <= 0:
+        if count <= 0 or fill_side not in ("YES", "NO"):
             continue
-        if action == "buy":
+        if fill_side == outcome_side:
+            price_key = "yes_price_dollars" if outcome_side == "YES" else "no_price_dollars"
+            price = Decimal(str(fill.get(price_key) or "0"))
+            if price <= 0:
+                continue
             quantity += count
             cost += count * price
-        elif action == "sell" and quantity > 0:
+        elif quantity > 0:
             removed = min(count, quantity)
             cost -= (cost / quantity) * removed
             quantity -= removed
