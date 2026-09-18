@@ -63,6 +63,83 @@ def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
     assert record["dual_limit_orders"] == []
 
 
+def test_historical_strike_reaction_uses_approach_side():
+    assert bot.strike_reaction_side(Decimal("99975"), Decimal("100000")) == "NO"
+    assert bot.strike_reaction_side(Decimal("100025"), Decimal("100000")) == "YES"
+    assert bot.strike_reaction_side(Decimal("100000"), Decimal("100000")) is None
+
+
+def test_historical_strike_touch_posts_25_cent_order_for_five_minutes(monkeypatch):
+    fake = DualLimitClient()
+    monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    record = {
+        "historical_strikes": ["100000", "101000", "102000"],
+        "historical_last_spot": "99950",
+        "historical_triggered_strikes": [],
+        "historical_strike_orders": [],
+    }
+    closed = datetime.fromtimestamp(2000, tz=timezone.utc)
+
+    assert bot.place_historical_strike_entries(
+        record, "MARKET", Decimal("99980"), closed, now_timestamp=1000,
+    ) is True
+    assert fake.entries == [("MARKET", "NO", Decimal("3.08"), Decimal("0.25"), 1300)]
+    assert record["historical_triggered_strikes"] == ["100000"]
+    assert record["historical_strike_orders"][0]["strike"] == "100000"
+
+
+class HistoricalExitClient:
+    def __init__(self):
+        self.actions = []
+
+    def orders(self, ticker, status):
+        return []
+
+    def place_take_profit(self, ticker, held, target, expiration_time):
+        self.actions.append((ticker, held, target, expiration_time))
+        return {"order_id": "historical-tp"}
+
+    def cancel(self, order_id):
+        self.actions.append(("cancel", order_id))
+
+    def fills(self, ticker):
+        return [
+            {"order_id": "historical-entry", "count_fp": "3.08"},
+            {"order_id": "historical-tp-old", "count_fp": "1.00"},
+            {"order_id": "regular-entry", "count_fp": "2.00"},
+        ]
+
+
+def test_historical_inventory_reserves_only_unexited_strategy_quantity(monkeypatch):
+    fake = HistoricalExitClient()
+    monkeypatch.setattr(bot, "client", fake)
+    record = {
+        "historical_strike_orders": [{"order_id": "historical-entry", "side": "YES"}],
+        "historical_take_profit_orders": [{"order_id": "historical-tp-old", "side": "YES"}],
+    }
+
+    quantity, excluded, average_entry = bot.historical_inventory(record, "MARKET", Decimal("4.08"))
+    assert quantity == Decimal("2.08")
+    assert excluded == {"historical-entry", "historical-tp-old"}
+    assert average_entry is None
+
+
+def test_historical_strike_fill_gets_ten_cent_exit_from_actual_fill(monkeypatch):
+    fake = HistoricalExitClient()
+    monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    record = {"historical_take_profit_orders": []}
+    closed = datetime.fromtimestamp(2000, tz=timezone.utc)
+
+    assert bot.manage_historical_take_profit(
+        record, "MARKET", Decimal("3.08"), Decimal("3.08"), closed, Decimal("0.24"),
+    ) is True
+    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.34"), 2000.0)]
+    assert record["historical_take_profit_target"] == "0.34"
+    assert record["historical_take_profit_order_id"] == "historical-tp"
+
+
 class RecordingClient(KalshiClient):
     def __init__(self):
         self.calls = []

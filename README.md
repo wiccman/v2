@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.7.9
+# Strike Ruler Kalshi Bot v0.8.0
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -18,6 +18,10 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - At minute 2, independently post one YES limit buy and one NO limit buy at 25 cents, each using the same $0.77 purchase budget.
 - Both 25-cent orders expire exactly five minutes after placement; the bot also cancels any tracked unfilled remainder on its next polling cycle.
 - Filling one side does not cancel the other side. Any resulting open position uses the same 15% take-profit management below.
+- The last three completed KXBTC15M strikes are also watched as BTC support/resistance levels during minutes 2–6.
+- When live BRTI comes within $25 of a prior strike, an approach from below posts a 25-cent NO rejection order; an approach from above posts a 25-cent YES bounce order.
+- Each historical-strike level triggers at most once per current contract, uses the same $0.77 order budget, and expires after five minutes if unfilled.
+- Historical-strike fills reserve their own reduce-only exit 10 cents above their actual weighted-average fill; a 25-cent fill exits at 35 cents while other inventory retains the 15% target.
 - Buy HIGH-confidence signals (all 3 prior settlements on the same side of the strike) when the predicted side costs 10–47 cents.
 - Buy MODERATE 2-of-3 signals only when the predicted side costs 10–30 cents.
 - Entry checks run every 7 seconds from minute 2 until minute 6.
@@ -34,7 +38,7 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - Exit monitoring continues after minute 6; otherwise positions are held through settlement.
 - No daily-loss limit.
 
-Maximum planned entry principal is $8.47 per market before fees: two dual-sided 25-cent entries, one spot-trigger entry, seven regular entries, and one final entry at $0.77 each.
+Maximum planned entry principal is $10.78 per market before fees: three historical-strike entries, two dual-sided 25-cent entries, one spot-trigger entry, seven regular entries, and one final entry at $0.77 each.
 
 ## Railway setup
 
