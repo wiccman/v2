@@ -70,25 +70,58 @@ def position(ticker):
         if item.get("ticker") == ticker: return Decimal(str(item.get("position_fp", "0")))
     return Decimal("0")
 
-def manage_exit(ticker, market, signal):
+def manage_exit(record, ticker, market, signal, closed):
     held = position(ticker)
-    if held == 0: return
+    resting = {item.get("order_id") for item in client.orders(ticker, "resting")}
+    take_profit_order_id = record.get("take_profit_order_id")
+    if held == 0:
+        if take_profit_order_id in resting:
+            client.cancel(take_profit_order_id)
+            write_log("CANCEL_TAKE_PROFIT", ticker, details=take_profit_order_id)
+        changed = any(record.pop(key, None) is not None for key in (
+            "take_profit_order_id", "take_profit_side", "take_profit_quantity", "take_profit_target"
+        ))
+        return changed
     side = "YES" if held > 0 else "NO"; _, bid = quotes(market, side)
     if bid <= STOP:
+        if take_profit_order_id in resting:
+            client.cancel(take_profit_order_id)
+            write_log("CANCEL_TAKE_PROFIT", ticker, prediction=side, details=take_profit_order_id)
+        for key in ("take_profit_order_id", "take_profit_side", "take_profit_quantity", "take_profit_target"):
+            record.pop(key, None)
         result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
         details = {"reason": "STOP", "order": result}
         write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
-        return
+        return True
     average_entry = average_open_price(client.fills(ticker), side)
     if average_entry is None:
         write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
-        return
+        return False
     target = fixed_take_profit_target(average_entry, TAKE_PROFIT_CENTS)
-    if bid >= target:
-        gross_gain = (bid / average_entry - Decimal("1")) * 100
-        result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
-        details = {"reason": "TAKE_PROFIT", "average_entry": str(average_entry), "target": str(target), "take_profit_cents": str(TAKE_PROFIT_CENTS), "gross_gain_percent": str(gross_gain), "order": result}
-        write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
+    quantity = abs(held)
+    current_matches = (
+        take_profit_order_id in resting
+        and record.get("take_profit_side") == side
+        and Decimal(str(record.get("take_profit_quantity", "0"))) == quantity
+        and Decimal(str(record.get("take_profit_target", "-1"))) == target
+    )
+    if current_matches:
+        return False
+    if take_profit_order_id in resting:
+        client.cancel(take_profit_order_id)
+        write_log("CANCEL_TAKE_PROFIT", ticker, prediction=side, details=take_profit_order_id)
+    result = client.place_take_profit(ticker, held, target, closed.timestamp())
+    order_id = result.get("order_id")
+    if not order_id:
+        write_log("TAKE_PROFIT_REJECTED", ticker, prediction=side, price=str(target), quantity=str(quantity), details=json.dumps(result))
+        return False
+    record["take_profit_order_id"] = order_id
+    record["take_profit_side"] = side
+    record["take_profit_quantity"] = str(quantity)
+    record["take_profit_target"] = str(target)
+    details = {"average_entry": str(average_entry), "target": str(target), "take_profit_cents": str(TAKE_PROFIT_CENTS), "order": result}
+    write_log("TAKE_PROFIT_RESTING", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(target), quantity=str(quantity), details=json.dumps(details))
+    return True
 
 def cancel_entries(record, ticker):
     resting = {item.get("order_id") for item in client.orders(ticker, "resting")}
@@ -141,7 +174,7 @@ def cycle(state):
                 details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
                 write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(ask), quantity=str(quantity), details=json.dumps(details))
     if update_prediction(record, ticker, current, elapsed): save_state(state)
-    manage_exit(ticker, current, signal)
+    if manage_exit(record, ticker, current, signal, closed): save_state(state)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
     can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") == "HIGH" and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
@@ -169,7 +202,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.4", flush=True)
+    print("Strike Ruler bot v0.7.5", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)

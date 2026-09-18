@@ -122,5 +122,21 @@ class KalshiClient:
             return self._order(ticker, "bid", abs(signed_quantity), yes_ask, reduce_only=True, ioc=True)
         return {}
 
+    def place_take_profit(self, ticker, signed_quantity, outcome_price, expiration_time=None):
+        """Place a resting reduce-only exit for the held outcome side."""
+        signed_quantity = Decimal(signed_quantity)
+        outcome_price = Decimal(outcome_price)
+        if signed_quantity > 0:
+            return self._order(
+                ticker, "ask", signed_quantity, outcome_price,
+                reduce_only=True, expiration_time=expiration_time,
+            )
+        if signed_quantity < 0:
+            return self._order(
+                ticker, "bid", abs(signed_quantity), Decimal("1") - outcome_price,
+                reduce_only=True, expiration_time=expiration_time,
+            )
+        return {}
+
     def cancel(self, order_id):
         return self.request("DELETE", "/portfolio/events/orders/" + order_id, auth=True)
