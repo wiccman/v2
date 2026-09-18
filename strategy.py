@@ -29,6 +29,12 @@ def strike_ruler(points, absolute_gap_average):
     confidence = "HIGH" if below == 3 or above == 3 else "MODERATE"
     return Signal(prediction, confidence, gaps, False)
 
+def live_confidence(predicted_side_ask):
+    price = Decimal(str(predicted_side_ask))
+    if price < 0 or price > 1:
+        raise ValueError("Kalshi contract price must be between 0 and 1")
+    return f"{(price * 100).quantize(Decimal('0.1'))}%"
+
 def quantity_for_budget(price, budget=Decimal("0.77")):
     price = Decimal(str(price))
     if price <= 0:
