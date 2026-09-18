@@ -28,6 +28,9 @@ SPOT_ENTRY_WINDOW = seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", 
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
 TAKE_PROFIT_PERCENT = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15"))
 TAKE_PROFIT_RETRY_SECONDS = int(os.getenv("TAKE_PROFIT_RETRY_SECONDS", "60"))
+DUAL_LIMIT_BUYS_ENABLED = os.getenv("DUAL_LIMIT_BUYS_ENABLED", "true").lower() == "true"
+DUAL_LIMIT_PRICE = Decimal(os.getenv("DUAL_LIMIT_PRICE_CENTS", "25")) / 100
+DUAL_LIMIT_TTL_SECONDS = int(os.getenv("DUAL_LIMIT_TTL_SECONDS", "300"))
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
 STATE = Path(os.getenv("STATE_PATH", "/data/state.json"))
 LOG = Path(os.getenv("LOG_PATH", "/data/trades.csv"))
@@ -157,6 +160,49 @@ def cancel_entries(record, ticker):
         if order_id in resting: client.cancel(order_id); write_log("CANCEL_ENTRY", ticker, details=order_id)
         record["orders"].remove(order_id)
 
+def place_dual_limit_buys(record, ticker, closed, now_timestamp=None):
+    """Post one fixed-price YES bid and one fixed-price NO bid for five minutes."""
+    now_timestamp = time.time() if now_timestamp is None else float(now_timestamp)
+    cancel_at = min(now_timestamp + DUAL_LIMIT_TTL_SECONDS, closed.timestamp())
+    quantity = quantity_for_budget(DUAL_LIMIT_PRICE, BUDGET)
+    record["dual_limit_cancel_at"] = cancel_at
+    record.setdefault("dual_limit_orders", [])
+    changed = True
+    for side in ("YES", "NO"):
+        try:
+            result = client.place_entry(ticker, side, quantity, DUAL_LIMIT_PRICE, cancel_at)
+        except Exception as error:
+            write_log(
+                "DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(DUAL_LIMIT_PRICE),
+                quantity=str(quantity), details=repr(error),
+            )
+            continue
+        order_id = result.get("order_id")
+        if order_id:
+            record["dual_limit_orders"].append(order_id)
+        details = {"cancel_at": cancel_at, "order": result}
+        write_log(
+            "DUAL_LIMIT_RESTING", ticker, prediction=side, price=str(DUAL_LIMIT_PRICE),
+            quantity=str(quantity), details=json.dumps(details),
+        )
+    return changed
+
+def cancel_expired_dual_limits(record, ticker, now_timestamp=None):
+    order_ids = list(record.get("dual_limit_orders", []))
+    if not order_ids:
+        return False
+    now_timestamp = time.time() if now_timestamp is None else float(now_timestamp)
+    if now_timestamp < float(record.get("dual_limit_cancel_at", 0)):
+        return False
+    resting = {item.get("order_id") for item in client.orders(ticker, "resting")}
+    for order_id in order_ids:
+        if order_id in resting:
+            client.cancel(order_id)
+            write_log("CANCEL_DUAL_LIMIT", ticker, details=order_id)
+    record["dual_limit_orders"] = []
+    record["dual_limit_cancelled"] = True
+    return True
+
 def update_prediction(record, ticker, current, elapsed):
     completed = len(record["predictions"])
     if completed >= len(PREDICTION_SECONDS) or elapsed < PREDICTION_SECONDS[completed]:
@@ -182,15 +228,21 @@ def cycle(state):
     now = datetime.now(timezone.utc); market, started, closed = active_market(now)
     if not market: return
     ticker = market["ticker"]; elapsed = (now - started).total_seconds()
-    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False})
+    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": []})
     if "predictions" not in record: record["predictions"] = []
     if "spot_entry_attempted" not in record: record["spot_entry_attempted"] = False
     if "final_entry_attempted" not in record: record["final_entry_attempted"] = False
+    if "dual_limit_attempted" not in record: record["dual_limit_attempted"] = False
+    if "dual_limit_orders" not in record: record["dual_limit_orders"] = []
     if record["signal"] is None:
         signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
         record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
         write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
     signal = record["signal"]; current = client.market(ticker)
+    if DUAL_LIMIT_BUYS_ENABLED and START <= elapsed < END and not record["dual_limit_attempted"]:
+        record["dual_limit_attempted"] = True
+        save_state(state)
+        if place_dual_limit_buys(record, ticker, closed): save_state(state)
     if 0 <= elapsed < SPOT_ENTRY_WINDOW and not record["spot_entry_attempted"]:
         spot = client.btc_reference_price(); strike = Decimal(str(current["floor_strike"]))
         if spot_is_above_strike(spot, strike, SPOT_ENTRY_THRESHOLD):
@@ -203,6 +255,7 @@ def cycle(state):
                 write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(ask), quantity=str(quantity), details=json.dumps(details))
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     if manage_exit(record, ticker, current, signal, closed): save_state(state)
+    if cancel_expired_dual_limits(record, ticker): save_state(state)
     if elapsed >= END and record["orders"]: cancel_entries(record, ticker); save_state(state)
     can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
@@ -230,7 +283,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.8", flush=True)
+    print("Strike Ruler bot v0.7.9", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)

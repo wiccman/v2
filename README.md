@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.7.8
+# Strike Ruler Kalshi Bot v0.7.9
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -15,6 +15,9 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - If the Kalshi account lacks CF Benchmarks passthrough access, no spot-trigger order is placed and the API error is logged.
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
+- At minute 2, independently post one YES limit buy and one NO limit buy at 25 cents, each using the same $0.77 purchase budget.
+- Both 25-cent orders expire exactly five minutes after placement; the bot also cancels any tracked unfilled remainder on its next polling cycle.
+- Filling one side does not cancel the other side. Any resulting open position uses the same 15% take-profit management below.
 - Buy HIGH-confidence signals (all 3 prior settlements on the same side of the strike) when the predicted side costs 10–47 cents.
 - Buy MODERATE 2-of-3 signals only when the predicted side costs 10–30 cents.
 - Entry checks run every 7 seconds from minute 2 until minute 6.
@@ -31,7 +34,7 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 - Exit monitoring continues after minute 6; otherwise positions are held through settlement.
 - No daily-loss limit.
 
-Maximum planned entry principal is $6.93 per market before fees: one spot-trigger entry, seven regular entries, and one final entry at $0.77 each.
+Maximum planned entry principal is $8.47 per market before fees: two dual-sided 25-cent entries, one spot-trigger entry, seven regular entries, and one final entry at $0.77 each.
 
 ## Railway setup
 

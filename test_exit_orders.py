@@ -12,6 +12,57 @@ def test_entry_price_caps_depend_on_base_confidence():
     assert bot.entry_price_allowed("MODERATE", Decimal("0.31")) is False
 
 
+class DualLimitClient:
+    def __init__(self):
+        self.entries = []
+        self.resting = []
+        self.cancelled = []
+
+    def place_entry(self, ticker, side, quantity, price, expiration_time):
+        order_id = f"dual-{side.lower()}"
+        self.entries.append((ticker, side, quantity, price, expiration_time))
+        self.resting.append({"order_id": order_id})
+        return {"order_id": order_id}
+
+    def orders(self, ticker, status):
+        return list(self.resting)
+
+    def cancel(self, order_id):
+        self.cancelled.append(order_id)
+
+
+def test_dual_limit_buys_post_both_sides_at_25_cents_for_five_minutes(monkeypatch):
+    fake = DualLimitClient()
+    monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    record = {"dual_limit_orders": []}
+    closed = datetime.fromtimestamp(2000, tz=timezone.utc)
+
+    assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000) is True
+    assert [entry[1] for entry in fake.entries] == ["YES", "NO"]
+    assert all(entry[2] == Decimal("3.08") for entry in fake.entries)
+    assert all(entry[3] == Decimal("0.25") for entry in fake.entries)
+    assert all(entry[4] == 1300 for entry in fake.entries)
+    assert record["dual_limit_orders"] == ["dual-yes", "dual-no"]
+
+
+def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
+    fake = DualLimitClient()
+    monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    record = {
+        "dual_limit_orders": ["dual-yes", "dual-no"],
+        "dual_limit_cancel_at": 1300,
+    }
+    fake.resting = [{"order_id": "dual-yes"}, {"order_id": "dual-no"}]
+
+    assert bot.cancel_expired_dual_limits(record, "MARKET", now_timestamp=1299) is False
+    assert fake.cancelled == []
+    assert bot.cancel_expired_dual_limits(record, "MARKET", now_timestamp=1300) is True
+    assert fake.cancelled == ["dual-yes", "dual-no"]
+    assert record["dual_limit_orders"] == []
+
+
 class RecordingClient(KalshiClient):
     def __init__(self):
         self.calls = []
