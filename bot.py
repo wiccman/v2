@@ -28,8 +28,8 @@ SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
 TAKE_PROFIT_RATE = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15")) / 100
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
-STATE = Path(os.getenv("STATE_PATH", "data/state.json"))
-LOG = Path(os.getenv("LOG_PATH", "data/trades.csv"))
+STATE = Path(os.getenv("STATE_PATH", "/data/state.json"))
+LOG = Path(os.getenv("LOG_PATH", "/data/trades.csv"))
 client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""), os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""))
 
 def parse_time(value): return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -169,7 +169,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.2", flush=True)
+    print("Strike Ruler bot v0.7.3", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
