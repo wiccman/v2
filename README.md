@@ -1,14 +1,16 @@
-# Strike Ruler Kalshi Bot v0.2
+# Strike Ruler Kalshi Bot v0.3
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
 ## Locked execution rules
 
-- HIGH-confidence Strike Ruler signal only.
+- Strike Ruler relative-position majority: 2–3 prior settlements below the current strike predicts YES; 2–3 above predicts NO.
+- Three-of-three agreement is HIGH confidence; two-of-three is MODERATE, and both are eligible.
+- Gap average is observational only and never flips a prediction.
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
 - Buy only when the predicted side costs 10–47 cents.
-- Entries run from minute 2 until minute 6; unfilled entries expire and are canceled at minute 6.
+- Entries run from minute 2 until minute 6 and are checked every 7 seconds; unfilled entries expire and are canceled at minute 6.
 - Sell the maximum held position at 4 cents or lower or 96 cents or higher.
 - Otherwise hold through settlement.
 - No daily-loss limit.
