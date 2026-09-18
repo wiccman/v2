@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
-from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike
+from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, fixed_take_profit_target
 
 load_dotenv()
 if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "production").lower() != "production":
@@ -16,17 +16,17 @@ ENTRY_MAX = Decimal(os.getenv("ENTRY_MAX_CENTS", "47")) / 100
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
-START = int(os.getenv("ENTRY_START_MINUTE", "2")) * 60
-END = int(os.getenv("ENTRY_END_MINUTE", "6")) * 60
+START = seconds_from_minutes(os.getenv("ENTRY_START_MINUTE", "2"))
+END = seconds_from_minutes(os.getenv("ENTRY_END_MINUTE", "6"))
 PREDICTION_MINUTES = tuple(int(x.strip()) for x in os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6").split(",") if x.strip())
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
-FINAL_START = int(os.getenv("FINAL_ENTRY_START_MINUTE", "12")) * 60
-FINAL_END = int(os.getenv("FINAL_ENTRY_END_MINUTE", "15")) * 60
+FINAL_START = seconds_from_minutes(os.getenv("FINAL_ENTRY_START_MINUTE", "12"))
+FINAL_END = seconds_from_minutes(os.getenv("FINAL_ENTRY_END_MINUTE", "15"))
 FINAL_CONFIDENCE_MIN = Decimal(os.getenv("FINAL_CONFIDENCE_MIN_PERCENT", "65")) / 100
-SPOT_ENTRY_WINDOW = int(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2")) * 60
+SPOT_ENTRY_WINDOW = seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2"))
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
 STOP = Decimal(os.getenv("STOP_EXIT_CENTS", "4")) / 100
-TAKE_PROFIT_RATE = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15")) / 100
+TAKE_PROFIT_CENTS = Decimal(os.getenv("TAKE_PROFIT_CENTS", "10"))
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
 STATE = Path(os.getenv("STATE_PATH", "/data/state.json"))
 LOG = Path(os.getenv("LOG_PATH", "/data/trades.csv"))
@@ -83,11 +83,11 @@ def manage_exit(ticker, market, signal):
     if average_entry is None:
         write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
         return
-    target = min(Decimal("1"), average_entry * (Decimal("1") + TAKE_PROFIT_RATE))
+    target = fixed_take_profit_target(average_entry, TAKE_PROFIT_CENTS)
     if bid >= target:
         gross_gain = (bid / average_entry - Decimal("1")) * 100
         result = client.close_position(ticker, held, Decimal(market["yes_bid_dollars"]), Decimal(market["yes_ask_dollars"]))
-        details = {"reason": "TAKE_PROFIT", "average_entry": str(average_entry), "target": str(target), "gross_gain_percent": str(gross_gain), "order": result}
+        details = {"reason": "TAKE_PROFIT", "average_entry": str(average_entry), "target": str(target), "take_profit_cents": str(TAKE_PROFIT_CENTS), "gross_gain_percent": str(gross_gain), "order": result}
         write_log("SELL_MAX", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(bid), quantity=str(abs(held)), details=json.dumps(details))
 
 def cancel_entries(record, ticker):
@@ -169,7 +169,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.7.3", flush=True)
+    print("Strike Ruler bot v0.7.4", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
