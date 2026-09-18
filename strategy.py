@@ -10,20 +10,27 @@ class Signal:
 
 def strike_ruler(points, absolute_gap_average):
     p = tuple(Decimal(str(x)) for x in points)
-    moves = (p[1]-p[0], p[2]-p[1], p[3]-p[2])
-    newest = moves[-1]
-    if newest == 0:
-        return Signal("SKIP", "NONE", moves, False)
-    raw = "YES" if newest > 0 else "NO"
-    flipped = abs(newest) > Decimal(str(absolute_gap_average))
-    prediction = ("NO" if raw == "YES" else "YES") if flipped else raw
-    signs = [1 if m > 0 else -1 if m < 0 else 0 for m in moves]
-    confidence = "HIGH" if len(set(signs)) == 1 and not flipped else "MODERATE"
-    return Signal(prediction, confidence, moves, flipped)
+    if len(p) != 4:
+        raise ValueError("strike_ruler requires three completed prices and the current strike")
+
+    prior_prices = p[:3]
+    strike = p[3]
+    gaps = tuple(price - strike for price in prior_prices)
+    below = sum(price < strike for price in prior_prices)
+    above = sum(price > strike for price in prior_prices)
+
+    if below >= 2:
+        prediction = "YES"
+    elif above >= 2:
+        prediction = "NO"
+    else:
+        return Signal("SKIP", "NONE", gaps, False)
+
+    confidence = "HIGH" if below == 3 or above == 3 else "MODERATE"
+    return Signal(prediction, confidence, gaps, False)
 
 def quantity_for_budget(price, budget=Decimal("0.77")):
     price = Decimal(str(price))
     if price <= 0:
         raise ValueError("price must be positive")
     return (Decimal(str(budget))/price).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
-
