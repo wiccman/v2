@@ -135,6 +135,8 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
     target = gross_take_profit_target(average_entry, TAKE_PROFIT_PERCENT, market.get("price_ranges"))
     current_matches = (
         take_profit_order_id in resting
+        # Older records may report the allocation while the order used all holdings.
+        and record.get("take_profit_sizing_version") == 1
         and record.get("take_profit_side") == side
         and Decimal(str(record.get("take_profit_quantity", "0"))) == quantity
         and Decimal(str(record.get("take_profit_target", "-1"))) == target
@@ -151,8 +153,9 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
     if take_profit_order_id in resting:
         client.cancel(take_profit_order_id)
         write_log("CANCEL_TAKE_PROFIT", ticker, prediction=side, details=take_profit_order_id)
+    signed_quantity = quantity if side == "YES" else -quantity
     try:
-        result = client.place_take_profit(ticker, held, target, closed.timestamp())
+        result = client.place_take_profit(ticker, signed_quantity, target, closed.timestamp())
     except Exception as error:
         record["take_profit_rejected_side"] = side
         record["take_profit_rejected_quantity"] = str(quantity)
@@ -172,6 +175,7 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
         write_log("TAKE_PROFIT_REJECTED", ticker, prediction=side, price=str(target), quantity=str(quantity), details=json.dumps(result))
         return True
     record["take_profit_order_id"] = order_id
+    record["take_profit_sizing_version"] = 1
     record["take_profit_side"] = side
     record["take_profit_quantity"] = str(quantity)
     record["take_profit_target"] = str(target)
@@ -492,7 +496,7 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.8.0", flush=True)
+    print("Strike Ruler bot v0.8.1", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
