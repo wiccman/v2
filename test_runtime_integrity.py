@@ -183,3 +183,23 @@ def test_damaged_market_reservations_cannot_restore_allowance(monkeypatch, tmp_p
     monkeypatch.setattr(bot, 'STATE', path)
     with pytest.raises(ValueError, match='STATE_INVALID'):
         bot.load_state()
+
+
+def test_opening_bias_posts_one_side_at_52_and_cancels_at_two_minutes(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    monkeypatch.setattr(bot, "DUAL_LIMIT_BUYS_ENABLED", False)
+    monkeypatch.setattr(bot, "HISTORICAL_STRIKE_ENABLED", False)
+    monkeypatch.setattr(bot, "SPOT_ENTRY_WINDOW", 0)
+    monkeypatch.setattr(bot, "START", 120)
+    monkeypatch.setattr(bot, "OPENING_BIAS_ENABLED", True)
+    bot.cycle(state)
+    assert len(fake.entries) == 1
+    side, quantity, price, options = fake.entries[0]
+    assert side == "bid" and price == D("0.52")
+    assert options["expiration_time"] == 1000000120
+    intent = record["entry_intents"][0]
+    assert intent["kind"] == "opening_bias" and intent["exit_target"] == "0.6"
+    order_id = record["orders"][0]
+    bot.reconcile_entries(state, now_timestamp=1000000120)
+    assert fake.cancelled == [order_id]
+    assert intent["entry_closed"] is True
