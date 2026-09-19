@@ -46,16 +46,12 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
         if not quantity.is_finite() or quantity <= 0:
             raise ValueError("Invalid fill quantity")
         # Kalshi's REST payload has used both lowercase and uppercase enums.
-        # Normalize before deriving the net YES-position direction.
+        # `book_side` is the side of this account's order and maps directly to
+        # net YES inventory: bid adds YES inventory, ask adds NO inventory.
+        # The outcome/action fields describe the contract trade but are not a
+        # reliable substitute for that mapping, especially for NO contracts.
         book_side = str(fill.get("book_side", "")).lower()
-        side = str(fill.get("outcome_side") or fill.get("side") or "").lower()
-        action = str(fill.get("action", "")).lower()
-        outcome_sign = {"yes": 1, "no": -1}.get(side)
-        action_sign = {"buy": 1, "sell": -1}.get(action)
-        position_sign = outcome_sign * action_sign if outcome_sign and action_sign else None
-        # The action/outcome pair is the account's change in YES inventory.
-        # book_side describes the book quote and can be the opposite side of a sell.
-        sign = position_sign if position_sign is not None else {"bid": 1, "ask": -1}.get(book_side)
+        sign = {"bid": 1, "ask": -1}.get(book_side)
         if sign is None:
             fields = {name: fill.get(name) for name in ("book_side", "outcome_side", "side", "action", "order_id") if name in fill}
             raise ValueError(f"Fill direction unavailable: {fields}")
@@ -111,4 +107,3 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
     for lot in lots:
         buckets[lot["target"]] = buckets.get(lot["target"], D(0)) + lot["quantity"] * lot["sign"]
     return dict(sorted(buckets.items()))
-
