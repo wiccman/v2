@@ -7,6 +7,7 @@ from kalshi import KalshiClient, KalshiAPIError
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
 from market_maker import MarketMaker
 from take_profit import TakeProfitMonitor
+from price_pairs import parse_pairs
 from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
 
 load_dotenv()
@@ -17,15 +18,9 @@ ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY not in ("strike_ruler", "market_making"):
     raise SystemExit("EXECUTION_STRATEGY must be strike_ruler or market_making")
-# Absolute outcome prices shared by every Strike Ruler entry/exit route.
-# Older percentage, price-range and per-route settings no longer set prices.
-ENTRY_PRICE = Decimal(os.getenv("ENTRY_PRICE_CENTS", "25")) / 100
-EXIT_PRICE = Decimal(os.getenv("EXIT_PRICE_CENTS", "45")) / 100
-if not all(p.is_finite() and Decimal("0.01") <= p <= Decimal("0.99")
-           and p * 100 == (p * 100).to_integral_value() for p in (ENTRY_PRICE, EXIT_PRICE)):
-    raise SystemExit("ENTRY_PRICE_CENTS and EXIT_PRICE_CENTS must be whole cents from 1 to 99")
-if EXIT_PRICE <= ENTRY_PRICE:
-    raise SystemExit("EXIT_PRICE_CENTS must exceed ENTRY_PRICE_CENTS")
+ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "25:31,39:46"))
+# Compatibility values for the retired synchronous single-tier helpers only.
+ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 360
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
@@ -104,7 +99,7 @@ def position(ticker):
     return Decimal("0")
 
 def entry_price_allowed(base_confidence, price):
-    return base_confidence in ("HIGH", "MODERATE") and Decimal(str(price)) == ENTRY_PRICE
+    return base_confidence in ("HIGH", "MODERATE") and Decimal(str(price)) in ENTRY_EXIT_PAIRS
 
 def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decimal("0"), excluded_order_ids=None):
     held = position(ticker)
@@ -216,22 +211,24 @@ def cancellation_deadline(closed):
     return closed.timestamp() - 900 + CANCEL_AFTER
 
 
-def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None):
+def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None):
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Independent exit monitor is not healthy")
         return {}, Decimal("0")
-    if Decimal(str(price)) != ENTRY_PRICE:
-        raise ValueError("Entry price must match the configured fixed entry limit")
-    if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) != ENTRY_PRICE
+    if Decimal(str(price)) not in ENTRY_EXIT_PAIRS:
+        raise ValueError("Entry price must match a configured fixed entry limit")
+    if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) not in ENTRY_EXIT_PAIRS
            for i in record.get("entry_intents", [])):
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     cutoff = min(entry_deadline(closed), submit_before or entry_deadline(closed))
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
-    intent = reserve_entry(record, side, price, BUDGET, MARKET_BUDGET, cancellation_deadline(closed), kind)
+    intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
+                           MARKET_BUDGET, cancellation_deadline(closed), kind)
     if intent is None:
         return {}, Decimal("0")
+    intent["exit_target"] = str(ENTRY_EXIT_PAIRS[Decimal(str(price))])
     save_state(state)  # Persist allowance and client ID before any exchange request.
     quantity = Decimal(intent["quantity"])
     try:
@@ -254,6 +251,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         "kind": kind, "client_id": intent["client_id"], "cancel_at": intent["cancel_at"],
     }))
     return result, quantity
+
+
+def paired_entries(record, state, ticker, side, closed, kind, now_timestamp=None, submit_before=None):
+    """Split the existing per-trigger principal across both levels, not double it."""
+    for price in ENTRY_EXIT_PAIRS:
+        result, quantity = funded_entry(record, state, ticker, side, price, closed, kind,
+            now_timestamp, submit_before, order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
+        yield price, result, quantity
 
 
 def reconcile_entries(state, now_timestamp=None):
@@ -295,7 +300,7 @@ def reconcile_entries(state, now_timestamp=None):
                 # On a price-policy upgrade, cancel tracked incompatible buys
                 # immediately; keep their spending reservations across restarts.
                 ids = {i["order_id"] for i in pending if i.get("order_id")
-                       and Decimal(str(i.get("price", "-1"))) != ENTRY_PRICE}
+                       and Decimal(str(i.get("price", "-1"))) not in ENTRY_EXIT_PAIRS}
             else:
                 ids = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
                 ids |= {i["order_id"] for i in pending if i.get("order_id")}
@@ -325,23 +330,20 @@ def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state):
     record.setdefault("dual_limit_orders", [])
     changed = True
     for side in ("YES", "NO"):
-        quantity = Decimal("0")
-        try:
-            result, quantity = funded_entry(record, state, ticker, side, ENTRY_PRICE, closed, "dual", now_timestamp)
-        except Exception as error:
-            write_log(
-                "DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(ENTRY_PRICE),
-                quantity=str(quantity), details=repr(error),
-            )
-            continue
-        order_id = result.get("order_id")
-        if order_id:
-            record["dual_limit_orders"].append(order_id)
-        details = {"cancel_at": cancel_at, "order": result}
-        write_log(
-            "DUAL_LIMIT_RESTING", ticker, prediction=side, price=str(ENTRY_PRICE),
-            quantity=str(quantity), details=json.dumps(details),
-        )
+        for price in ENTRY_EXIT_PAIRS:
+            quantity = Decimal("0")
+            try:
+                result, quantity = funded_entry(record, state, ticker, side, price, closed, "dual", now_timestamp,
+                    order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
+            except Exception as error:
+                write_log("DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(price),
+                          quantity=str(quantity), details=repr(error))
+                continue
+            order_id = result.get("order_id")
+            if order_id:
+                record["dual_limit_orders"].append(order_id)
+                write_log("DUAL_LIMIT_RESTING", ticker, prediction=side, price=str(price),
+                    quantity=str(quantity), details=json.dumps({"cancel_at": cancel_at, "order": result}))
     return changed
 
 def cancel_expired_dual_limits(record, ticker, now_timestamp=None):
@@ -387,35 +389,37 @@ def place_historical_strike_entries(record, ticker, spot, closed, now_timestamp=
         triggered.add(strike_key)
         record["historical_triggered_strikes"] = sorted(triggered)
         cancel_at = cancellation_deadline(closed)
-        quantity = Decimal("0")
-        order_record = {
-            "strike": strike_key, "side": side, "quantity": str(quantity),
-            "entry_price": str(ENTRY_PRICE), "cancel_at": cancel_at,
-        }
-        try:
-            result, quantity = funded_entry(record, state, ticker, side, ENTRY_PRICE, closed, "historical", now_timestamp)
-            order_record["quantity"] = str(quantity)
-        except Exception as error:
-            order_record["rejected"] = repr(error)
+        for price in ENTRY_EXIT_PAIRS:
+            quantity = Decimal("0")
+            order_record = {
+                "strike": strike_key, "side": side, "quantity": str(quantity),
+                "entry_price": str(price), "exit_target": str(ENTRY_EXIT_PAIRS[price]), "cancel_at": cancel_at,
+            }
+            try:
+                result, quantity = funded_entry(record, state, ticker, side, price, closed, "historical", now_timestamp,
+                    order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
+                order_record["quantity"] = str(quantity)
+            except Exception as error:
+                order_record["rejected"] = repr(error)
+                record["historical_strike_orders"].append(order_record)
+                write_log(
+                    "HISTORICAL_STRIKE_REJECTED", ticker, prediction=side,
+                    price=str(price), quantity=str(quantity),
+                    details=json.dumps(order_record),
+                )
+                changed = True
+                continue
+            order_id = result.get("order_id")
+            if order_id:
+                order_record["order_id"] = order_id
             record["historical_strike_orders"].append(order_record)
+            details = {**order_record, "spot": str(spot), "order": result}
             write_log(
-                "HISTORICAL_STRIKE_REJECTED", ticker, prediction=side,
-                price=str(ENTRY_PRICE), quantity=str(quantity),
-                details=json.dumps(order_record),
+                "HISTORICAL_STRIKE_RESTING", ticker, prediction=side,
+                price=str(price), quantity=str(quantity),
+                details=json.dumps(details),
             )
             changed = True
-            continue
-        order_id = result.get("order_id")
-        if order_id:
-            order_record["order_id"] = order_id
-        record["historical_strike_orders"].append(order_record)
-        details = {**order_record, "spot": str(spot), "order": result}
-        write_log(
-            "HISTORICAL_STRIKE_RESTING", ticker, prediction=side,
-            price=str(ENTRY_PRICE), quantity=str(quantity),
-            details=json.dumps(details),
-        )
-        changed = True
     return changed
 
 def cancel_expired_historical_entries(record, ticker, now_timestamp=None):
@@ -529,6 +533,9 @@ def update_prediction(record, ticker, current, elapsed):
 
 def cycle(state):
     reconcile_entries(state)
+    if EXIT_MONITOR is None:
+        write_log("ENTRY_WAIT_TAKE_PROFIT", details="Start the paired exit monitor before the entry loop")
+        return
     now = datetime.now(timezone.utc); market, started, closed = active_market(now)
     if not market: return
     ticker = market["ticker"]; elapsed = (now - started).total_seconds()
@@ -586,32 +593,27 @@ def cycle(state):
             ask, _ = quotes(current, "YES")
             if Decimal("0") < ask <= Decimal("1"):
                 record["spot_entry_attempted"] = True; save_state(state)
-                result, quantity = funded_entry(record, state, ticker, "YES", ENTRY_PRICE, closed, "spot", submit_before=started.timestamp() + SPOT_ENTRY_WINDOW)
-                if result.get("order_id"): record["orders"].append(result["order_id"])
-                save_state(state)
-                details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
-                write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(ENTRY_PRICE), quantity=str(quantity), details=json.dumps(details))
+                for price, result, quantity in paired_entries(record, state, ticker, "YES", closed, "spot", submit_before=started.timestamp() + SPOT_ENTRY_WINDOW):
+                    if result.get("order_id"): record["orders"].append(result["order_id"])
+                    save_state(state)
+                    details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
+                    write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(price), quantity=str(quantity), details=json.dumps(details))
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     reconcile_entries(state)
-    # Production exits have one independent owner. The synchronous path remains
-    # for callers that explicitly invoke cycle() without starting the service.
-    if EXIT_MONITOR is None:
-        held = position(ticker)
-        historical_quantity, historical_order_ids, historical_average_entry = historical_inventory(record, ticker, held)
-        if manage_exit(record, ticker, current, signal, closed, historical_quantity, historical_order_ids): save_state(state)
-        held = position(ticker)
-        historical_quantity, _, historical_average_entry = historical_inventory(record, ticker, held)
-        if manage_historical_take_profit(record, ticker, held, historical_quantity, closed, historical_average_entry): save_state(state)
+    # Only the independent paired monitor owns exits. Never fall back to a
+    # single-price exit path when both entry tiers can hold inventory.
     can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
-        if entry_price_allowed(signal.get("base_confidence"), ENTRY_PRICE):
-            result, quantity = funded_entry(record, state, ticker, signal["prediction"], ENTRY_PRICE, closed, "regular")
-            if not result:
-                return
-            if result.get("order_id"): record["orders"].append(result["order_id"])
-            record["buys"] += 1; record["last_buy"] = time.time()
-            write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(ENTRY_PRICE), quantity=str(quantity), details=f"purchase {record['buys']} of {MAX_BUYS}"); save_state(state)
+        counted = False
+        for price, result, quantity in paired_entries(record, state, ticker, signal["prediction"], closed, "regular"):
+            if result.get("order_id"):
+                if not counted:
+                    record["buys"] += 1; record["last_buy"] = time.time()
+                    counted = True
+                record["orders"].append(result["order_id"])
+                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"paired purchase {record['buys']} of {MAX_BUYS}")
+                save_state(state)
 
 def check():
     balance = client.balance(); markets = client.markets(series_ticker="KXBTC15M", status="open", limit=1)
@@ -622,7 +624,7 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
-    print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; fixed entry={ENTRY_PRICE * 100:g}c; fixed exit={EXIT_PRICE * 100:g}c", flush=True)
+    print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
@@ -656,10 +658,10 @@ def main():
             exit_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
                 os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
             EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
-                STATE.with_name(STATE.stem + "_take_profit.json"), target=EXIT_PRICE,
+                STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ENTRY_EXIT_PAIRS,
                 poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
             EXIT_MONITOR.start()
-            print(f"TP_MONITOR_STARTED target={EXIT_PRICE * 100:g}c; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
+            print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)

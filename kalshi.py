@@ -128,6 +128,21 @@ class KalshiClient:
             params["ticker"] = ticker if ticker else {"limit": 100}
         return self.request("GET", "/portfolio/fills", params=params, auth=True).get("fills", [])
 
+    def all_fills(self, ticker):
+        """Complete primary-account history for paired inventory reconciliation."""
+        params = {"ticker": ticker, "limit": 1000, "subaccount": 0}
+        found, cursors = [], set()
+        while True:
+            result = self.request("GET", "/portfolio/fills", params=params, auth=True)
+            found.extend(result["fills"])
+            cursor = result.get("cursor")
+            if not cursor:
+                return found
+            if cursor in cursors:
+                raise RuntimeError("Fill pagination cursor repeated")
+            cursors.add(cursor)
+            params["cursor"] = cursor
+
     def orders(self, ticker=None, status="resting"):
         return self.all_orders(ticker, status)
 

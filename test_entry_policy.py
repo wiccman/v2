@@ -34,7 +34,7 @@ def test_all_entry_routes_share_five_dollars_and_restart_does_not_refund(monkeyp
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
     assert D("4.99") < spent <= D("5")
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("5")
-    assert len(fake.entries) == 3
+    assert len(fake.entries) == 4
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
@@ -68,7 +68,7 @@ def test_cancellation_uses_six_minute_market_boundary(monkeypatch, elapsed):
     bot.cycle(state)
     assert fake.cancelled == (["buy"] if elapsed >= 360 else [])
     assert not fake.entries
-    assert len(fake.exits) == 2
+    assert fake.exits == []  # Exits are owned by the independent worker.
 
 
 def test_cancel_error_does_not_skip_other_orders_or_exits_and_retries(monkeypatch):
@@ -84,7 +84,7 @@ def test_cancel_error_does_not_skip_other_orders_or_exits_and_retries(monkeypatc
     bot.cycle(state)
     assert record["orders"] == ["a-failed"]
     assert fake.cancelled == ["b-success"]
-    assert len(fake.exits) == 2
+    assert fake.exits == []  # Exits are owned by the independent worker.
     monkeypatch.setattr(fake, "cancel", cancel)
     bot.reconcile_entries(state)
     assert record["orders"] == []
@@ -130,7 +130,7 @@ def test_upgrade_never_assumes_existing_market_has_full_budget(monkeypatch):
     assert record["entry_budget_legacy"] is True
     assert not fake.entries
     assert fake.cancelled == ["legacy"]
-    assert len(fake.exits) == 2
+    assert fake.exits == []  # Exits are owned by the independent worker.
 
 
 def test_wire_uses_routed_cancel_and_separate_submit_deadline(monkeypatch):
@@ -179,3 +179,4 @@ def test_mm_cap_survives_cancellation_and_does_not_block_exits():
     assert len(fake.batches) == 1  # A second $2.80 reservation would exceed $5.
     mm._place(record, state, "M", [("ask", D("0.35"), D("1"), True)], 2000)
     assert len(fake.batches) == 2
+

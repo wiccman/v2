@@ -20,7 +20,7 @@ class CycleClient(KalshiClient):
 
     def market(self, ticker):
         return {"ticker": ticker, "floor_strike": "100000",
-                "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45",
+                "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.31",
                 "no_ask_dollars": "0.66", "no_bid_dollars": "0.65"}
 
     def _order(self, ticker, side, quantity, price, **kwargs):
@@ -60,6 +60,7 @@ def cycle_setup(monkeypatch, elapsed):
               "historical_strike_orders": [{"order_id": "historical", "side": "YES", "entry_closed": True}]}
     state = {"markets": {"TEST": record}}
     monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "EXIT_MONITOR", SimpleNamespace(healthy=True, wake=lambda: None))
     monkeypatch.setattr(bot, "END", 300)
     monkeypatch.setattr(bot.time, "time", lambda: clock[0])
     monkeypatch.setattr(bot, "datetime", SimpleNamespace(now=lambda tz: datetime.fromtimestamp(clock[0], tz)))
@@ -70,18 +71,18 @@ def cycle_setup(monkeypatch, elapsed):
 
 
 @pytest.mark.parametrize("elapsed", [300, 301, 360, 720, 899])
-def test_all_new_buys_stop_at_five_minutes_but_exits_continue(monkeypatch, elapsed):
+def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeypatch, elapsed):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     bot.cycle(state)
     assert fake.entries == []
-    assert [(x[1], x[2]) for x in fake.exits] == [(D("8"), D("0.45")), (D("8"), D("0.45"))]
+    assert fake.exits == []  # Independent worker owns exits; no single-target fallback.
     assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
 
 
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) == 4  # dual YES/NO, historical touch, regular signal
+    assert len(fake.entries) == 8  # Both levels: dual YES/NO, historical touch, regular signal
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
@@ -105,7 +106,7 @@ def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
         return D("100010")
     monkeypatch.setattr(fake, "btc_reference_price", slow_spot)
     bot.cycle(state)
-    assert len(fake.entries) == 2  # Only the dual orders before the slow request.
+    assert len(fake.entries) == 4  # Both dual levels before the slow request.
 
 
 def test_entry_wire_rejects_expired_order_locally(monkeypatch):
@@ -120,16 +121,16 @@ def test_partial_ioc_retries_only_remaining_holdings_and_never_below_target(monk
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
     record = {}
-    market = {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45"}
+    market = {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.31"}
     closed = datetime(2030, 1, 1, tzinfo=timezone.utc)
     bot.manage_exit(record, "T", market, {}, closed)
     fake.held = D("0.75")
-    market["yes_bid_dollars"] = "0.44"
+    market["yes_bid_dollars"] = "0.30"
     bot.manage_exit(record, "T", market, {}, closed)
     assert len(fake.actions) == 1
-    market["yes_bid_dollars"] = "0.45"
+    market["yes_bid_dollars"] = "0.31"
     bot.manage_exit(record, "T", market, {}, closed)
-    assert fake.actions[-1][2:4] == (D("0.75"), D("0.45"))
+    assert fake.actions[-1][2:4] == (D("0.75"), D("0.31"))
     fake.held = D("0")
     bot.manage_exit(record, "T", market, {}, closed)
     assert len(fake.actions) == 2
@@ -140,5 +141,5 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
     record.update(take_profit_rejected_side="YES", take_profit_rejected_quantity="8",
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
-    assert fake.exits[0][2] == D("0.45")
+    assert fake.exits == []  # Retired backoff cannot trigger overlapping exits.
 
