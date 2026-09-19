@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.9.0 (MM)
+# Strike Ruler Kalshi Bot v0.9.1 (MM)
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -7,12 +7,12 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 This release adds an **opt-in alternative execution mode**. The default remains
 `EXECUTION_STRATEGY=strike_ruler`, so deploying the code alone does not activate MM.
 The historical v1.9 Beta prediction rules are unchanged. Tests use a simulated
-exchange; this release has not been validated with live MM orders.
+exchange; the fixes are validated offline, without submitting live test orders.
 
 For MM, configure `EXECUTION_STRATEGY=market_making`. The existing
 `TRADING_ENABLED` master switch still applies. Run only one service/replica on
 this account and market; do not run the old bot or trade this ticker manually
-at the same time. Keep the existing persistent `/data` volume. A process lock
+at the same time. Mount a persistent Railway volume at `/data` and restore the existing state before starting MM. A process lock
 prevents concurrent bots sharing that volume; it cannot lock a different service
 with a separate volume. Switching modes waits for a clean contract rather than
 taking over the other strategy's inventory.
@@ -45,12 +45,15 @@ taking over the other strategy's inventory.
   A complete ladder must fit available cash and remaining budget or none is posted.
   Quotes submit in one batch; partial rejections trigger cancellation of accepted
   orders. The account's API tier must support ten-order batches.
-- Once even a partial position is detected, new exposure pauses and only a
-  reduce-only exit ladder works exactly the held quantity, including fractions.
-  The exit joins the current outside ask (YES holdings) or bid (NO holdings).
-  At a price boundary, remaining exit quantity consolidates at the last valid tick.
-  The exit follows the current book;
-  **it may realize a loss** and does not use the legacy 15% or 10-cent target.
+- Once even a partial position is detected, new exposure pauses and entry quotes
+  are canceled and reconciled. The bot then sends one reduce-only IOC limit exit
+  for the remaining position, including fractions: sell YES at the current
+  outside bid, or close NO at the current YES ask. Kalshi rejects resting
+  reduce-only exits; IOC exits have no post-only flag or expiration timestamp.
+  Any unfilled remainder is canceled by the exchange and retried only after fresh
+  order, position and book snapshots. Entries remain five distinct prices per side.
+  **Exits can incur taker fees and realize a loss**; they do not use the legacy
+  15% or 10-cent target. IOC limits bound the price of each attempt, not total loss.
 - A confirmed cancellation and another polling cycle precede replacement. Stable
   quotes stay queued until repricing or expiry renewal is needed. Polling plus
   network time is slower than a streaming market maker; fast adverse moves can
@@ -60,6 +63,14 @@ taking over the other strategy's inventory.
   If a submission remains unresolved, inspect its saved client ID and exchange
   history before repairing state; do not clear it just to force a retry.
   Cumulative fills and fees come from order status, including cancel-race fills.
+  On a position mismatch, all own quotes are canceled before paginated exchange
+  fills are checked against saved order totals. Verified external reductions are
+  recorded with their actual price and fee, using canonical book/outcome direction.
+  The bot leaves that manually managed contract alone and can resume on a clean
+  subsequent contract. Missing, contradictory, increasing or reversing external
+  activity remains blocked. Reconciliation never clears the loss ledger.
+  Both `settled` and `finalized` market statuses are recognized, and fills are
+  reconciled before recording settlement cash.
 - The conservative cash ledger costs fills at their limit and deducts actual fees;
   realized losses consume the $10 allocation across markets/restarts. New quotes
   must fit both remaining allocation and available account cash, with a fee reserve.
@@ -67,7 +78,7 @@ taking over the other strategy's inventory.
   ledger, not a fresh $10 allocation. Do not delete state to restart a spent budget.
 - Validate the fee allowance against current fees for the selected market.
   The 8-cent spread and 2-cent fee reserve are test defaults, not evidence of an edge.
-- New-entry orders expire by the final-minute cutoff; reduce-only quotes continue
+- New-entry orders expire by the final-minute cutoff; reduce-only IOC exits continue
   until close. Unfilled inventory may settle for a loss. There is no forced market
   liquidation or guaranteed take profit. Unsettled prior MM inventory blocks new
   markets until settlement is confirmed.
@@ -77,7 +88,13 @@ taking over the other strategy's inventory.
 
 Run `python -m pytest -q` for offline verification; it does not authenticate or
 send trades. `python bot.py --check` remains a read-only production access check.
-Logs identify `MM_QUOTE`, `MM_FILL`, and blocked/pause conditions separately.
+Logs identify `MM_QUOTE`, `MM_EXIT_IOC`, `MM_FILL`, `MM_EXTERNAL_RECONCILED`,
+and blocked/pause conditions separately, in both `/data/trades.csv` and Railway's
+Deploy Logs. State writes fsync the file and directory. Live MM startup refuses
+an absent/unmounted volume, state/log paths outside that volume, or a missing
+state file, preventing an unnoticed budget reset during redeploy.
+
+For the existing Railway service, follow [the recovery procedure](RECOVERY.md).
 
 API references: [V2 orders](https://docs.kalshi.com/api-reference/orders/create-order-v2),
 [order status](https://docs.kalshi.com/api-reference/orders/get-order),

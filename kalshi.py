@@ -106,6 +106,19 @@ class KalshiClient:
             cursors.add(cursor)
             params["cursor"] = cursor
 
+    def all_fills(self, ticker):
+        params, found, cursors = {"ticker": ticker, "limit": 100}, [], set()
+        while True:
+            result = self.request("GET", "/portfolio/fills", params=params, auth=True)
+            found.extend(result["fills"])
+            cursor = result.get("cursor")
+            if not cursor:
+                return found
+            if cursor in cursors:
+                raise RuntimeError("Fill pagination cursor repeated")
+            cursors.add(cursor)
+            params["cursor"] = cursor
+
     def btc_reference_price(self):
         response = self.request("GET", "/cfbenchmarks/values", params={"id": "BRTI"}, auth=True)
         return _latest_index_value(response)
@@ -142,16 +155,24 @@ class KalshiClient:
     def place_mm_quote(self, ticker, book_side, quantity, yes_price, expiration_time, client_order_id, reduce_only=False):
         return self._order(ticker, book_side, quantity, yes_price,
             reduce_only=reduce_only, expiration_time=expiration_time,
-            post_only=True, client_order_id=client_order_id)
+            post_only=not reduce_only, ioc=reduce_only, client_order_id=client_order_id)
 
     def place_mm_batch(self, intents):
-        orders = [{
-            "ticker": o["ticker"], "side": o["side"], "count": o["quantity"],
-            "price": format(Decimal(o["price"]).quantize(Decimal("0.0001")), "f"),
-            "expiration_time": o["expiry"], "client_order_id": o["client_id"],
-            "time_in_force": "good_till_canceled", "self_trade_prevention_type": "taker_at_cross",
-            "post_only": True, "cancel_order_on_pause": True, "reduce_only": o["reduce_only"],
-        } for o in intents]
+        orders = []
+        for o in intents:
+            exit_order = o["reduce_only"]
+            order = {
+                "ticker": o["ticker"], "side": o["side"], "count": o["quantity"],
+                "price": format(Decimal(o["price"]).quantize(Decimal("0.0001")), "f"),
+                "client_order_id": o["client_id"],
+                "time_in_force": "immediate_or_cancel" if exit_order else "good_till_canceled",
+                "self_trade_prevention_type": "taker_at_cross",
+                "post_only": not exit_order, "cancel_order_on_pause": True,
+                "reduce_only": exit_order,
+            }
+            if not exit_order:
+                order["expiration_time"] = o["expiry"]
+            orders.append(order)
         return self.request("POST", "/portfolio/events/orders/batched", body={"orders": orders}, auth=True)["orders"]
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time):

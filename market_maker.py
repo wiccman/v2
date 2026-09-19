@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 
 from kalshi import KalshiAPIError
+from mm_reconcile import external_reductions
 
 D = Decimal
 ZERO = D("0")
@@ -158,6 +159,10 @@ def ledger(record):
         signed = count if order["side"] == "bid" else -count
         held += signed
         cash -= signed * D(order["price"]) + D(order.get("fees", "0"))
+    for fill in record.get("external_fills", []):
+        signed = D(fill["quantity"]) * (1 if fill["side"] == "bid" else -1)
+        held += signed
+        cash -= signed * D(fill["price"]) + D(fill["fees"])
     if record.get("settled"):
         cash += held * D(record["settlement"])
         held = ZERO
@@ -173,6 +178,20 @@ class MarketMaker:
     def _held(self, ticker):
         return sum((D(str(p["position_fp"])) for p in self.client.positions(ticker)
                     if p.get("ticker") == ticker), ZERO)
+
+    def _reconcile(self, record, state, ticker, actual, finalized=False):
+        try:
+            external = external_reductions(record, self.client.all_fills(ticker), ticker, actual, finalized)
+        except (ValueError, KeyError, ArithmeticError) as error:
+            self.log("MM_RECONCILIATION_BLOCK", ticker, details=str(error))
+            return False
+        if external != record.get("external_fills", []):
+            record["external_fills"] = external
+            record["external_activity"] = True
+            self.save(state)
+            self.log("MM_EXTERNAL_RECONCILED", ticker,
+                     details=f"{len(external)} verified external reductions; inventory={ledger(record)[0]}; cash={ledger(record)[1]}")
+        return True
 
     def _update(self, order, remote):
         status = remote["status"]
@@ -258,8 +277,9 @@ class MarketMaker:
                 incomplete = True
             elif result.get("order_id"):
                 order["order_id"] = result["order_id"]
-                self.log("MM_QUOTE", ticker, price=order["price"], quantity=order["quantity"],
-                         details=f"{order['side']} post-only; reduce_only={order['reduce_only']}; expires={expiry}")
+                kind = "MM_EXIT_IOC" if order["reduce_only"] else "MM_QUOTE"
+                self.log(kind, ticker, price=order["price"], quantity=order["quantity"],
+                         details=f"{order['side']}; reduce_only={order['reduce_only']}; intent_deadline={expiry}")
             self.save(state)
         self.save(state)
         if incomplete or any(not o.get("order_id") for o in intents):
@@ -276,7 +296,9 @@ class MarketMaker:
             if not self._cancel(old, state):
                 return
             status = self.client.market(old_ticker)
-            if status.get("status") == "settled" and status.get("result") in ("yes", "no"):
+            if status.get("status") in ("settled", "finalized") and status.get("result") in ("yes", "no"):
+                if not self._reconcile(old, state, old_ticker, self._held(old_ticker), finalized=True):
+                    return
                 old.update(settled=True, settlement="1" if status["result"] == "yes" else "0")
                 self.save(state)
             elif ledger(old)[0] != 0:
@@ -289,7 +311,7 @@ class MarketMaker:
             if state.get("markets", {}).get(ticker) or self._held(ticker) != 0 or self.client.all_orders(ticker, "resting"):
                 self.log("MM_FOREIGN_INVENTORY", ticker, details="Wait for a clean market before switching modes")
                 return
-            records[ticker] = {"orders": []}
+            records[ticker] = {"orders": [], "opened_at": self.clock()}
             self.save(state)
         record = records[ticker]
         self._sync(record, state)
@@ -299,10 +321,21 @@ class MarketMaker:
             self.log("MM_FOREIGN_ORDERS", ticker)
             return
         held, _ = ledger(record)
-        if self._held(ticker) != held or abs(held) > self.config.quantity * self.config.levels:
+        actual = self._held(ticker)
+        if actual != held:
+            if not self._cancel(record, state):
+                return
+            actual = self._held(ticker)  # cancellation may fill; use the new snapshot
+            self._reconcile(record, state, ticker, actual)
+            self.log("MM_POSITION_MISMATCH", ticker, details=f"ledger={held}; exchange={actual}")
+            return  # always wait another cycle after reconciliation
+        if abs(held) > self.config.quantity * self.config.levels:
             self._cancel(record, state)
-            self.log("MM_POSITION_MISMATCH", ticker)
+            self.log("MM_POSITION_MISMATCH", ticker, details="Inventory exceeds configured cap")
             return
+        if record.get("external_activity"):
+            self._cancel(record, state)
+            return  # manual intervention reserves this contract; resume on a clean market
         now = self.clock()
         close_ts = closed.timestamp()
         if now >= close_ts:
@@ -339,7 +372,13 @@ class MarketMaker:
             return
         # While carrying even a partial fill, quote only a reduce-only exit.
         try:
-            desired = ladder(bid, ask, current, self.config, held) if held or now < close_ts - self.config.stop_before_close else []
+            if held:
+                # A reduce-only GTC is rejected by Kalshi. One IOC at the current
+                # executable limit caps slippage and size; any remainder retries
+                # only after fresh order, position and book snapshots.
+                desired = [("ask", bid, abs(held), True)] if held > 0 else [("bid", ask, abs(held), True)]
+            else:
+                desired = ladder(bid, ask, current, self.config) if now < close_ts - self.config.stop_before_close else []
         except ValueError:
             self._cancel(record, state)
             self.log("MM_LADDER_UNAVAILABLE", ticker)
