@@ -13,9 +13,10 @@ from cryptography.hazmat.primitives.asymmetric import padding
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 class KalshiAPIError(RuntimeError):
-    def __init__(self, status_code, message):
+    def __init__(self, status_code, message, retry_after=None):
         super().__init__(message)
         self.status_code = status_code
+        self.retry_after = retry_after
 
 def _latest_index_value(payload):
     """Extract the newest numeric index value from a CF Benchmarks response."""
@@ -37,8 +38,9 @@ def _latest_index_value(payload):
     raise ValueError("Kalshi CF Benchmarks response did not contain a BRTI value")
 
 class KalshiClient:
-    def __init__(self, key_id="", private_key_path="", private_key_b64=""):
+    def __init__(self, key_id="", private_key_path="", private_key_b64="", timeout=20):
         self.base = BASE_URL
+        self.timeout = timeout
         self.key_id = key_id
         pem = b""
         if private_key_b64:
@@ -68,13 +70,14 @@ class KalshiClient:
 
     def request(self, method, path, params=None, body=None, auth=False):
         response = requests.request(method, self.base + path, params=params, json=body,
-            headers=self._headers(method, path) if auth else {}, timeout=20)
+            headers=self._headers(method, path) if auth else {}, timeout=self.timeout)
         try:
             response.raise_for_status()
         except requests.HTTPError as error:
             details = response.text.strip() or "<empty response>"
             raise KalshiAPIError(
-                response.status_code, f"Kalshi API {response.status_code} {method.upper()} {path}: {details}"
+                response.status_code, f"Kalshi API {response.status_code} {method.upper()} {path}: {details}",
+                retry_after=response.headers.get("Retry-After"),
             ) from error
         return response.json() if response.content else {}
 
@@ -180,19 +183,19 @@ class KalshiClient:
             return self._order(ticker, "bid", abs(signed_quantity), yes_ask, reduce_only=True, ioc=True)
         return {}
 
-    def place_take_profit(self, ticker, signed_quantity, outcome_price, expiration_time=None):
+    def place_take_profit(self, ticker, signed_quantity, outcome_price, expiration_time=None, *, client_order_id=None):
         """Try a price-protected reduce-only IOC; caller monitors/retries leftovers."""
         signed_quantity = Decimal(signed_quantity)
         outcome_price = Decimal(outcome_price)
         if signed_quantity > 0:
             return self._order(
                 ticker, "ask", signed_quantity, outcome_price,
-                reduce_only=True, ioc=True,
+                reduce_only=True, ioc=True, client_order_id=client_order_id,
             )
         if signed_quantity < 0:
             return self._order(
                 ticker, "bid", abs(signed_quantity), Decimal("1") - outcome_price,
-                reduce_only=True, ioc=True,
+                reduce_only=True, ioc=True, client_order_id=client_order_id,
             )
         return {}
 

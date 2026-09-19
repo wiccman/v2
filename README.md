@@ -1,6 +1,45 @@
-# Strike Ruler Kalshi Bot v0.9.3 (MM)
+# Strike Ruler Kalshi Bot v0.9.4
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
+
+## v0.9.4 fixed prices and independent take-profit monitor
+
+All Strike Ruler entry routes use `ENTRY_PRICE_CENTS=25`. All their held inventory
+uses the absolute `EXIT_PRICE_CENTS=45` target, including historical-strike entries.
+These are outcome prices: a NO exit at 45 cents sends a YES bid at 55 cents.
+Old percentage and per-route profit settings no longer select exit prices.
+An old fill above 45 cents can realize a loss at the newly requested fixed target.
+
+After a fill appears in positions, an independent worker persists its 45-cent
+target and immediately submits a price-protected, reduce-only IOC. It reconciles
+that order and retries remaining holdings, normally after `EXIT_POLL_SECONDS=1`
+plus request time. Signal lookups, CF Benchmarks errors and entry polling do not
+block this worker. It covers regular, spot, dual and historical entries together
+once per net position, and keeps running after the entry/cancellation cutoffs.
+
+**This is a bot-managed target, not a resting exchange-hosted sell order.**
+The production API has rejected resting reduce-only orders with
+`reduce_only can only be used with IoC orders`. An IOC below the target cancels
+unfilled. The monitor retries it; it does not remove reduce-only protection or
+post an ordinary sell that could open an opposite position after another fill.
+The process must stay online, and polling/API delays can miss short price moves.
+Neither an armed target nor an accepted order guarantees an exit or a profit.
+
+Exit receipts live beside `state.json` in `state_take_profit.json` on the same
+persistent volume. A durable client ID precedes every submission. Lost responses
+are reconciled through order history before another exit is sent. Unknown orders
+are never blindly resubmitted. API errors respect Retry-After, pause new buys,
+and log `TP_ERROR`; preserve both state files when investigating one.
+The worker confirms cancellation of tracked legacy resting exits before taking
+over their market. Incompatible old-price entries are canceled without refunding
+their market-budget reservations. Entry selection/signal rules are unchanged.
+
+Railway logs now show `TP_MONITOR_STARTED`, `TP_ARMED`, `TP_SUBMITTED`, `TP_FILL`,
+`TP_POSITION_FLAT` and errors. `TP_FILL` requires exchange fill counts;
+`TP_SUBMITTED` only confirms acceptance. Run one replica with the existing volume.
+On deployment verify the startup line reads fixed entry=25c and fixed exit=45c.
+If these new variables are absent, those values are the defaults. `--check` and
+`TRADING_ENABLED=false` still cannot submit exits or entries.
 
 ## v0.9.3 cancellation and budget repair
 
@@ -27,9 +66,9 @@ new entries resume in the next clean market. Existing filled positions continue
 through normal exit management. Persisted client IDs recover orders whose POST
 acknowledgement was lost. Do not erase state to reset a market's budget.
 
-Regular and historical exits retain reduce-only IOC orders, gated by an executable
-bid at the existing 15% gross or +10-cent target. Exit monitoring continues after
-6:00. `TAKE_PROFIT_CENTS` is unused. The old per-order dual/historical TTL settings
+Regular and historical exits use the shared fixed 45-cent monitor described above.
+Exit monitoring continues after 6:00. `TAKE_PROFIT_CENTS` and
+`TAKE_PROFIT_PERCENT` are unused. The old per-order dual/historical TTL settings
 are superseded by the fixed six-minute market deadline in Strike Ruler mode.
 
 Cancellation API reference: [V2 cancel routing](https://docs.kalshi.com/api-reference/orders/cancel-order-v2).
@@ -133,31 +172,27 @@ API references: [V2 orders](https://docs.kalshi.com/api-reference/orders/create-
 - Each snapshot refreshes confidence from the current Kalshi ask price for the predicted side.
 - Live confidence cannot reverse YES to NO or NO to YES.
 - Gap average is observational only and never flips a prediction.
-- During minutes 0–2, buy YES once at the current ask if Kalshi's authenticated CF Benchmarks BRTI value is at least $80 above the Kalshi strike.
-- This one-time spot-trigger entry budgets $0.77 and does not use the normal 47-cent entry cap.
+- During minutes 0–2, place one 25-cent YES limit buy if Kalshi's authenticated CF Benchmarks BRTI value is at least $80 above the Kalshi strike.
+- This one-time spot-trigger entry uses the configured per-entry budget and shared market cap.
 - If the Kalshi account lacks CF Benchmarks passthrough access, no spot-trigger order is placed and the API error is logged.
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
 - At minute 2, independently post one YES limit buy and one NO limit buy at 25 cents, each using the same $0.77 purchase budget.
 - Both 25-cent orders expire at minute 6 of the contract; the bot also cancels any tracked unfilled remainder on its next polling cycle.
-- Filling one side does not cancel the other side. Any resulting open position uses the same 15% take-profit management below.
+- Filling one side does not cancel the other side. Net holdings use the shared 45-cent exit target.
 - The last three completed KXBTC15M strikes are also watched as BTC support/resistance levels during minutes 2–5.
 - When live BRTI comes within $25 of a prior strike, an approach from below posts a 25-cent NO rejection order; an approach from above posts a 25-cent YES bounce order.
 - Each historical-strike level triggers at most once per current contract, uses the same $0.77 order budget, and expires at minute 6 of the contract if unfilled.
-- Historical-strike fills reserve their own reduce-only exit 10 cents above their actual weighted-average fill; a 25-cent fill exits at 35 cents while other inventory retains the 15% target.
-- Buy HIGH-confidence signals (all 3 prior settlements on the same side of the strike) when the predicted side costs 10–47 cents.
-- Buy MODERATE 2-of-3 signals only when the predicted side costs 10–30 cents.
+- Historical-strike fills use the same absolute 45-cent target as every other entry route.
+- HIGH and MODERATE signals place 25-cent limit buys on the predicted side.
 - Entry checks run every 7 seconds from minute 2 until minute 5.
 - At minute 5, all new entries stop. At minute 6, unfilled entries expire and the backup cancellation sweep retries any remaining tracked orders. The third prediction snapshot at minute 6 remains observational.
 - The three predicted-side ask prices are averaged as the contract's final confidence.
 - The former minute-12 entry is disabled by the five-minute cutoff.
-- After a buy fills, monitor the executable bid for the non-historical quantity and submit a reduce-only IOC limit sell at a 15% gross gain over its weighted-average fill price. Historical-strike inventory retains its separate 10-cent target.
-- v0.8.1 fixes overlapping exit quantities for YES and NO holdings. On the next successful exit-management cycle, tracked regular sell orders from older versions are canceled and replaced once using the corrected quantity.
-- The target rounds up to the next valid Kalshi price tick and never exceeds the market's highest tradable price.
-- Weighted-average entry price supports Kalshi's current `outcome_side` fill schema and legacy fills.
-- Each poll recalculates quantity from current holdings and target from fill cost. Partial/unfilled IOC quantities are retried only while the target bid is available. Accepted IOC submissions are logged separately from fills; acceptance does not guarantee a fill.
-- The gross target ignores fees; there is no automatic stop-loss sell.
-- Rejected take-profit orders log Kalshi's response details and wait 60 seconds before retrying the same order.
+- After a buy fills, the independent monitor arms and submits a reduce-only IOC at the fixed 45-cent outcome target. The exchange tests whether it can execute at that limit or better.
+- Partial and unfilled exits are reconciled before retrying the remaining net holdings. There is one exit owner for all Strike Ruler routes.
+- The target ignores fees; there is no automatic stop-loss sell.
+- Rejected take-profit orders log Kalshi's response and pause new entries. Temporary errors retry after at least five seconds or a longer Retry-After. Ambiguous responses require reconciliation first.
 - Exit monitoring continues after minute 5 until market close. The bot must stay online; polling/network latency may miss a brief target touch. Unfilled holdings can settle for a loss.
 - No daily-loss limit.
 

@@ -6,7 +6,8 @@ from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
 from market_maker import MarketMaker
-from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, gross_take_profit_target, fixed_take_profit_target
+from take_profit import TakeProfitMonitor
+from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
 
 load_dotenv()
 if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "production").lower() != "production":
@@ -16,9 +17,15 @@ ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY not in ("strike_ruler", "market_making"):
     raise SystemExit("EXECUTION_STRATEGY must be strike_ruler or market_making")
-ENTRY_MIN = Decimal(os.getenv("ENTRY_MIN_CENTS", "10")) / 100
-ENTRY_MAX = Decimal(os.getenv("ENTRY_MAX_CENTS", "47")) / 100
-MODERATE_ENTRY_MAX = Decimal(os.getenv("MODERATE_ENTRY_MAX_CENTS", "30")) / 100
+# Absolute outcome prices shared by every Strike Ruler entry/exit route.
+# Older percentage, price-range and per-route settings no longer set prices.
+ENTRY_PRICE = Decimal(os.getenv("ENTRY_PRICE_CENTS", "25")) / 100
+EXIT_PRICE = Decimal(os.getenv("EXIT_PRICE_CENTS", "45")) / 100
+if not all(p.is_finite() and Decimal("0.01") <= p <= Decimal("0.99")
+           and p * 100 == (p * 100).to_integral_value() for p in (ENTRY_PRICE, EXIT_PRICE)):
+    raise SystemExit("ENTRY_PRICE_CENTS and EXIT_PRICE_CENTS must be whole cents from 1 to 99")
+if EXIT_PRICE <= ENTRY_PRICE:
+    raise SystemExit("EXIT_PRICE_CENTS must exceed ENTRY_PRICE_CENTS")
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 360
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
@@ -30,19 +37,16 @@ PREDICTION_MINUTES = tuple(int(x.strip()) for x in os.getenv("PREDICTION_UPDATE_
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
 SPOT_ENTRY_WINDOW = min(seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2")), END)
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
-TAKE_PROFIT_PERCENT = Decimal(os.getenv("TAKE_PROFIT_PERCENT", "15"))
 TAKE_PROFIT_RETRY_SECONDS = int(os.getenv("TAKE_PROFIT_RETRY_SECONDS", "60"))
 DUAL_LIMIT_BUYS_ENABLED = os.getenv("DUAL_LIMIT_BUYS_ENABLED", "true").lower() == "true"
-DUAL_LIMIT_PRICE = Decimal(os.getenv("DUAL_LIMIT_PRICE_CENTS", "25")) / 100
 HISTORICAL_STRIKE_ENABLED = os.getenv("HISTORICAL_STRIKE_ENABLED", "true").lower() == "true"
 HISTORICAL_STRIKE_COUNT = int(os.getenv("HISTORICAL_STRIKE_COUNT", "3"))
 HISTORICAL_STRIKE_TOUCH_DOLLARS = Decimal(os.getenv("HISTORICAL_STRIKE_TOUCH_DOLLARS", "25"))
-HISTORICAL_STRIKE_ENTRY_PRICE = Decimal(os.getenv("HISTORICAL_STRIKE_ENTRY_CENTS", "25")) / 100
-HISTORICAL_STRIKE_PROFIT_CENTS = Decimal(os.getenv("HISTORICAL_STRIKE_PROFIT_CENTS", "10"))
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
 STATE = Path(os.getenv("STATE_PATH", "/data/state.json"))
 LOG = Path(os.getenv("LOG_PATH", "/data/trades.csv"))
 client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""), os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""))
+EXIT_MONITOR = None
 
 def parse_time(value): return datetime.fromisoformat(value.replace("Z", "+00:00"))
 def load_state(): return json.loads(STATE.read_text()) if STATE.exists() else {"markets": {}}
@@ -100,12 +104,7 @@ def position(ticker):
     return Decimal("0")
 
 def entry_price_allowed(base_confidence, price):
-    price = Decimal(str(price))
-    if base_confidence == "HIGH":
-        return ENTRY_MIN <= price <= ENTRY_MAX
-    if base_confidence == "MODERATE":
-        return ENTRY_MIN <= price <= MODERATE_ENTRY_MAX
-    return False
+    return base_confidence in ("HIGH", "MODERATE") and Decimal(str(price)) == ENTRY_PRICE
 
 def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decimal("0"), excluded_order_ids=None):
     held = position(ticker)
@@ -133,16 +132,11 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
             "take_profit_rejected_target", "take_profit_retry_after",
         ))
         return changed
-    excluded_order_ids = set(excluded_order_ids or ())
-    fills = [item for item in client.fills(ticker) if item.get("order_id") not in excluded_order_ids]
-    average_entry = average_open_price(fills, side)
-    if average_entry is None:
-        write_log("EXIT_BASIS_UNAVAILABLE", ticker, prediction=side, price=str(bid), quantity=str(abs(held)))
-        return False
-    target = gross_take_profit_target(average_entry, TAKE_PROFIT_PERCENT, market.get("price_ranges"))
+    target = EXIT_PRICE
     # Retire legacy resting exits before switching to monitored IOC execution.
     if take_profit_order_id in resting:
-        client.cancel(take_profit_order_id, ticker)
+        if not cancel_confirmed(take_profit_order_id, ticker):
+            return False
         record.pop("take_profit_order_id", None)
         write_log("CANCEL_LEGACY_TAKE_PROFIT", ticker, details=take_profit_order_id)
         return True
@@ -188,7 +182,7 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
         "take_profit_rejected_target", "take_profit_retry_after",
     ):
         record.pop(key, None)
-    details = {"average_entry": str(average_entry), "target": str(target), "take_profit_percent": str(TAKE_PROFIT_PERCENT), "order": result}
+    details = {"target": str(target), "target_mode": "absolute_outcome_price", "order": result}
     write_log("TAKE_PROFIT_IOC", ticker, prediction=side, confidence=signal.get("live_confidence", ""), price=str(target), quantity=str(quantity), details=json.dumps(details))
     return True
 
@@ -223,6 +217,14 @@ def cancellation_deadline(closed):
 
 
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None):
+    if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
+        write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Independent exit monitor is not healthy")
+        return {}, Decimal("0")
+    if Decimal(str(price)) != ENTRY_PRICE:
+        raise ValueError("Entry price must match the configured fixed entry limit")
+    if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) != ENTRY_PRICE
+           for i in record.get("entry_intents", [])):
+        return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     cutoff = min(entry_deadline(closed), submit_before or entry_deadline(closed))
     if now_timestamp >= cutoff:
@@ -245,6 +247,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     elif not result:
         intent["entry_closed"] = True  # Locally refused at the submit deadline.
     save_state(state)
+    if EXIT_MONITOR is not None:
+        EXIT_MONITOR.wake()
     write_log("ENTRY_BUDGET", ticker, details=json.dumps({
         "cap": str(MARKET_BUDGET), "reserved": str(sum(Decimal(i["reserved_dollars"]) for i in record["entry_intents"])),
         "kind": kind, "client_id": intent["client_id"], "cancel_at": intent["cancel_at"],
@@ -288,10 +292,14 @@ def reconcile_entries(state, now_timestamp=None):
             # Old budgets cannot be reconstructed reliably. Cancel their unfilled
             # remainder on upgrade and resume entries only in a clean market.
             if now_timestamp < record["entry_cancel_at"] and not record.get("entry_budget_legacy"):
-                continue
-            ids = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
-            ids |= {i["order_id"] for i in pending if i.get("order_id")}
-            ids |= {i["order_id"] for i in record.get("historical_strike_orders", []) if i.get("order_id") and not i.get("entry_closed")}
+                # On a price-policy upgrade, cancel tracked incompatible buys
+                # immediately; keep their spending reservations across restarts.
+                ids = {i["order_id"] for i in pending if i.get("order_id")
+                       and Decimal(str(i.get("price", "-1"))) != ENTRY_PRICE}
+            else:
+                ids = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
+                ids |= {i["order_id"] for i in pending if i.get("order_id")}
+                ids |= {i["order_id"] for i in record.get("historical_strike_orders", []) if i.get("order_id") and not i.get("entry_closed")}
             for order_id in sorted(ids):
                 if not cancel_confirmed(order_id, ticker):
                     continue
@@ -319,10 +327,10 @@ def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state):
     for side in ("YES", "NO"):
         quantity = Decimal("0")
         try:
-            result, quantity = funded_entry(record, state, ticker, side, DUAL_LIMIT_PRICE, closed, "dual", now_timestamp)
+            result, quantity = funded_entry(record, state, ticker, side, ENTRY_PRICE, closed, "dual", now_timestamp)
         except Exception as error:
             write_log(
-                "DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(DUAL_LIMIT_PRICE),
+                "DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(ENTRY_PRICE),
                 quantity=str(quantity), details=repr(error),
             )
             continue
@@ -331,7 +339,7 @@ def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state):
             record["dual_limit_orders"].append(order_id)
         details = {"cancel_at": cancel_at, "order": result}
         write_log(
-            "DUAL_LIMIT_RESTING", ticker, prediction=side, price=str(DUAL_LIMIT_PRICE),
+            "DUAL_LIMIT_RESTING", ticker, prediction=side, price=str(ENTRY_PRICE),
             quantity=str(quantity), details=json.dumps(details),
         )
     return changed
@@ -382,17 +390,17 @@ def place_historical_strike_entries(record, ticker, spot, closed, now_timestamp=
         quantity = Decimal("0")
         order_record = {
             "strike": strike_key, "side": side, "quantity": str(quantity),
-            "entry_price": str(HISTORICAL_STRIKE_ENTRY_PRICE), "cancel_at": cancel_at,
+            "entry_price": str(ENTRY_PRICE), "cancel_at": cancel_at,
         }
         try:
-            result, quantity = funded_entry(record, state, ticker, side, HISTORICAL_STRIKE_ENTRY_PRICE, closed, "historical", now_timestamp)
+            result, quantity = funded_entry(record, state, ticker, side, ENTRY_PRICE, closed, "historical", now_timestamp)
             order_record["quantity"] = str(quantity)
         except Exception as error:
             order_record["rejected"] = repr(error)
             record["historical_strike_orders"].append(order_record)
             write_log(
                 "HISTORICAL_STRIKE_REJECTED", ticker, prediction=side,
-                price=str(HISTORICAL_STRIKE_ENTRY_PRICE), quantity=str(quantity),
+                price=str(ENTRY_PRICE), quantity=str(quantity),
                 details=json.dumps(order_record),
             )
             changed = True
@@ -404,7 +412,7 @@ def place_historical_strike_entries(record, ticker, spot, closed, now_timestamp=
         details = {**order_record, "spot": str(spot), "order": result}
         write_log(
             "HISTORICAL_STRIKE_RESTING", ticker, prediction=side,
-            price=str(HISTORICAL_STRIKE_ENTRY_PRICE), quantity=str(quantity),
+            price=str(ENTRY_PRICE), quantity=str(quantity),
             details=json.dumps(details),
         )
         changed = True
@@ -461,11 +469,10 @@ def manage_historical_take_profit(record, ticker, held, reserved_quantity, close
         ))
         return changed
     side = "YES" if held > 0 else "NO"
-    target = fixed_take_profit_target(
-        average_entry or HISTORICAL_STRIKE_ENTRY_PRICE, HISTORICAL_STRIKE_PROFIT_CENTS,
-    )
+    target = EXIT_PRICE
     if active_id in resting:
-        client.cancel(active_id, ticker)
+        if not cancel_confirmed(active_id, ticker):
+            return False
         record.pop("historical_take_profit_order_id", None)
         write_log("CANCEL_LEGACY_HISTORICAL_TAKE_PROFIT", ticker, details=active_id)
         return True
@@ -539,8 +546,12 @@ def cycle(state):
     if "historical_take_profit_orders" not in record: record["historical_take_profit_orders"] = []
     initialize_budget(record)
     record["entry_cancel_at"] = cancellation_deadline(closed)
+    record["close_timestamp"] = closed.timestamp()
     save_state(state)
     reconcile_entries(state)
+    if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
+        write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
+        return
     if record["signal"] is None:
         signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
         record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
@@ -575,40 +586,43 @@ def cycle(state):
             ask, _ = quotes(current, "YES")
             if Decimal("0") < ask <= Decimal("1"):
                 record["spot_entry_attempted"] = True; save_state(state)
-                result, quantity = funded_entry(record, state, ticker, "YES", ask, closed, "spot", submit_before=started.timestamp() + SPOT_ENTRY_WINDOW)
+                result, quantity = funded_entry(record, state, ticker, "YES", ENTRY_PRICE, closed, "spot", submit_before=started.timestamp() + SPOT_ENTRY_WINDOW)
                 if result.get("order_id"): record["orders"].append(result["order_id"])
                 save_state(state)
                 details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
-                write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(ask), quantity=str(quantity), details=json.dumps(details))
+                write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(ENTRY_PRICE), quantity=str(quantity), details=json.dumps(details))
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     reconcile_entries(state)
-    held = position(ticker)
-    historical_quantity, historical_order_ids, historical_average_entry = historical_inventory(record, ticker, held)
-    if manage_exit(record, ticker, current, signal, closed, historical_quantity, historical_order_ids): save_state(state)
-    # A regular IOC may have filled; allocate the historical exit from fresh holdings.
-    held = position(ticker)
-    historical_quantity, _, historical_average_entry = historical_inventory(record, ticker, held)
-    if manage_historical_take_profit(record, ticker, held, historical_quantity, closed, historical_average_entry): save_state(state)
+    # Production exits have one independent owner. The synchronous path remains
+    # for callers that explicitly invoke cycle() without starting the service.
+    if EXIT_MONITOR is None:
+        held = position(ticker)
+        historical_quantity, historical_order_ids, historical_average_entry = historical_inventory(record, ticker, held)
+        if manage_exit(record, ticker, current, signal, closed, historical_quantity, historical_order_ids): save_state(state)
+        held = position(ticker)
+        historical_quantity, _, historical_average_entry = historical_inventory(record, ticker, held)
+        if manage_historical_take_profit(record, ticker, held, historical_quantity, closed, historical_average_entry): save_state(state)
     can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
-        if entry_price_allowed(signal.get("base_confidence"), ask):
-            result, quantity = funded_entry(record, state, ticker, signal["prediction"], ask, closed, "regular")
+        if entry_price_allowed(signal.get("base_confidence"), ENTRY_PRICE):
+            result, quantity = funded_entry(record, state, ticker, signal["prediction"], ENTRY_PRICE, closed, "regular")
             if not result:
                 return
             if result.get("order_id"): record["orders"].append(result["order_id"])
             record["buys"] += 1; record["last_buy"] = time.time()
-            write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(ask), quantity=str(quantity), details=f"purchase {record['buys']} of {MAX_BUYS}"); save_state(state)
+            write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(ENTRY_PRICE), quantity=str(quantity), details=f"purchase {record['buys']} of {MAX_BUYS}"); save_state(state)
 
 def check():
     balance = client.balance(); markets = client.markets(series_ticker="KXBTC15M", status="open", limit=1)
     print(json.dumps({"authenticated": True, "balance_dollars": balance.get("balance_dollars"), "KXBTC15M_visible": bool(markets)}, indent=2))
 
 def main():
+    global EXIT_MONITOR
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
-    print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; regular take-profit={TAKE_PROFIT_PERCENT}%; historical take-profit=+{HISTORICAL_STRIKE_PROFIT_CENTS}c", flush=True)
+    print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; fixed entry={ENTRY_PRICE * 100:g}c; fixed exit={EXIT_PRICE * 100:g}c", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
@@ -636,6 +650,16 @@ def main():
             raise SystemExit("Another bot already owns this state volume")
         state = load_state()
         mm = MarketMaker(client, save_state, write_log) if EXECUTION_STRATEGY == "market_making" else None
+        if mm is None:
+            # Separate client and receipt file: signal/CF timeouts cannot block
+            # exits, and this worker never writes the entry budget/strategy state.
+            exit_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
+                os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
+            EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
+                STATE.with_name(STATE.stem + "_take_profit.json"), target=EXIT_PRICE,
+                poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
+            EXIT_MONITOR.start()
+            print(f"TP_MONITOR_STARTED target={EXIT_PRICE * 100:g}c; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)
@@ -658,5 +682,8 @@ def main():
                 try: mm.cancel_all(state)
                 except Exception as error: write_log("MM_CANCEL_ERROR", details=repr(error))
             save_state(state)
+        finally:
+            if EXIT_MONITOR is not None:
+                EXIT_MONITOR.stop()
 
 if __name__ == "__main__": main()

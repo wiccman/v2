@@ -16,8 +16,8 @@ class InventoryClient:
         self.executions = []
 
     def market(self, ticker):
-        return {"yes_ask_dollars": "0.36", "yes_bid_dollars": "0.35",
-                "no_ask_dollars": "0.36", "no_bid_dollars": "0.35"}
+        return {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45",
+                "no_ask_dollars": "0.46", "no_bid_dollars": "0.45"}
 
     def positions(self, ticker):
         held = self.regular + self.historical
@@ -41,7 +41,7 @@ class InventoryClient:
     def place_take_profit(self, ticker, held, target, expiration_time):
         order_id = f"exit-{len(self.submitted)}"
         self.submitted.append((held, target))
-        if target == Decimal("0.29"):
+        if len(self.submitted) == 1 and self.regular > 0:
             self.regular -= abs(held)
         else:
             self.historical -= abs(held)
@@ -50,14 +50,14 @@ class InventoryClient:
     def cancel(self, order_id, ticker):
         self.cancelled.append(order_id)
         self.resting = [item for item in self.resting if item["order_id"] != order_id]
+        return {"order_id": order_id, "reduced_by": "1.00"}
 
 
 def setup(monkeypatch, side, regular, historical):
     fake = InventoryClient(side, regular, historical)
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
-    monkeypatch.setattr(bot, "TAKE_PROFIT_PERCENT", Decimal("15"))
-    monkeypatch.setattr(bot, "HISTORICAL_STRIKE_PROFIT_CENTS", Decimal("10"))
+    monkeypatch.setattr(bot, "EXIT_PRICE", Decimal("0.45"))
     record = {"historical_strike_orders": [{"order_id": "historical-entry", "side": side}]}
     market = fake.market("MARKET")
     closed = datetime(2030, 1, 1, tzinfo=timezone.utc)
@@ -79,9 +79,9 @@ def test_exit_quantities_partition_inventory(monkeypatch, side, regular, histori
     sign = Decimal("1") if side == "YES" else Decimal("-1")
     expected = []
     if Decimal(regular):
-        expected.append((sign * Decimal(regular), Decimal("0.29")))
+        expected.append((sign * Decimal(regular), Decimal("0.45")))
     if Decimal(historical):
-        expected.append((sign * Decimal(historical), Decimal("0.35")))
+        expected.append((sign * Decimal(historical), Decimal("0.45")))
     assert fake.submitted == expected
     assert sum(abs(quantity) for quantity, _ in fake.submitted) == Decimal(regular) + Decimal(historical)
     # After IOC fills, the next poll sees no holdings and cannot sell twice.
@@ -103,4 +103,5 @@ def test_replaces_legacy_oversized_order_after_restart(monkeypatch, side):
     manage_both(record, market, closed)
     assert fake.cancelled == ["legacy-exit"]
     sign = Decimal("1") if side == "YES" else Decimal("-1")
-    assert fake.submitted == [(sign * 2, Decimal("0.29")), (sign * 3, Decimal("0.35"))]
+    assert fake.submitted == [(sign * 2, Decimal("0.45")), (sign * 3, Decimal("0.45"))]
+
