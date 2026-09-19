@@ -283,17 +283,17 @@ def test_stale_book_and_fast_price_jump_cancel_quotes():
 
 def test_cutoff_cancels_entries_but_still_quotes_held_inventory():
     ex, state, mm, _, _ = setup()
-    ex.now = 1410
+    ex.now = 1290
     cycle(mm, state)
-    assert all(o["expiry"] == 1420 for o in ex.batches[0])
+    assert all(o["expiry"] == 1300 for o in ex.batches[0])
     ex.fill("order-0", "1")
-    ex.now = 1421
+    ex.now = 1301
     cycle(mm, state)
     ex.bid, ex.ask = D('.52'), D('.54')
     cycle(mm, state)
     assert all(o["reduce_only"] and o["expiry"] < 1900 for o in ex.batches[-1])
     flat_ex, flat_state, flat_mm, _, _ = setup()
-    flat_ex.now = 1421
+    flat_ex.now = 1301
     cycle(flat_mm, flat_state)
     assert not flat_ex.batches
 

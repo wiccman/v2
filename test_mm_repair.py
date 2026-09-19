@@ -30,22 +30,22 @@ class Tests(unittest.TestCase):
         def run(): maker.cycle(state,{'ticker':'TEST'},datetime.fromtimestamp(1900,timezone.utc))
         return client,now,state,saved,events,placed,run,maker
     def test_boundaries(self):
-        for t,m in [(-1,None),(0,0),(59.9,0),(60,1),(359.9,5),(360,6),(419.9,6),(420,None),(899,None)]:
+        for t,m in [(-1,None),(0,0),(59.9,0),(60,1),(299.9,4),(300,None),(359.9,None),(420,None),(899,None)]:
             self.assertEqual(mm.entry_minute(1000+t,1900),m)
     def test_once_per_minute_and_restart(self):
         c,n,s,saves,e,p,run,m=self.setup_mm()
-        for minute in range(7):
+        for minute in range(5):
             n[0]=1000+minute*60; run(); run()
-        self.assertEqual(len(p),7)
-        self.assertEqual([x[1]['details'] for x in e if x[0][0]=='MM_ENTRY_MINUTE'],[str(x) for x in range(7)])
-        self.assertEqual(saves[-1]['mm']['markets']['TEST']['last_entry_minute'],6)
+        self.assertEqual(len(p),5)
+        self.assertEqual([x[1]['details'] for x in e if x[0][0]=='MM_ENTRY_MINUTE'],[str(x) for x in range(5)])
+        self.assertEqual(saves[-1]['mm']['markets']['TEST']['last_entry_minute'],4)
         restarted=mm.MarketMaker(c,lambda s:None,lambda *a,**k:None,clock=lambda:n[0]); restarted._place=lambda *args:p.append(args[3])
         restarted.cycle(copy.deepcopy(saves[-1]),{'ticker':'TEST'},datetime.fromtimestamp(1900,timezone.utc))
-        self.assertEqual(len(p),7)
-        n[0]=1420; run(); n[0]=1600; run(); self.assertEqual(len(p),7)
+        self.assertEqual(len(p),5)
+        n[0]=1420; run(); n[0]=1600; run(); self.assertEqual(len(p),5)
     def test_skipped_minutes_not_replayed(self):
-        c,n,s,sv,e,p,run,m=self.setup_mm(305);run();self.assertEqual(len(p),1)
-        self.assertEqual(s['mm']['markets']['TEST']['last_entry_minute'],5)
+        c,n,s,sv,e,p,run,m=self.setup_mm(245);run();self.assertEqual(len(p),1)
+        self.assertEqual(s['mm']['markets']['TEST']['last_entry_minute'],4)
     def test_long_exit_after_window(self):
         c,n,s,sv,e,p,run,m=self.setup_mm(600,'2');run();self.assertEqual(p,[])
         self.assertEqual(s['mm']['markets']['TEST']['exit_anchor'],'0.55')
