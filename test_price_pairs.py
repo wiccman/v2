@@ -318,11 +318,15 @@ def test_fill_direction_error_reports_only_relevant_fields():
         paired_inventory([fill], {}, {}, D("1"), "T")
 
 
-def test_yes_sell_uses_account_action_not_opposite_book_quote():
+def test_yes_entry_fill_uses_book_side_when_action_is_sell():
     fill = {"fill_id": "f", "ticker": "T", "count_fp": "1", "ts": 1,
-            "book_side": "bid", "outcome_side": "yes", "action": "sell", "order_id": "exit"}
-    exits = {"exit": {"side": "YES", "target": "0.39", "paired": True}}
+            "book_side": "bid", "outcome_side": "yes", "action": "sell", "order_id": "entry"}
     entries = {"entry": {"side": "YES", "target": "0.39"}}
-    prior = {"fill_id": "e", "ticker": "T", "count_fp": "1", "ts": 0,
-             "book_side": "bid", "outcome_side": "yes", "action": "buy", "order_id": "entry"}
-    assert paired_inventory([prior, fill], entries, exits, D("0"), "T") == {}
+    assert paired_inventory([fill], entries, {}, D("1"), "T") == {D("0.39"): D("1")}
+
+
+def test_no_entry_fill_uses_book_side_when_action_is_sell():
+    fill = {"fill_id": "f", "ticker": "T", "count_fp": "1", "ts": 1,
+            "book_side": "ask", "outcome_side": "no", "action": "sell", "order_id": "entry"}
+    entries = {"entry": {"side": "NO", "target": "0.39"}}
+    assert paired_inventory([fill], entries, {}, D("-1"), "T") == {D("0.39"): D("-1")}
