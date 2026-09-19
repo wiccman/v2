@@ -27,10 +27,10 @@ def test_all_entry_routes_share_five_dollars_and_restart_does_not_refund(monkeyp
     monkeypatch.setattr(fake, "_order", assert_reserved_before_post)
     # Spot uses the first allowance, then dual and historical compete with
     # regular signals for the same remaining dollars.
-    bot.funded_entry(record, state, "TEST", "YES", D("0.25"), closed, "spot")
+    bot.funded_entry(record, state, "TEST", "YES", D("0.32"), closed, "spot")
     bot.place_dual_limit_buys(record, "TEST", closed, state=state)
     bot.place_historical_strike_entries(record, "TEST", D("100010"), closed, state=state)
-    bot.funded_entry(record, state, "TEST", "NO", D("0.25"), closed, "regular")
+    bot.funded_entry(record, state, "TEST", "NO", D("0.32"), closed, "regular")
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
     assert D("4.99") < spent <= D("5")
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("5")
@@ -39,10 +39,10 @@ def test_all_entry_routes_share_five_dollars_and_restart_does_not_refund(monkeyp
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
         i["entry_closed"] = True  # Cancel, fill or sale never replenishes allowance.
-    result, quantity = bot.funded_entry(record, restored, "TEST", "YES", D("0.25"), closed, "regular")
+    result, quantity = bot.funded_entry(record, restored, "TEST", "YES", D("0.32"), closed, "regular")
     assert result == {} and quantity == 0
     new_record = {}
-    assert entry_policy.reserve(new_record, "YES", D("0.25"), D("2"), D("5"), 360, "spot")
+    assert entry_policy.reserve(new_record, "YES", D("0.32"), D("2"), D("5"), 360, "spot")
 
 
 def test_failed_or_ambiguous_post_retains_reservation(monkeypatch):
@@ -50,12 +50,12 @@ def test_failed_or_ambiguous_post_retains_reservation(monkeypatch):
     monkeypatch.setattr(bot, "BUDGET", D("5"))
     monkeypatch.setattr(fake, "place_entry", lambda *a, **k: (_ for _ in ()).throw(TimeoutError("ack lost")))
     with pytest.raises(TimeoutError):
-        bot.funded_entry(record, state, "TEST", "YES", D("0.25"), closed, "regular")
+        bot.funded_entry(record, state, "TEST", "YES", D("0.32"), closed, "regular")
     restored = json.loads(json.dumps(state))
     intent = restored["markets"]["TEST"]["entry_intents"][0]
     assert intent["client_id"] and not intent["entry_closed"]
     assert D(intent["reserved_dollars"]) > D("4.99")
-    assert entry_policy.reserve(restored["markets"]["TEST"], "YES", D("0.25"), D("5"), D("5"), 360, "regular") is None
+    assert entry_policy.reserve(restored["markets"]["TEST"], "YES", D("0.32"), D("5"), D("5"), 360, "regular") is None
 
 
 @pytest.mark.parametrize("elapsed", [299, 300, 359, 360, 361])
@@ -141,7 +141,7 @@ def test_wire_uses_routed_cancel_and_separate_submit_deadline(monkeypatch):
     assert calls[-1][2]["params"] == {"market_ticker": "MARKET", "exchange_index": -1}
     calls.clear()
     monkeypatch.setattr(bot.time, "time", lambda: 300)
-    assert fake.place_entry("M", "YES", D("1"), D("0.25"), 360, submit_before=300) == {}
+    assert fake.place_entry("M", "YES", D("1"), D("0.32"), 360, submit_before=300) == {}
     assert not calls
 
 

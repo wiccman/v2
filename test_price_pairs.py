@@ -62,11 +62,11 @@ def paired_monitor(tmp_path, exchange, path=None):
     return svc, entries, events
 
 
-@pytest.mark.parametrize("sign,wire", [(1, ["0.3100", "0.4600"]), (-1, ["0.6900", "0.5400"])])
+@pytest.mark.parametrize("sign,wire", [(1, ["0.3900", "0.4600"]), (-1, ["0.6100", "0.5400"])])
 def test_mixed_tiers_exit_only_their_own_quantities_at_each_target(tmp_path, sign, wire):
-    e = PairExchange(bid="0.35")
-    e.buy("0.25", "2", sign)
-    e.buy("0.39", "3", sign, actual_price="0.25")  # Better fill retains 39->46 mapping.
+    e = PairExchange(bid="0.40")
+    e.buy("0.32", "2", sign)
+    e.buy("0.39", "3", sign, actual_price="0.32")  # Better fill retains 39->46 mapping.
     m, _, events = paired_monitor(tmp_path, e)
     m.run_once()
     assert m.healthy and e.held == sign * D(3)
@@ -79,13 +79,13 @@ def test_mixed_tiers_exit_only_their_own_quantities_at_each_target(tmp_path, sig
     m.run_once()
     assert e.held == 0 and m.healthy
     assert all(o["reduce_only"] and o["time_in_force"] == "immediate_or_cancel" for o in e.submissions)
-    assert {d["target"] for event, d in events if event == "TP_FILL"} == {"0.31", "0.46"}
+    assert {d["target"] for event, d in events if event == "TP_FILL"} == {"0.39", "0.46"}
 
 
 @pytest.mark.parametrize("sign", [1, -1])
 def test_partial_exits_and_restart_preserve_remaining_tier_quantities(tmp_path, sign):
-    e = PairExchange(bid="0.35", liquidity="0.75")
-    e.buy("0.25", "2", sign); e.buy("0.39", "3", sign)
+    e = PairExchange(bid="0.40", liquidity="0.75")
+    e.buy("0.32", "2", sign); e.buy("0.39", "3", sign)
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
     assert e.held == sign * D("4.25")
@@ -101,8 +101,8 @@ def test_partial_exits_and_restart_preserve_remaining_tier_quantities(tmp_path, 
 
 
 def test_lost_exit_ack_is_recovered_without_duplicate_or_target_mixup(tmp_path):
-    e = PairExchange(bid="0.35")
-    e.buy("0.25", "2"); e.buy("0.39", "3")
+    e = PairExchange(bid="0.40")
+    e.buy("0.32", "2"); e.buy("0.39", "3")
     e.lose_ack = True
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
@@ -115,8 +115,8 @@ def test_lost_exit_ack_is_recovered_without_duplicate_or_target_mixup(tmp_path):
 
 
 def test_lost_entry_ack_matches_saved_client_id_to_fills(tmp_path):
-    e = PairExchange(bid="0.31")
-    e.buy("0.25", "0.37")
+    e = PairExchange(bid="0.39")
+    e.buy("0.32", "0.37")
     del e.intents[0]["order_id"]
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
@@ -126,7 +126,7 @@ def test_lost_entry_ack_matches_saved_client_id_to_fills(tmp_path):
 
 def test_delayed_fill_history_pauses_instead_of_selling_at_wrong_target(tmp_path):
     e = PairExchange(bid="0.50")
-    e.buy("0.25", "2"); e.buy("0.39", "3")
+    e.buy("0.32", "2"); e.buy("0.39", "3")
     missing = e.history.pop()
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
@@ -137,8 +137,8 @@ def test_delayed_fill_history_pauses_instead_of_selling_at_wrong_target(tmp_path
 
 
 def test_confirmed_exit_must_appear_in_fill_history_before_reusing_inventory(tmp_path):
-    e = PairExchange(bid="0.35")
-    e.buy("0.25", "2"); e.buy("0.39", "3")
+    e = PairExchange(bid="0.40")
+    e.buy("0.32", "2"); e.buy("0.39", "3")
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
     missing = e.history.pop()
@@ -150,8 +150,8 @@ def test_confirmed_exit_must_appear_in_fill_history_before_reusing_inventory(tmp
 
 
 def test_manual_reduction_uses_fifo_and_does_not_sell_expensive_tier_at_31(tmp_path):
-    e = PairExchange(bid="0.35")
-    e.buy("0.25", "2"); e.buy("0.39", "3")
+    e = PairExchange(bid="0.40")
+    e.buy("0.32", "2"); e.buy("0.39", "3")
     e.manual(-1, "2")
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
@@ -160,8 +160,8 @@ def test_manual_reduction_uses_fifo_and_does_not_sell_expensive_tier_at_31(tmp_p
 
 
 def test_opposing_entry_nets_oldest_lots_before_arming_remainder(tmp_path):
-    e = PairExchange(bid="0.35")
-    e.buy("0.25", "2"); e.buy("0.39", "3"); e.buy("0.25", "3", sign=-1)
+    e = PairExchange(bid="0.40")
+    e.buy("0.32", "2"); e.buy("0.39", "3"); e.buy("0.32", "3", sign=-1)
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
     assert m.healthy and e.held == 2
@@ -188,21 +188,21 @@ def test_unfilled_then_partial_entry_only_arms_verified_quantity(tmp_path):
 
 
 def test_old_25_cent_entries_migrate_without_resetting_state(tmp_path):
-    e = PairExchange(bid="0.31")
-    e.buy("0.25", "1")
+    e = PairExchange(bid="0.39")
+    e.buy("0.32", "1")
     del e.intents[0]["exit_target"]  # v0.9.4 intent.
     m, _, _ = paired_monitor(tmp_path, e)
     m.run_once()
-    assert e.submissions[0]["price"] == "0.3100" and e.held == 0
+    assert e.submissions[0]["price"] == "0.3900" and e.held == 0
 
 
 def test_both_targets_keep_running_after_entry_cutoff_until_close(tmp_path):
     e = PairExchange(bid="0.20")
-    e.buy("0.25", "1"); e.buy("0.39", "1")
+    e.buy("0.32", "1"); e.buy("0.39", "1")
     m, _, _ = paired_monitor(tmp_path, e)
     m.clock = lambda: 1850
     m.run_once(); m.run_once()
-    assert [o["price"] for o in e.submissions] == ["0.3100", "0.4600"]
+    assert [o["price"] for o in e.submissions] == ["0.3900", "0.4600"]
     m.clock = lambda: 1900
     m.run_once()
     assert len(e.submissions) == 2
@@ -215,12 +215,12 @@ def test_pair_target_is_saved_before_entry_post_and_cash_is_split(monkeypatch):
     place = e.place_entry
     def checked(ticker, side, quantity, price, *args, **kwargs):
         intent = saved[-1]["markets"]["TEST"]["entry_intents"][-1]
-        assert D(intent["exit_target"]) == {D("0.25"): D("0.31"), D("0.39"): D("0.46")}[price]
+        assert D(intent["exit_target"]) == {D("0.32"): D("0.39"), D("0.39"): D("0.46")}[price]
         assert price * quantity <= bot.BUDGET / 2
         return place(ticker, side, quantity, price, *args, **kwargs)
     monkeypatch.setattr(e, "place_entry", checked)
     result = list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
-    assert [p for p, _, _ in result] == [D("0.25"), D("0.39")]
+    assert [p for p, _, _ in result] == [D("0.32"), D("0.39")]
     assert sum(p * q for p, _, q in result) <= bot.BUDGET
     bot.reconcile_entries(state)
     assert not e.cancelled  # A 39-cent order is a supported price, not a legacy mismatch.
@@ -255,9 +255,9 @@ def test_invalid_pairs_fail_closed(value):
 
 def test_duplicate_fills_do_not_duplicate_inventory():
     e = PairExchange()
-    oid = e.buy("0.25", "1.5")
-    entries = {oid: {"side": "YES", "target": "0.31"}}
-    assert paired_inventory(e.history * 2, entries, {}, e.held, "T") == {D("0.31"): D("1.5")}
+    oid = e.buy("0.32", "1.5")
+    entries = {oid: {"side": "YES", "target": "0.39"}}
+    assert paired_inventory(e.history * 2, entries, {}, e.held, "T") == {D("0.39"): D("1.5")}
     altered = copy.deepcopy(e.history[0]); altered["count_fp"] = "3"
     with pytest.raises(ValueError, match="Conflicting"):
         paired_inventory(e.history + [altered], entries, {}, e.held, "T")
@@ -265,10 +265,10 @@ def test_duplicate_fills_do_not_duplicate_inventory():
 
 def test_ambiguous_simultaneous_opposite_fills_do_not_guess_tier_allocation():
     e = PairExchange()
-    a = e.buy("0.25", "2")
+    a = e.buy("0.32", "2")
     b = e.buy("0.39", "1", sign=-1)
     e.history[1]["ts"] = e.history[0]["ts"]
-    entries = {a: {"side": "YES", "target": "0.31"}, b: {"side": "NO", "target": "0.46"}}
+    entries = {a: {"side": "YES", "target": "0.39"}, b: {"side": "NO", "target": "0.46"}}
     with pytest.raises(ValueError, match="ambiguous"):
         paired_inventory(e.history, entries, {}, e.held, "T")
 
@@ -289,3 +289,15 @@ def test_rate_limit_and_disk_failure_cannot_send_untracked_paired_exits(tmp_path
     monkeypatch.setattr(m, "save", lambda: (_ for _ in ()).throw(OSError("disk full")))
     m.run_once()
     assert not e.submissions and not m.healthy
+
+
+
+@pytest.mark.parametrize("sign,wire", [(1, "0.3100"), (-1, "0.6900")])
+def test_retired_tier_keeps_saved_exit_after_pair_change(tmp_path, sign, wire):
+    e = PairExchange(bid="0.35")
+    e.buy("0.32", "2", sign)
+    e.intents[0].update(price="0.25", exit_target="0.31")
+    m, _, _ = paired_monitor(tmp_path, e)
+    m.run_once()
+    assert m.healthy and e.held == 0
+    assert e.submissions[0]["price"] == wire

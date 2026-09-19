@@ -2,12 +2,12 @@
 from decimal import Decimal as D
 
 
-def parse_pairs(value="25:31,39:46"):
+def parse_pairs(value="32:39,39:46"):
     pairs = {}
     for item in value.split(","):
         fields = item.strip().split(":")
         if len(fields) != 2:
-            raise ValueError("ENTRY_EXIT_PAIRS_CENTS must look like 25:31,39:46")
+            raise ValueError("ENTRY_EXIT_PAIRS_CENTS must look like 32:39,39:46")
         entry, target = (D(x.strip()) for x in fields)
         if not all(x.is_finite() and x == x.to_integral_value() and 1 <= x <= 99
                    for x in (entry, target)) or target <= entry:
@@ -106,3 +106,4 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
     for lot in lots:
         buckets[lot["target"]] = buckets.get(lot["target"], D(0)) + lot["quantity"] * lot["sign"]
     return dict(sorted(buckets.items()))
+

@@ -17,7 +17,7 @@ ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
-ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "25:31,39:46"))
+ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "32:39,39:46"))
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
 MARKET_BUDGET = market_budget()

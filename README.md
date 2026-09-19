@@ -31,7 +31,7 @@ All routes use these default outcome-price pairs, configurable through
 
 | Entry limit | Exit target |
 | --- | --- |
-| 25¢ | 31¢ |
+| 32¢ | 39¢ |
 | 39¢ | 46¢ |
 
 Regular bias-based entries run first when a valid prediction snapshot is available.
@@ -72,7 +72,7 @@ Important defaults:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ENTRY_EXIT_PAIRS_CENTS` | `25:31,39:46` | Entry limits and corresponding exits |
+| `ENTRY_EXIT_PAIRS_CENTS` | `32:39,39:46` | Entry limits and corresponding exits |
 | `ENTRY_BUDGET_DOLLARS` | `0.77` | Principal per trigger or entire dual batch |
 | `MARKET_BUDGET_DOLLARS` | `5` | Shared cap including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
@@ -91,6 +91,9 @@ ledger after any volume loss; never clear it to bypass a reconciliation or budge
 block. For a genuinely new installation with no previous orders or positions,
 explicitly create `state.json` containing `{"markets": {}}` on the mounted volume
 before enabling trading. Preserve the adjacent take-profit receipt file too.
+
+Existing 25¢-tier inventory retains its recorded 31¢ exit target after this
+price change. New entries use 32¢→39¢ and 39¢→46¢.
 
 Legacy strategy records remain readable only to prevent adopting inventory that
 belongs to an archived strategy. The old execution module and its configuration

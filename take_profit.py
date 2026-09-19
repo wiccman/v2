@@ -149,7 +149,12 @@ class TakeProfitMonitor:
         entries = {}
         for item in record.get("entry_intents", []):
             order_id = item.get("order_id") or by_client.get(item.get("client_id"))
-            target = self.pairs.get(Decimal(item.get("price", "-1")))
+            price = Decimal(item.get("price", "-1"))
+            target = self.pairs.get(price)
+            # Preserve the original target for inventory from the retired tier.
+            # New entries use only the current pairs.
+            if target is None and price == Decimal("0.25"):
+                target = Decimal("0.31")
             if order_id and target is not None:
                 saved_target = Decimal(item.get("exit_target", str(target)))
                 if saved_target != target:
@@ -261,3 +266,4 @@ class TakeProfitMonitor:
         self._healthy = ok
         if ok:
             self._last_success = self.clock()
+

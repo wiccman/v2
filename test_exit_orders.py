@@ -5,13 +5,13 @@ import bot
 from kalshi import KalshiClient
 
 
-def test_entry_limits_are_25_and_39_cents_for_both_confidences():
+def test_entry_limits_are_32_and_39_cents_for_both_confidences():
     for confidence in ("HIGH", "MODERATE"):
-        assert bot.entry_price_allowed(confidence, Decimal("0.25"))
+        assert bot.entry_price_allowed(confidence, Decimal("0.32"))
         assert bot.entry_price_allowed(confidence, Decimal("0.39"))
         for price in ("0.24", "0.26", "0.30", "0.47", "0.70"):
             assert not bot.entry_price_allowed(confidence, Decimal(price))
-    assert not bot.entry_price_allowed("NONE", Decimal("0.25"))
+    assert not bot.entry_price_allowed("NONE", Decimal("0.32"))
 
 
 class DualLimitClient:
@@ -44,11 +44,11 @@ def test_dual_limit_buys_post_both_levels_until_six_minute_deadline(monkeypatch)
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES", "YES", "NO", "NO"]
-    assert [entry[2] for entry in fake.entries] == [Decimal("0.77"), Decimal("0.49")] * 2
-    assert [entry[3] for entry in fake.entries] == [Decimal("0.25"), Decimal("0.39")] * 2
+    assert [entry[2] for entry in fake.entries] == [Decimal("0.60"), Decimal("0.49")] * 2
+    assert [entry[3] for entry in fake.entries] == [Decimal("0.32"), Decimal("0.39")] * 2
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.BUDGET
     assert all(entry[4] == 1460 for entry in fake.entries)
-    assert record["dual_limit_orders"] == ["dual-yes-0.25", "dual-yes-0.39", "dual-no-0.25", "dual-no-0.39"]
+    assert record["dual_limit_orders"] == ["dual-yes-0.32", "dual-yes-0.39", "dual-no-0.32", "dual-no-0.39"]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
@@ -91,7 +91,7 @@ def test_historical_strike_touch_posts_both_pairs_until_six_minute_deadline(monk
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
-    assert fake.entries == [("MARKET", "NO", Decimal("1.54"), Decimal("0.25"), 1460),
+    assert fake.entries == [("MARKET", "NO", Decimal("1.20"), Decimal("0.32"), 1460),
                             ("MARKET", "NO", Decimal("0.98"), Decimal("0.39"), 1460)]
     assert record["historical_triggered_strikes"] == ["100000"]
     assert record["historical_strike_orders"][0]["strike"] == "100000"
@@ -148,8 +148,8 @@ def test_retired_single_tier_helper_uses_first_pair_target(monkeypatch):
     assert bot.manage_historical_take_profit(
         record, "MARKET", Decimal("3.08"), Decimal("3.08"), closed, Decimal("0.24"),
     ) is True
-    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.31"), 2000.0)]
-    assert record["historical_take_profit_target"] == "0.31"
+    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.39"), 2000.0)]
+    assert record["historical_take_profit_target"] == "0.39"
     assert record["historical_take_profit_order_id"] == "historical-tp"
 
 
@@ -232,8 +232,8 @@ def test_manage_exit_submits_ioc_when_target_reachable(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
     assert record["take_profit_order_id"] == "tp-1"
     assert record["take_profit_quantity"] == "2"
-    assert record["take_profit_target"] == "0.31"
-    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.31"))
+    assert record["take_profit_target"] == "0.39"
+    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.39"))
 
 
 def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):

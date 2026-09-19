@@ -20,7 +20,7 @@ class CycleClient(KalshiClient):
 
     def market(self, ticker):
         return {"ticker": ticker, "floor_strike": "100000",
-                "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.31",
+                "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.39",
                 "no_ask_dollars": "0.66", "no_bid_dollars": "0.65"}
 
     def _order(self, ticker, side, quantity, price, **kwargs):
@@ -41,7 +41,7 @@ class CycleClient(KalshiClient):
 
     def fills(self, ticker):
         return [{"order_id": oid, "outcome_side": "YES", "count_fp": "8",
-                 "yes_price_dollars": "0.25"} for oid in ("regular", "historical")]
+                 "yes_price_dollars": "0.32"} for oid in ("regular", "historical")]
 
     def btc_reference_price(self):
         return D("100010")
@@ -113,7 +113,7 @@ def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
 def test_entry_wire_rejects_expired_order_locally(monkeypatch):
     fake = RecordingClient()
     monkeypatch.setattr(kalshi.time, "time", lambda: 300)
-    assert fake.place_entry("T", "YES", D("1"), D("0.25"), 300) == {}
+    assert fake.place_entry("T", "YES", D("1"), D("0.32"), 300) == {}
     assert fake.calls == []
 
 
@@ -122,16 +122,16 @@ def test_partial_ioc_retries_only_remaining_holdings_and_never_below_target(monk
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
     record = {}
-    market = {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.31"}
+    market = {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.39"}
     closed = datetime(2030, 1, 1, tzinfo=timezone.utc)
     bot.manage_exit(record, "T", market, {}, closed)
     fake.held = D("0.75")
     market["yes_bid_dollars"] = "0.30"
     bot.manage_exit(record, "T", market, {}, closed)
     assert len(fake.actions) == 1
-    market["yes_bid_dollars"] = "0.31"
+    market["yes_bid_dollars"] = "0.39"
     bot.manage_exit(record, "T", market, {}, closed)
-    assert fake.actions[-1][2:4] == (D("0.75"), D("0.31"))
+    assert fake.actions[-1][2:4] == (D("0.75"), D("0.39"))
     fake.held = D("0")
     bot.manage_exit(record, "T", market, {}, closed)
     assert len(fake.actions) == 2
