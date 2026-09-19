@@ -161,6 +161,9 @@ class KalshiClient:
         return self.request("POST", "/portfolio/events/orders/batched", body={"orders": orders}, auth=True)["orders"]
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time):
+        # A slow quote request or preceding order must not submit an expired entry.
+        if time.time() >= expiration_time:
+            return {}
         outcome_price = Decimal(outcome_price)
         if prediction == "YES":
             return self._order(ticker, "bid", quantity, outcome_price, expiration_time=expiration_time)
@@ -177,18 +180,18 @@ class KalshiClient:
         return {}
 
     def place_take_profit(self, ticker, signed_quantity, outcome_price, expiration_time=None):
-        """Place a resting reduce-only exit for the held outcome side."""
+        """Try a price-protected reduce-only IOC; caller monitors/retries leftovers."""
         signed_quantity = Decimal(signed_quantity)
         outcome_price = Decimal(outcome_price)
         if signed_quantity > 0:
             return self._order(
                 ticker, "ask", signed_quantity, outcome_price,
-                reduce_only=True, expiration_time=expiration_time,
+                reduce_only=True, ioc=True,
             )
         if signed_quantity < 0:
             return self._order(
                 ticker, "bid", abs(signed_quantity), Decimal("1") - outcome_price,
-                reduce_only=True, expiration_time=expiration_time,
+                reduce_only=True, ioc=True,
             )
         return {}
 

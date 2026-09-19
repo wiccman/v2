@@ -90,6 +90,9 @@ def test_historical_strike_touch_posts_25_cent_order_for_five_minutes(monkeypatc
 
 
 class HistoricalExitClient:
+    def market(self, ticker):
+        return {"yes_ask_dollars": "0.36", "yes_bid_dollars": "0.35"}
+
     def __init__(self):
         self.actions = []
 
@@ -149,7 +152,7 @@ class RecordingClient(KalshiClient):
         return {"order_id": "tp-order"}
 
 
-def test_yes_take_profit_is_resting_reduce_only_ask():
+def test_yes_take_profit_is_ioc_reduce_only_ask():
     client = RecordingClient()
     result = client.place_take_profit("MARKET", Decimal("2.5"), Decimal("0.40"), 12345)
     body = client.calls[0][2]
@@ -158,8 +161,9 @@ def test_yes_take_profit_is_resting_reduce_only_ask():
     assert body["count"] == "2.5"
     assert body["price"] == "0.4000"
     assert body["reduce_only"] is True
-    assert body["time_in_force"] == "good_till_canceled"
-    assert body["expiration_time"] == 12345
+    assert body["time_in_force"] == "immediate_or_cancel"
+    assert "expiration_time" not in body
+    assert body["post_only"] is False
 
 
 def test_no_take_profit_converts_outcome_price_to_yes_bid():
@@ -170,7 +174,7 @@ def test_no_take_profit_converts_outcome_price_to_yes_bid():
     assert body["count"] == "3"
     assert body["price"] == "0.6500"
     assert body["reduce_only"] is True
-    assert body["time_in_force"] == "good_till_canceled"
+    assert body["time_in_force"] == "immediate_or_cancel"
 
 
 class ExitClient:
@@ -205,12 +209,12 @@ class ExitClient:
         return {"order_id": "stop-1"}
 
 
-def test_manage_exit_places_and_tracks_resting_take_profit(monkeypatch):
+def test_manage_exit_submits_ioc_when_target_reachable(monkeypatch):
     fake = ExitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
     record = {}
-    market = {"yes_ask_dollars": "0.22", "yes_bid_dollars": "0.20", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"}
+    market = {"yes_ask_dollars": "0.24", "yes_bid_dollars": "0.23", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"}
     closed = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
 
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
@@ -228,6 +232,6 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     market = {"yes_ask_dollars": "0.04", "yes_bid_dollars": "0.03", "no_ask_dollars": "0.97", "no_bid_dollars": "0.96"}
     closed = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
 
-    assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
-    assert fake.actions[0][0] == "take_profit"
+    assert bot.manage_exit(record, "MARKET", market, {}, closed) is False
+    assert fake.actions == []
     assert all(action[0] != "close" for action in fake.actions)

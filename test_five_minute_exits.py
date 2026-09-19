@@ -1,0 +1,142 @@
+"""Offline regression coverage: no credentials or live exchange requests."""
+from datetime import datetime, timezone
+from decimal import Decimal as D
+from types import SimpleNamespace
+
+import pytest
+import bot
+import kalshi
+from kalshi import KalshiClient
+from test_exit_orders import ExitClient, RecordingClient
+
+
+class CycleClient(KalshiClient):
+    def __init__(self):
+        self.entries = []
+        self.exits = []
+        self.cancelled = []
+        self.resting = []
+        self.held = D("16")
+
+    def market(self, ticker):
+        return {"ticker": ticker, "floor_strike": "100000",
+                "yes_ask_dollars": "0.36", "yes_bid_dollars": "0.35",
+                "no_ask_dollars": "0.66", "no_bid_dollars": "0.65"}
+
+    def _order(self, ticker, side, quantity, price, **kwargs):
+        collection = self.exits if kwargs.get("reduce_only") else self.entries
+        collection.append((side, quantity, price, kwargs))
+        return {"order_id": "order-" + str(len(self.entries) + len(self.exits))}
+
+    def orders(self, ticker, status):
+        return list(self.resting)
+
+    def cancel(self, order_id):
+        self.cancelled.append(order_id)
+        self.resting = [o for o in self.resting if o["order_id"] != order_id]
+
+    def positions(self, ticker):
+        return [{"ticker": ticker, "position_fp": str(self.held)}]
+
+    def fills(self, ticker):
+        return [{"order_id": oid, "outcome_side": "YES", "count_fp": "8",
+                 "yes_price_dollars": "0.25"} for oid in ("regular", "historical")]
+
+    def btc_reference_price(self):
+        return D("100010")
+
+
+def cycle_setup(monkeypatch, elapsed):
+    clock = [1000000000 + elapsed]
+    started = datetime.fromtimestamp(1000000000, timezone.utc)
+    closed = datetime.fromtimestamp(1000000900, timezone.utc)
+    fake = CycleClient()
+    record = {"buys": 0, "last_buy": 0, "orders": [],
+              "signal": {"prediction": "YES", "base_confidence": "HIGH"},
+              "predictions": [{"ask": "0.70"}] * 3,
+              "historical_strikes": ["100000"],
+              "historical_last_spot": "100050",
+              "historical_strike_orders": [{"order_id": "historical", "side": "YES", "entry_closed": True}]}
+    state = {"markets": {"TEST": record}}
+    monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "END", 300)
+    monkeypatch.setattr(bot.time, "time", lambda: clock[0])
+    monkeypatch.setattr(bot, "datetime", SimpleNamespace(now=lambda tz: datetime.fromtimestamp(clock[0], tz)))
+    monkeypatch.setattr(bot, "active_market", lambda now: (fake.market("TEST"), started, closed))
+    monkeypatch.setattr(bot, "save_state", lambda s: None)
+    monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
+    return fake, record, state, clock, closed
+
+
+@pytest.mark.parametrize("elapsed", [300, 301, 360, 720, 899])
+def test_all_new_buys_stop_at_five_minutes_but_exits_continue(monkeypatch, elapsed):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    bot.cycle(state)
+    assert fake.entries == []
+    assert [(x[1], x[2]) for x in fake.exits] == [(D("8"), D("0.29")), (D("8"), D("0.35"))]
+    assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
+
+
+def test_last_second_entries_expire_at_absolute_five_minute_cutoff(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
+    bot.cycle(state)
+    assert len(fake.entries) == 4  # dual YES/NO, historical touch, regular signal
+    assert all(x[3]["expiration_time"] == 1000000300 for x in fake.entries)
+
+
+def test_restart_cancels_legacy_entries_even_when_signal_lookup_fails(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 300)
+    record.update(orders=["regular-old", "spot-old"], dual_limit_orders=["dual-old"],
+                  dual_limit_cancel_at=1000000500, signal=None,
+                  historical_strike_orders=[{"order_id": "hist-old", "cancel_at": 1000000800}])
+    fake.resting = [{"order_id": oid} for oid in ["regular-old", "spot-old", "dual-old", "hist-old"]]
+    monkeypatch.setattr(bot, "prior_three", lambda started: (_ for _ in ()).throw(RuntimeError("offline")))
+    with pytest.raises(RuntimeError, match="offline"):
+        bot.cycle(state)
+    assert set(fake.cancelled) == {"regular-old", "spot-old", "dual-old", "hist-old"}
+    assert fake.entries == []
+
+
+def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
+    def slow_spot():
+        clock[0] = 1000000301
+        return D("100010")
+    monkeypatch.setattr(fake, "btc_reference_price", slow_spot)
+    bot.cycle(state)
+    assert len(fake.entries) == 2  # Only the dual orders before the slow request.
+
+
+def test_entry_wire_rejects_expired_order_locally(monkeypatch):
+    fake = RecordingClient()
+    monkeypatch.setattr(kalshi.time, "time", lambda: 300)
+    assert fake.place_entry("T", "YES", D("1"), D("0.25"), 300) == {}
+    assert fake.calls == []
+
+
+def test_partial_ioc_retries_only_remaining_holdings_and_never_below_target(monkeypatch):
+    fake = ExitClient()
+    monkeypatch.setattr(bot, "client", fake)
+    monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
+    record = {}
+    market = {"yes_ask_dollars": "0.24", "yes_bid_dollars": "0.23"}
+    closed = datetime(2030, 1, 1, tzinfo=timezone.utc)
+    bot.manage_exit(record, "T", market, {}, closed)
+    fake.held = D("0.75")
+    market["yes_bid_dollars"] = "0.22"
+    bot.manage_exit(record, "T", market, {}, closed)
+    assert len(fake.actions) == 1
+    market["yes_bid_dollars"] = "0.23"
+    bot.manage_exit(record, "T", market, {}, closed)
+    assert fake.actions[-1][2:4] == (D("0.75"), D("0.23"))
+    fake.held = D("0")
+    bot.manage_exit(record, "T", market, {}, closed)
+    assert len(fake.actions) == 2
+
+
+def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 300)
+    record.update(take_profit_rejected_side="YES", take_profit_rejected_quantity="8",
+                  take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
+    bot.cycle(state)
+    assert fake.exits[0][2] == D("0.29")

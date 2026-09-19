@@ -16,7 +16,7 @@ D = Decimal
 ZERO = D("0")
 ONE = D("1")
 TERMINAL = {"canceled", "executed", "rejected"}
-ENTRY_WINDOW_SECONDS = 7 * 60
+ENTRY_WINDOW_SECONDS = 5 * 60
 ENTRY_INTERVAL_SECONDS = 60
 
 

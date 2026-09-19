@@ -1,6 +1,12 @@
-# Strike Ruler Kalshi Bot v0.9.1 (MM)
+# Strike Ruler Kalshi Bot v0.9.2 (MM)
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
+
+## v0.9.2 repair
+
+All entry routes have a hard maximum of five elapsed minutes. `ENTRY_END_MINUTE` may shorten this window but cannot extend it. Entry expiration is checked again immediately before submission. Restored tracked orders are canceled at cutoff before signal retrieval.
+
+Regular and historical exits now use the Kalshi-supported reduce-only IOC format (no expiration or post-only flag), gated by an executable target bid. Legacy resting exits are canceled before replacement. Existing 15% gross and +10-cent targets are preserved; unused `TAKE_PROFIT_CENTS` does not control these targets.
 
 ## Market-making mode (MM)
 
@@ -28,7 +34,7 @@ taking over the other strategy's inventory.
 | `MM_QUOTE_TTL_SECONDS` | `15` | Exchange-side quote expiration |
 | `MM_POLL_SECONDS` | `3` | Delay between completed polling cycles |
 | `MM_MAX_DATA_AGE_SECONDS` | `5` | Maximum book-request/processing age before submission |
-| Entry timing (fixed) | minutes `0–6` | At most one batch per minute; no entries at or after 7:00 elapsed |
+| Entry timing (fixed) | minutes `0–4` | At most one batch per minute; no entries at or after 5:00 elapsed |
 | `MM_MAX_MID_MOVE_CENTS` | `10` | Midpoint jump triggering a pause |
 | `MM_COOLDOWN_SECONDS` | `30` | Pause following that jump |
 
@@ -55,10 +61,10 @@ taking over the other strategy's inventory.
   IOC fills may incur taker fees;
   **it may realize a loss** and does not use the legacy 15% or 10-cent target.
 - Entry batches are reserved durably once per elapsed minute, from minute 0
-  through minute 6. A restart cannot repeat the same minute's batch. Unfilled
+  through minute 4. A restart cannot repeat the same minute's batch. Unfilled
   orders expire after their TTL; the bot does not renew them within that minute.
   Missed minutes are not replayed. Existing inventory, budget, stale-data, and
-  other safety checks may prevent a batch; seven fills are not guaranteed.
+  other safety checks may prevent a batch; five fills are not guaranteed.
   A confirmed cancellation and another polling cycle precede replacement. Polling plus
   network time is slower than a streaming market maker; fast adverse moves can
   still fill stale quotes.
@@ -74,7 +80,7 @@ taking over the other strategy's inventory.
   ledger, not a fresh $10 allocation. Do not delete state to restart a spent budget.
 - Validate the fee allowance against current fees for the selected market.
   The 8-cent spread and 2-cent fee reserve are test defaults, not evidence of an edge.
-- New-entry orders expire by seven minutes after opening; reduce-only exits continue
+- New-entry orders expire by five minutes after opening; reduce-only exits continue
   until close. Unfilled inventory may settle for a loss. There is no forced market
   liquidation or guaranteed take profit. Unsettled prior MM inventory blocks new
   markets until settlement is confirmed.
@@ -106,30 +112,29 @@ API references: [V2 orders](https://docs.kalshi.com/api-reference/orders/create-
 - Up to 7 separate limit purchases per contract.
 - Each purchase budgets $0.77 of contract value.
 - At minute 2, independently post one YES limit buy and one NO limit buy at 25 cents, each using the same $0.77 purchase budget.
-- Both 25-cent orders expire exactly five minutes after placement; the bot also cancels any tracked unfilled remainder on its next polling cycle.
+- Both 25-cent orders expire by minute 5 of the contract; the bot also cancels any tracked unfilled remainder on its next polling cycle.
 - Filling one side does not cancel the other side. Any resulting open position uses the same 15% take-profit management below.
-- The last three completed KXBTC15M strikes are also watched as BTC support/resistance levels during minutes 2–6.
+- The last three completed KXBTC15M strikes are also watched as BTC support/resistance levels during minutes 2–5.
 - When live BRTI comes within $25 of a prior strike, an approach from below posts a 25-cent NO rejection order; an approach from above posts a 25-cent YES bounce order.
-- Each historical-strike level triggers at most once per current contract, uses the same $0.77 order budget, and expires after five minutes if unfilled.
+- Each historical-strike level triggers at most once per current contract, uses the same $0.77 order budget, and expires by minute 5 of the contract if unfilled.
 - Historical-strike fills reserve their own reduce-only exit 10 cents above their actual weighted-average fill; a 25-cent fill exits at 35 cents while other inventory retains the 15% target.
 - Buy HIGH-confidence signals (all 3 prior settlements on the same side of the strike) when the predicted side costs 10–47 cents.
 - Buy MODERATE 2-of-3 signals only when the predicted side costs 10–30 cents.
-- Entry checks run every 7 seconds from minute 2 until minute 6.
-- At minute 6, the third prediction is recorded, new entries stop, and unfilled entries are canceled.
+- Entry checks run every 7 seconds from minute 2 until minute 5.
+- At minute 5, all new entries stop and unfilled entries expire or are canceled. The third prediction snapshot at minute 6 remains observational.
 - The three predicted-side ask prices are averaged as the contract's final confidence.
-- From minute 12 until minute 15, place exactly one additional $0.77 entry when final average confidence is at least 65%.
-- The final entry uses the original fixed Strike Ruler direction. This final phase can trade either HIGH or MODERATE base signals when the 65% average threshold is met.
-- After a buy fills, keep a reduce-only resting sell for the non-historical quantity at a 15% gross gain over its weighted-average fill price. Historical-strike inventory retains its separate 10-cent target.
+- The former minute-12 entry is disabled by the five-minute cutoff.
+- After a buy fills, monitor the executable bid for the non-historical quantity and submit a reduce-only IOC limit sell at a 15% gross gain over its weighted-average fill price. Historical-strike inventory retains its separate 10-cent target.
 - v0.8.1 fixes overlapping exit quantities for YES and NO holdings. On the next successful exit-management cycle, tracked regular sell orders from older versions are canceled and replaced once using the corrected quantity.
 - The target rounds up to the next valid Kalshi price tick and never exceeds the market's highest tradable price.
 - Weighted-average entry price supports Kalshi's current `outcome_side` fill schema and legacy fills.
-- Added fills cancel and replace the resting sell so its quantity and weighted-average target stay current.
+- Each poll recalculates quantity from current holdings and target from fill cost. Partial/unfilled IOC quantities are retried only while the target bid is available. Accepted IOC submissions are logged separately from fills; acceptance does not guarantee a fill.
 - The gross target ignores fees; there is no automatic stop-loss sell.
 - Rejected take-profit orders log Kalshi's response details and wait 60 seconds before retrying the same order.
-- Exit monitoring continues after minute 6; otherwise positions are held through settlement.
+- Exit monitoring continues after minute 5 until market close. The bot must stay online; polling/network latency may miss a brief target touch. Unfilled holdings can settle for a loss.
 - No daily-loss limit.
 
-Maximum planned entry principal is $10.78 per market before fees: three historical-strike entries, two dual-sided 25-cent entries, one spot-trigger entry, seven regular entries, and one final entry at $0.77 each.
+With defaults, maximum planned entry principal is $10.01 before fees: three historical-strike entries, two dual entries, one spot entry, and seven regular entries at $0.77 each. Railway overrides these per-entry settings; there is no shared aggregate per-market spending cap.
 
 ## Railway setup
 

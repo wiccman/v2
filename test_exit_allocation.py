@@ -13,6 +13,11 @@ class InventoryClient:
         self.resting = []
         self.submitted = []
         self.cancelled = []
+        self.executions = []
+
+    def market(self, ticker):
+        return {"yes_ask_dollars": "0.36", "yes_bid_dollars": "0.35",
+                "no_ask_dollars": "0.36", "no_bid_dollars": "0.35"}
 
     def positions(self, ticker):
         held = self.regular + self.historical
@@ -36,7 +41,10 @@ class InventoryClient:
     def place_take_profit(self, ticker, held, target, expiration_time):
         order_id = f"exit-{len(self.submitted)}"
         self.submitted.append((held, target))
-        self.resting.append({"order_id": order_id})
+        if target == Decimal("0.29"):
+            self.regular -= abs(held)
+        else:
+            self.historical -= abs(held)
         return {"order_id": order_id}
 
     def cancel(self, order_id):
@@ -51,8 +59,7 @@ def setup(monkeypatch, side, regular, historical):
     monkeypatch.setattr(bot, "TAKE_PROFIT_PERCENT", Decimal("15"))
     monkeypatch.setattr(bot, "HISTORICAL_STRIKE_PROFIT_CENTS", Decimal("10"))
     record = {"historical_strike_orders": [{"order_id": "historical-entry", "side": side}]}
-    market = {"yes_ask_dollars": "0.25", "yes_bid_dollars": "0.24",
-              "no_ask_dollars": "0.25", "no_bid_dollars": "0.24"}
+    market = fake.market("MARKET")
     closed = datetime(2030, 1, 1, tzinfo=timezone.utc)
     return fake, record, market, closed
 
@@ -77,7 +84,7 @@ def test_exit_quantities_partition_inventory(monkeypatch, side, regular, histori
         expected.append((sign * Decimal(historical), Decimal("0.35")))
     assert fake.submitted == expected
     assert sum(abs(quantity) for quantity, _ in fake.submitted) == Decimal(regular) + Decimal(historical)
-    # An unchanged second poll must retain the accepted orders.
+    # After IOC fills, the next poll sees no holdings and cannot sell twice.
     manage_both(record, market, closed)
     assert fake.submitted == expected
     assert fake.cancelled == []
@@ -90,8 +97,10 @@ def test_replaces_legacy_oversized_order_after_restart(monkeypatch, side):
     record.update(take_profit_order_id="legacy-exit", take_profit_side=side,
                   take_profit_quantity="2", take_profit_target="0.29")
     fake.resting = [{"order_id": "legacy-exit"}]
+    reserved, excluded, average = bot.historical_inventory(record, "MARKET", bot.position("MARKET"))
+    bot.manage_exit(record, "MARKET", market, {}, closed, reserved, excluded)
+    assert fake.submitted == []  # reconcile cancellation before new orders
     manage_both(record, market, closed)
     assert fake.cancelled == ["legacy-exit"]
     sign = Decimal("1") if side == "YES" else Decimal("-1")
     assert fake.submitted == [(sign * 2, Decimal("0.29")), (sign * 3, Decimal("0.35"))]
-
