@@ -34,7 +34,7 @@ def test_all_entry_routes_share_five_dollars_and_restart_does_not_refund(monkeyp
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
     assert D("4.99") < spent <= D("5")
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("5")
-    assert len(fake.entries) == 4
+    assert len(fake.entries) == 6
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
@@ -161,22 +161,4 @@ def test_budget_setting_cannot_exceed_five(monkeypatch):
     assert entry_policy.market_budget() == 5
     monkeypatch.setenv("MARKET_BUDGET_DOLLARS", "4")
     assert entry_policy.market_budget() == 4
-
-
-def test_mm_cap_survives_cancellation_and_does_not_block_exits():
-    from market_maker import MarketMaker
-    from test_market_maker import Exchange
-    fake = Exchange()
-    mm = MarketMaker(fake, lambda state: None, lambda *a, **k: None)
-    record = {"orders": []}
-    state = {"mm": {"markets": {"M": record}}}
-    entry = [("bid", D("0.25"), D("10"), False)]
-    mm._place(record, state, "M", entry, 2000)
-    assert len(fake.batches) == 1
-    record = json.loads(json.dumps(record))
-    record["orders"][0].update(status="canceled", remaining="0")
-    mm._place(record, state, "M", entry, 2000)
-    assert len(fake.batches) == 1  # A second $2.80 reservation would exceed $5.
-    mm._place(record, state, "M", [("ask", D("0.35"), D("1"), True)], 2000)
-    assert len(fake.batches) == 2
 

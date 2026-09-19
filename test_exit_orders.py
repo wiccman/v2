@@ -44,8 +44,9 @@ def test_dual_limit_buys_post_both_levels_until_six_minute_deadline(monkeypatch)
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES", "YES", "NO", "NO"]
-    assert [entry[2] for entry in fake.entries] == [Decimal("1.54"), Decimal("0.98")] * 2
+    assert [entry[2] for entry in fake.entries] == [Decimal("0.77"), Decimal("0.49")] * 2
     assert [entry[3] for entry in fake.entries] == [Decimal("0.25"), Decimal("0.39")] * 2
+    assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.BUDGET
     assert all(entry[4] == 1460 for entry in fake.entries)
     assert record["dual_limit_orders"] == ["dual-yes-0.25", "dual-yes-0.39", "dual-no-0.25", "dual-no-0.39"]
 
@@ -247,4 +248,5 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is False
     assert fake.actions == []
     assert all(action[0] != "close" for action in fake.actions)
+
 

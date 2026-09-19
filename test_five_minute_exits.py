@@ -106,7 +106,8 @@ def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
         return D("100010")
     monkeypatch.setattr(fake, "btc_reference_price", slow_spot)
     bot.cycle(state)
-    assert len(fake.entries) == 4  # Both dual levels before the slow request.
+    assert len(fake.entries) == 6  # Regular pair and dual batch before the slow request.
+    assert not any(i["kind"] == "historical" for i in record["entry_intents"])
 
 
 def test_entry_wire_rejects_expired_order_locally(monkeypatch):
@@ -142,4 +143,5 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
     assert fake.exits == []  # Retired backoff cannot trigger overlapping exits.
+
 
