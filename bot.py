@@ -4,7 +4,6 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
-from market_maker import MarketMaker
 from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, gross_take_profit_target, fixed_take_profit_target
 
 load_dotenv()
@@ -13,8 +12,6 @@ if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "produ
 
 ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
-if EXECUTION_STRATEGY not in ("strike_ruler", "market_making"):
-    raise SystemExit("EXECUTION_STRATEGY must be strike_ruler or market_making")
 ENTRY_MIN = Decimal(os.getenv("ENTRY_MIN_CENTS", "10")) / 100
 ENTRY_MAX = Decimal(os.getenv("ENTRY_MAX_CENTS", "47")) / 100
 MODERATE_ENTRY_MAX = Decimal(os.getenv("MODERATE_ENTRY_MAX_CENTS", "30")) / 100
@@ -511,6 +508,8 @@ def main():
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
     if args.check: check(); return
+    if ENABLED and EXECUTION_STRATEGY != "strike_ruler":
+        raise SystemExit("Market-making execution has been removed. Live trading requires EXECUTION_STRATEGY=strike_ruler.")
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
         check()
@@ -520,14 +519,14 @@ def main():
     import fcntl
     import signal
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    if EXECUTION_STRATEGY == "market_making" and os.getenv("RAILWAY_ENVIRONMENT_ID"):
+    if os.getenv("RAILWAY_ENVIRONMENT_ID"):
         mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
         if not mount or not os.path.ismount(mount) or not all(
             p.resolve().is_relative_to(Path(mount).resolve()) for p in (STATE, LOG)
         ):
-            raise SystemExit("MM requires STATE_PATH and LOG_PATH on a mounted persistent Railway volume")
+            raise SystemExit("Trading requires STATE_PATH and LOG_PATH on a mounted persistent Railway volume")
         if not STATE.exists():
-            print("MM_WAIT_STATE_RESTORE: restore state.json to the volume before trading", flush=True)
+            print("WAIT_STATE_RESTORE: restore state.json to the volume before trading", flush=True)
             while not STATE.exists():
                 time.sleep(3)
     with STATE.with_suffix(".lock").open("a") as lock:
@@ -536,28 +535,17 @@ def main():
         except BlockingIOError:
             raise SystemExit("Another bot already owns this state volume")
         state = load_state()
-        mm = MarketMaker(client, save_state, write_log) if EXECUTION_STRATEGY == "market_making" else None
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)
         try:
             while True:
                 try:
-                    if mm:
-                        market, _, closed = active_market(datetime.now(timezone.utc))
-                        mm.cycle(state, market, closed)
-                    else:
-                        cycle(state)
+                    cycle(state)
                 except Exception as error:
                     write_log("ERROR", details=repr(error))
-                    if mm:
-                        try: mm.cancel_all(state)
-                        except Exception as cancel_error: write_log("MM_CANCEL_ERROR", details=repr(cancel_error))
-                time.sleep(mm.config.poll if mm else int(os.getenv("POLL_SECONDS", "7")))
+                time.sleep(int(os.getenv("POLL_SECONDS", "7")))
         except KeyboardInterrupt:
-            if mm:
-                try: mm.cancel_all(state)
-                except Exception as error: write_log("MM_CANCEL_ERROR", details=repr(error))
             save_state(state)
 
 if __name__ == "__main__": main()
