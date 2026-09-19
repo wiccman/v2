@@ -5,9 +5,10 @@ import bot
 from kalshi import KalshiClient
 
 
-def test_entry_limit_is_25_cents_for_both_confidences():
+def test_entry_limits_are_25_and_39_cents_for_both_confidences():
     for confidence in ("HIGH", "MODERATE"):
         assert bot.entry_price_allowed(confidence, Decimal("0.25"))
+        assert bot.entry_price_allowed(confidence, Decimal("0.39"))
         for price in ("0.24", "0.26", "0.30", "0.47", "0.70"):
             assert not bot.entry_price_allowed(confidence, Decimal(price))
     assert not bot.entry_price_allowed("NONE", Decimal("0.25"))
@@ -20,7 +21,7 @@ class DualLimitClient:
         self.cancelled = []
 
     def place_entry(self, ticker, side, quantity, price, expiration_time, **kwargs):
-        order_id = f"dual-{side.lower()}"
+        order_id = f"dual-{side.lower()}-{price}"
         self.entries.append((ticker, side, quantity, price, expiration_time))
         self.resting.append({"order_id": order_id})
         return {"order_id": order_id}
@@ -33,7 +34,7 @@ class DualLimitClient:
         return {"order_id": order_id, "reduced_by": "1.00"}
 
 
-def test_dual_limit_buys_post_both_sides_at_25_cents_until_six_minute_deadline(monkeypatch):
+def test_dual_limit_buys_post_both_levels_until_six_minute_deadline(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -42,11 +43,11 @@ def test_dual_limit_buys_post_both_sides_at_25_cents_until_six_minute_deadline(m
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
-    assert [entry[1] for entry in fake.entries] == ["YES", "NO"]
-    assert all(entry[2] == Decimal("3.08") for entry in fake.entries)
-    assert all(entry[3] == Decimal("0.25") for entry in fake.entries)
+    assert [entry[1] for entry in fake.entries] == ["YES", "YES", "NO", "NO"]
+    assert [entry[2] for entry in fake.entries] == [Decimal("1.54"), Decimal("0.98")] * 2
+    assert [entry[3] for entry in fake.entries] == [Decimal("0.25"), Decimal("0.39")] * 2
     assert all(entry[4] == 1460 for entry in fake.entries)
-    assert record["dual_limit_orders"] == ["dual-yes", "dual-no"]
+    assert record["dual_limit_orders"] == ["dual-yes-0.25", "dual-yes-0.39", "dual-no-0.25", "dual-no-0.39"]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
@@ -73,7 +74,7 @@ def test_historical_strike_reaction_uses_approach_side():
     assert bot.strike_reaction_side(Decimal("100000"), Decimal("100000")) is None
 
 
-def test_historical_strike_touch_posts_25_cent_order_until_six_minute_deadline(monkeypatch):
+def test_historical_strike_touch_posts_both_pairs_until_six_minute_deadline(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -89,7 +90,8 @@ def test_historical_strike_touch_posts_25_cent_order_until_six_minute_deadline(m
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
-    assert fake.entries == [("MARKET", "NO", Decimal("3.08"), Decimal("0.25"), 1460)]
+    assert fake.entries == [("MARKET", "NO", Decimal("1.54"), Decimal("0.25"), 1460),
+                            ("MARKET", "NO", Decimal("0.98"), Decimal("0.39"), 1460)]
     assert record["historical_triggered_strikes"] == ["100000"]
     assert record["historical_strike_orders"][0]["strike"] == "100000"
 
@@ -134,7 +136,7 @@ def test_historical_inventory_reserves_only_unexited_strategy_quantity(monkeypat
     assert average_entry is None
 
 
-def test_historical_fill_gets_absolute_45_cent_exit_despite_price_improvement(monkeypatch):
+def test_retired_single_tier_helper_uses_first_pair_target(monkeypatch):
     fake = HistoricalExitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -145,8 +147,8 @@ def test_historical_fill_gets_absolute_45_cent_exit_despite_price_improvement(mo
     assert bot.manage_historical_take_profit(
         record, "MARKET", Decimal("3.08"), Decimal("3.08"), closed, Decimal("0.24"),
     ) is True
-    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.45"), 2000.0)]
-    assert record["historical_take_profit_target"] == "0.45"
+    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.31"), 2000.0)]
+    assert record["historical_take_profit_target"] == "0.31"
     assert record["historical_take_profit_order_id"] == "historical-tp"
 
 
@@ -229,8 +231,8 @@ def test_manage_exit_submits_ioc_when_target_reachable(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
     assert record["take_profit_order_id"] == "tp-1"
     assert record["take_profit_quantity"] == "2"
-    assert record["take_profit_target"] == "0.45"
-    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.45"))
+    assert record["take_profit_target"] == "0.31"
+    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.31"))
 
 
 def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):

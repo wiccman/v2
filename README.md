@@ -1,45 +1,67 @@
-# Strike Ruler Kalshi Bot v0.9.4
+# Strike Ruler Kalshi Bot v0.9.5
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
-## v0.9.4 fixed prices and independent take-profit monitor
+## v0.9.5 paired entry and exit prices
 
-All Strike Ruler entry routes use `ENTRY_PRICE_CENTS=25`. All their held inventory
-uses the absolute `EXIT_PRICE_CENTS=45` target, including historical-strike entries.
-These are outcome prices: a NO exit at 45 cents sends a YES bid at 55 cents.
-Old percentage and per-route profit settings no longer select exit prices.
-An old fill above 45 cents can realize a loss at the newly requested fixed target.
+`ENTRY_EXIT_PAIRS_CENTS=25:31,39:46` configures these outcome-price pairs:
 
-After a fill appears in positions, an independent worker persists its 45-cent
-target and immediately submits a price-protected, reduce-only IOC. It reconciles
-that order and retries remaining holdings, normally after `EXIT_POLL_SECONDS=1`
-plus request time. Signal lookups, CF Benchmarks errors and entry polling do not
-block this worker. It covers regular, spot, dual and historical entries together
-once per net position, and keeps running after the entry/cancellation cutoffs.
+| Entry limit | Exit target |
+| --- | --- |
+| 25 cents | 31 cents |
+| 39 cents | 46 cents |
 
-**This is a bot-managed target, not a resting exchange-hosted sell order.**
+All Strike Ruler entry routes (regular, spot, dual and historical-strike) offer
+both levels. `ENTRY_BUDGET_DOLLARS` is split equally between the two levels per
+trigger/side; it is not doubled. Both levels and all routes share the existing
+$5 per-market allowance, including the entry fee cushion. The regular purchase
+counter counts a paired attempt once. New entries still stop at 5:00 elapsed;
+unfilled entry orders expire at 6:00. Signal selection is unchanged.
+
+Each entry intent durably stores its target before submission. A price-improved
+fill keeps the target assigned to that order's entry limit. For example, a
+39-cent limit filled below 39 still belongs to the 46-cent exit tier. The monitor
+uses complete primary-account fill history and signed net positions to keep
+remaining quantities at 31 and 46 separate. It does not use an average entry
+price or apply 31 cents to the entire position. NO exits convert to YES bids at
+69 and 54 cents, respectively.
+
+After a fill is verified, an independent worker persists its exit intent and
+submits a price-protected, reduce-only IOC. It reconciles the result before
+retrying, rotating across occupied targets so neither tier is starved. A single
+target is normally checked every `EXIT_POLL_SECONDS=1` plus API request time;
+with both occupied, each gets a turn every two cycles. Entry signal lookups and
+CF Benchmarks errors do not block this worker. Exits continue after the entry
+cutoffs until market close. `cycle()` refuses new entries without the worker;
+there is no fallback that sells mixed inventory at one price.
+
+**These are bot-managed targets, not resting exchange-hosted sell orders.**
 The production API has rejected resting reduce-only orders with
-`reduce_only can only be used with IoC orders`. An IOC below the target cancels
-unfilled. The monitor retries it; it does not remove reduce-only protection or
-post an ordinary sell that could open an opposite position after another fill.
-The process must stay online, and polling/API delays can miss short price moves.
-Neither an armed target nor an accepted order guarantees an exit or a profit.
+`reduce_only can only be used with IoC orders`. An unmarketable IOC cancels and
+is retried. The process must stay online; polling, fill propagation and API delays
+can miss short price moves. An armed target or accepted order is not a fill.
 
-Exit receipts live beside `state.json` in `state_take_profit.json` on the same
-persistent volume. A durable client ID precedes every submission. Lost responses
-are reconciled through order history before another exit is sent. Unknown orders
-are never blindly resubmitted. API errors respect Retry-After, pause new buys,
-and log `TP_ERROR`; preserve both state files when investigating one.
-The worker confirms cancellation of tracked legacy resting exits before taking
-over their market. Incompatible old-price entries are canceled without refunding
-their market-budget reservations. Entry selection/signal rules are unchanged.
+Exit receipts and target attribution live in `state_take_profit.json` beside
+`state.json` on the persistent volume. Preserve both files and run one replica.
+Lost acknowledgements are recovered by persisted client IDs before resubmission.
+Duplicate fills are counted once. Missing/inconsistent fill history, ambiguous fill ordering or unknown
+inventory pauses new entries and logs `TP_ERROR` rather than guessing a target.
+Manual reductions and opposite-side entries consume the oldest remaining lots
+first for accounting; do not run another bot or trade the same ticker manually
+while this monitor is active, because exchange inventory is netted and concurrent
+external activity cannot be locked by this process.
 
-Railway logs now show `TP_MONITOR_STARTED`, `TP_ARMED`, `TP_SUBMITTED`, `TP_FILL`,
-`TP_POSITION_FLAT` and errors. `TP_FILL` requires exchange fill counts;
-`TP_SUBMITTED` only confirms acceptance. Run one replica with the existing volume.
-On deployment verify the startup line reads fixed entry=25c and fixed exit=45c.
-If these new variables are absent, those values are the defaults. `--check` and
-`TRADING_ENABLED=false` still cannot submit exits or entries.
+On upgrade, old 25-cent intents without saved targets adopt 31 cents. Previously
+submitted exits are reconciled before new targets are used; existing state and
+budget reservations are retained. Entries at unsupported prices are canceled.
+Old undocumented holdings need reconciliation, not an invented average-cost exit.
+`ENTRY_PRICE_CENTS`, `EXIT_PRICE_CENTS`, percentage and per-route profit settings
+no longer choose these prices. Startup logs print both pairs. `--check` and
+`TRADING_ENABLED=false` cannot submit entries or exits. Demo mode is not added.
+
+Logs include `TP_MONITOR_STARTED`, `TP_ARMED`, `TP_SUBMITTED`, `TP_FILL`,
+`TP_POSITION_FLAT` and errors, with the applicable target. `TP_FILL` requires an
+exchange fill count. The API history source is [Get Fills](https://docs.kalshi.com/api-reference/portfolio/get-fills).
 
 ## v0.9.3 cancellation and budget repair
 
@@ -54,8 +76,8 @@ no longer abandon other entry cancellations or block position exits.
 `MARKET_BUDGET_DOLLARS=5` is a **shared per-market allowance** (hard maximum $5).
 Every spot, dual, historical and regular entry reserves its limit-price principal
 plus a conservative 3-cent-per-contract entry fee cushion before submission.
-`ENTRY_BUDGET_DOLLARS` is only the desired size of each order; the remaining market
-allowance can reduce or block it. Reservations persist across restarts and remain
+`ENTRY_BUDGET_DOLLARS` is the desired principal per paired trigger/side; the
+remaining market allowance can reduce or block either order. Reservations persist across restarts and remain
 consumed after cancellation, rejection or sale, so actual filled spending may be
 less than $5. Exit fees are separate. MM batches also obey the same $5 per-market
 ceiling in addition to their existing capital checks.
@@ -66,7 +88,7 @@ new entries resume in the next clean market. Existing filled positions continue
 through normal exit management. Persisted client IDs recover orders whose POST
 acknowledgement was lost. Do not erase state to reset a market's budget.
 
-Regular and historical exits use the shared fixed 45-cent monitor described above.
+Regular and historical exits use the paired monitor described above.
 Exit monitoring continues after 6:00. `TAKE_PROFIT_CENTS` and
 `TAKE_PROFIT_PERCENT` are unused. The old per-order dual/historical TTL settings
 are superseded by the fixed six-minute market deadline in Strike Ruler mode.
