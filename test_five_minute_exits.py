@@ -20,7 +20,7 @@ class CycleClient(KalshiClient):
 
     def market(self, ticker):
         return {"ticker": ticker, "floor_strike": "100000",
-                "yes_ask_dollars": "0.36", "yes_bid_dollars": "0.35",
+                "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45",
                 "no_ask_dollars": "0.66", "no_bid_dollars": "0.65"}
 
     def _order(self, ticker, side, quantity, price, **kwargs):
@@ -74,7 +74,7 @@ def test_all_new_buys_stop_at_five_minutes_but_exits_continue(monkeypatch, elaps
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     bot.cycle(state)
     assert fake.entries == []
-    assert [(x[1], x[2]) for x in fake.exits] == [(D("8"), D("0.29")), (D("8"), D("0.35"))]
+    assert [(x[1], x[2]) for x in fake.exits] == [(D("8"), D("0.45")), (D("8"), D("0.45"))]
     assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
 
 
@@ -120,16 +120,16 @@ def test_partial_ioc_retries_only_remaining_holdings_and_never_below_target(monk
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
     record = {}
-    market = {"yes_ask_dollars": "0.24", "yes_bid_dollars": "0.23"}
+    market = {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45"}
     closed = datetime(2030, 1, 1, tzinfo=timezone.utc)
     bot.manage_exit(record, "T", market, {}, closed)
     fake.held = D("0.75")
-    market["yes_bid_dollars"] = "0.22"
+    market["yes_bid_dollars"] = "0.44"
     bot.manage_exit(record, "T", market, {}, closed)
     assert len(fake.actions) == 1
-    market["yes_bid_dollars"] = "0.23"
+    market["yes_bid_dollars"] = "0.45"
     bot.manage_exit(record, "T", market, {}, closed)
-    assert fake.actions[-1][2:4] == (D("0.75"), D("0.23"))
+    assert fake.actions[-1][2:4] == (D("0.75"), D("0.45"))
     fake.held = D("0")
     bot.manage_exit(record, "T", market, {}, closed)
     assert len(fake.actions) == 2
@@ -140,4 +140,5 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
     record.update(take_profit_rejected_side="YES", take_profit_rejected_quantity="8",
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
-    assert fake.exits[0][2] == D("0.29")
+    assert fake.exits[0][2] == D("0.45")
+

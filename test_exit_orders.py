@@ -5,11 +5,12 @@ import bot
 from kalshi import KalshiClient
 
 
-def test_entry_price_caps_depend_on_base_confidence():
-    assert bot.entry_price_allowed("HIGH", Decimal("0.47")) is True
-    assert bot.entry_price_allowed("HIGH", Decimal("0.48")) is False
-    assert bot.entry_price_allowed("MODERATE", Decimal("0.30")) is True
-    assert bot.entry_price_allowed("MODERATE", Decimal("0.31")) is False
+def test_entry_limit_is_25_cents_for_both_confidences():
+    for confidence in ("HIGH", "MODERATE"):
+        assert bot.entry_price_allowed(confidence, Decimal("0.25"))
+        for price in ("0.24", "0.26", "0.30", "0.47", "0.70"):
+            assert not bot.entry_price_allowed(confidence, Decimal(price))
+    assert not bot.entry_price_allowed("NONE", Decimal("0.25"))
 
 
 class DualLimitClient:
@@ -95,7 +96,7 @@ def test_historical_strike_touch_posts_25_cent_order_until_six_minute_deadline(m
 
 class HistoricalExitClient:
     def market(self, ticker):
-        return {"yes_ask_dollars": "0.36", "yes_bid_dollars": "0.35"}
+        return {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45"}
 
     def __init__(self):
         self.actions = []
@@ -109,6 +110,7 @@ class HistoricalExitClient:
 
     def cancel(self, order_id, ticker):
         self.actions.append(("cancel", order_id))
+        return {"order_id": order_id, "reduced_by": "1.00"}
 
     def fills(self, ticker):
         return [
@@ -132,7 +134,7 @@ def test_historical_inventory_reserves_only_unexited_strategy_quantity(monkeypat
     assert average_entry is None
 
 
-def test_historical_strike_fill_gets_ten_cent_exit_from_actual_fill(monkeypatch):
+def test_historical_fill_gets_absolute_45_cent_exit_despite_price_improvement(monkeypatch):
     fake = HistoricalExitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -143,8 +145,8 @@ def test_historical_strike_fill_gets_ten_cent_exit_from_actual_fill(monkeypatch)
     assert bot.manage_historical_take_profit(
         record, "MARKET", Decimal("3.08"), Decimal("3.08"), closed, Decimal("0.24"),
     ) is True
-    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.34"), 2000.0)]
-    assert record["historical_take_profit_target"] == "0.34"
+    assert fake.actions == [("MARKET", Decimal("3.08"), Decimal("0.45"), 2000.0)]
+    assert record["historical_take_profit_target"] == "0.45"
     assert record["historical_take_profit_order_id"] == "historical-tp"
 
 
@@ -208,6 +210,7 @@ class ExitClient:
 
     def cancel(self, order_id, ticker):
         self.actions.append(("cancel", order_id))
+        return {"order_id": order_id, "reduced_by": "1.00"}
 
     def close_position(self, ticker, held, yes_bid, yes_ask):
         self.actions.append(("close", ticker, held, yes_bid, yes_ask))
@@ -220,14 +223,14 @@ def test_manage_exit_submits_ioc_when_target_reachable(monkeypatch):
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {}
-    market = {"yes_ask_dollars": "0.24", "yes_bid_dollars": "0.23", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"}
+    market = {"yes_ask_dollars": "0.46", "yes_bid_dollars": "0.45", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"}
     closed = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
 
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is True
     assert record["take_profit_order_id"] == "tp-1"
     assert record["take_profit_quantity"] == "2"
-    assert record["take_profit_target"] == "0.23"
-    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.23"))
+    assert record["take_profit_target"] == "0.45"
+    assert fake.actions[0][:4] == ("take_profit", "MARKET", Decimal("2"), Decimal("0.45"))
 
 
 def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
@@ -242,3 +245,4 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is False
     assert fake.actions == []
     assert all(action[0] != "close" for action in fake.actions)
+
