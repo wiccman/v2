@@ -52,11 +52,13 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
         action = str(fill.get("action", "")).lower()
         outcome_sign = {"yes": 1, "no": -1}.get(side)
         action_sign = {"buy": 1, "sell": -1}.get(action)
-        legacy_sign = outcome_sign * action_sign if outcome_sign and action_sign else None
-        sign = {"bid": 1, "ask": -1}.get(book_side, legacy_sign)
-        if sign is None or (legacy_sign is not None and legacy_sign != sign):
+        position_sign = outcome_sign * action_sign if outcome_sign and action_sign else None
+        # The action/outcome pair is the account's change in YES inventory.
+        # book_side describes the book quote and can be the opposite side of a sell.
+        sign = position_sign if position_sign is not None else {"bid": 1, "ask": -1}.get(book_side)
+        if sign is None:
             fields = {name: fill.get(name) for name in ("book_side", "outcome_side", "side", "action", "order_id") if name in fill}
-            raise ValueError(f"Fill direction unavailable or contradictory: {fields}")
+            raise ValueError(f"Fill direction unavailable: {fields}")
         if fill.get("created_time"):
             stamp = datetime.fromisoformat(fill["created_time"].replace("Z", "+00:00"))
             if stamp.tzinfo is None:
