@@ -5,7 +5,6 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
-from market_maker import MarketMaker
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
@@ -16,9 +15,9 @@ if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "produ
 
 ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
-if EXECUTION_STRATEGY not in ("strike_ruler", "market_making"):
-    raise SystemExit("EXECUTION_STRATEGY must be strike_ruler or market_making")
-ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "25:31,39:46"))
+if EXECUTION_STRATEGY != "strike_ruler":
+    raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
+ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "32:39,39:46"))
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
 MARKET_BUDGET = market_budget()
@@ -28,7 +27,8 @@ MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 START = seconds_from_minutes(os.getenv("ENTRY_START_MINUTE", "2"))
 END = min(seconds_from_minutes(os.getenv("ENTRY_END_MINUTE", "5")), 300)
-PREDICTION_MINUTES = tuple(int(x.strip()) for x in os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6").split(",") if x.strip())
+PREDICTION_MINUTES = (2, 4, 6)
+PREDICTION_GRACE_SECONDS = 15
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
 SPOT_ENTRY_WINDOW = min(seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTES", "2")), END)
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
@@ -44,7 +44,37 @@ client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""), os.getenv("KALSHI_PRIV
 EXIT_MONITOR = None
 
 def parse_time(value): return datetime.fromisoformat(value.replace("Z", "+00:00"))
-def load_state(): return json.loads(STATE.read_text()) if STATE.exists() else {"markets": {}}
+def load_state():
+    # Never turn a lost spending ledger into a new allowance.
+    if not STATE.exists():
+        raise RuntimeError("STATE_MISSING: restore state.json before starting; no automatic reset")
+    state = json.loads(STATE.read_text())
+    if not isinstance(state, dict) or not isinstance(state.get("markets"), dict):
+        raise ValueError("STATE_INVALID: expected a markets object; restore the saved ledger")
+    for record in state["markets"].values():
+        if not isinstance(record, dict):
+            raise ValueError("STATE_INVALID: market record must be an object")
+        if "entry_intents" in record:
+            intents = record["entry_intents"]
+            if not isinstance(intents, list):
+                raise ValueError("STATE_INVALID: entry ledger must be a list")
+            for intent in intents:
+                if not isinstance(intent, dict) or "reserved_dollars" not in intent:
+                    raise ValueError("STATE_INVALID: entry reservation is missing")
+                amount = Decimal(str(intent["reserved_dollars"]))
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError("STATE_INVALID: entry reservation must be finite and nonnegative")
+    return state
+
+def validate_storage():
+    if os.getenv("RAILWAY_ENVIRONMENT_ID"):
+        mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
+        if not mount or not os.path.ismount(mount) or not all(
+            p.resolve().is_relative_to(Path(mount).resolve()) for p in (STATE, LOG)
+        ):
+            raise RuntimeError("STATE_VOLUME_REQUIRED: state and log must be on the persistent Railway volume")
+    load_state()
+
 def save_state(state):
     STATE.parent.mkdir(parents=True, exist_ok=True)
     temp = STATE.with_suffix(".tmp")
@@ -54,12 +84,19 @@ def save_state(state):
         os.fsync(handle.fileno())
     temp.replace(STATE)
 def write_log(event, ticker="", **values):
-    LOG.parent.mkdir(parents=True, exist_ok=True); exists = LOG.exists()
     fields = ["time_utc", "ticker", "event", "prediction", "confidence", "price", "quantity", "details"]
+    row = {field: "" for field in fields}
+    row.update(time_utc=datetime.now(timezone.utc).isoformat(), ticker=ticker, event=event)
+    row.update(values)
+    # Emit before file I/O so even a broken volume is visible in Railway logs.
+    print(json.dumps(row), flush=True)
+    LOG.parent.mkdir(parents=True, exist_ok=True)
+    exists = LOG.exists()
     with LOG.open("a", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
-        if not exists: writer.writeheader()
-        row = {field: "" for field in fields}; row.update(time_utc=datetime.now(timezone.utc).isoformat(), ticker=ticker, event=event); row.update(values); writer.writerow(row)
+        if not exists:
+            writer.writeheader()
+        writer.writerow(row)
 
 def active_market(now):
     for market in client.markets(series_ticker="KXBTC15M", status="open", limit=100):
@@ -68,26 +105,30 @@ def active_market(now):
         if started <= now < closed: return market, started, closed
     return None, None, None
 
-def prior_three(started):
-    found = []
-    for market in client.markets(series_ticker="KXBTC15M", status="settled", limit=100):
-        closed, value = parse_time(market["close_time"]), market.get("expiration_value")
-        if closed <= started and value not in (None, ""): found.append((closed, Decimal(str(value))))
-    found.sort()
-    if len(found) < 3: raise RuntimeError("DATA UNAVAILABLE: fewer than 3 finalized KXBTC15M settlements")
-    return [value for _, value in found[-3:]]
-
-def prior_strikes(started, count=HISTORICAL_STRIKE_COUNT):
-    found = []
+def completed_values(started, field, count):
+    expected = [started - timedelta(minutes=15 * offset) for offset in reversed(range(count))]
+    found = {}
     for market in client.markets(series_ticker="KXBTC15M", status="settled", limit=100):
         closed = parse_time(market["close_time"])
-        strike = market.get("floor_strike")
-        if closed <= started and strike not in (None, ""):
-            found.append((closed, Decimal(str(strike))))
-    found.sort()
-    if len(found) < count:
-        raise RuntimeError(f"DATA UNAVAILABLE: fewer than {count} finalized KXBTC15M strikes")
-    return [value for _, value in found[-count:]]
+        value = market.get(field)
+        if closed not in expected or value in (None, ""):
+            continue
+        value = Decimal(str(value))
+        if not value.is_finite() or value <= 0:
+            raise RuntimeError("DATA UNAVAILABLE: invalid finalized lookback price")
+        if closed in found and found[closed] != value:
+            raise RuntimeError("DATA UNAVAILABLE: conflicting lookback values")
+        found[closed] = value
+    missing = [close.isoformat() for close in expected if close not in found]
+    if missing:
+        raise RuntimeError(f"DATA UNAVAILABLE: exact prior periods not finalized: {missing}")
+    return [found[close] for close in expected]
+
+def prior_three(started):
+    return completed_values(started, "expiration_value", 3)
+
+def prior_strikes(started, count=HISTORICAL_STRIKE_COUNT):
+    return completed_values(started, "floor_strike", count)
 
 def quotes(market, prediction):
     if prediction == "YES": return Decimal(market["yes_ask_dollars"]), Decimal(market["yes_bid_dollars"])
@@ -334,7 +375,7 @@ def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state):
             quantity = Decimal("0")
             try:
                 result, quantity = funded_entry(record, state, ticker, side, price, closed, "dual", now_timestamp,
-                    order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
+                    order_budget=BUDGET / (2 * len(ENTRY_EXIT_PAIRS)))
             except Exception as error:
                 write_log("DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(price),
                           quantity=str(quantity), details=repr(error))
@@ -511,25 +552,36 @@ def manage_historical_take_profit(record, ticker, held, reserved_quantity, close
     return True
 
 def update_prediction(record, ticker, current, elapsed):
-    completed = len(record["predictions"])
-    if completed >= len(PREDICTION_SECONDS) or elapsed < PREDICTION_SECONDS[completed]:
-        return False
-    number = completed + 1
-    prediction = record["signal"]["prediction"]
-    ask, bid = quotes(current, prediction)
-    confidence = live_confidence(ask)
-    snapshot = {
-        "number": number,
-        "scheduled_minute": PREDICTION_MINUTES[completed],
-        "prediction": prediction,
-        "confidence": confidence,
-        "ask": str(ask),
-        "bid": str(bid),
-    }
-    record["predictions"].append(snapshot)
-    record["signal"]["live_confidence"] = confidence
-    write_log("PREDICTION_UPDATE", ticker, prediction=prediction, confidence=confidence, price=str(ask), details=json.dumps(snapshot))
-    return True
+    changed = False
+    while len(record["predictions"]) < len(PREDICTION_SECONDS):
+        index = len(record["predictions"])
+        scheduled = PREDICTION_SECONDS[index]
+        if elapsed < scheduled:
+            break
+        prediction = record["signal"]["prediction"]
+        valid = elapsed - scheduled <= PREDICTION_GRACE_SECONDS and prediction in ("YES", "NO")
+        snapshot = {
+            "number": index + 1, "scheduled_minute": PREDICTION_MINUTES[index],
+            "prediction": prediction, "status": "captured" if valid else "missed",
+            "observed_elapsed_seconds": elapsed if valid else None,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
+            "ask": None, "bid": None, "confidence": None,
+        }
+        if valid:
+            ask, bid = quotes(current, prediction)
+            confidence = live_confidence(ask)
+            snapshot.update(ask=str(ask), bid=str(bid), confidence=confidence)
+            record["signal"]["live_confidence"] = confidence
+        record["predictions"].append(snapshot)
+        write_log("PREDICTION_UPDATE" if valid else "PREDICTION_MISSED", ticker,
+                  prediction=prediction, details=json.dumps(snapshot))
+        changed = True
+    if changed and len(record["predictions"]) == len(PREDICTION_SECONDS):
+        complete = all(p.get("ask") is not None for p in record["predictions"])
+        average = average_prediction_confidence(record["predictions"]) if complete else None
+        record["final_confidence"] = live_confidence(average) if average is not None else None
+        write_log("PREDICTION_FINAL", ticker, confidence=record["final_confidence"] or "INCOMPLETE")
+    return changed
 
 def cycle(state):
     reconcile_entries(state)
@@ -540,7 +592,7 @@ def cycle(state):
     if not market: return
     ticker = market["ticker"]; elapsed = (now - started).total_seconds()
     if ticker in state.get("mm", {}).get("markets", {}):
-        write_log("STRATEGY_SWITCH_WAIT", ticker, details="MM already owns this market; wait for the next contract")
+        write_log("STRATEGY_SWITCH_WAIT", ticker, details="Archived strategy owns this market; wait for the next contract")
         return
     record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": []})
     if "predictions" not in record: record["predictions"] = []
@@ -574,6 +626,23 @@ def cycle(state):
                 write_log("HISTORICAL_STRIKES_UNAVAILABLE", ticker, details=repr(error))
                 save_state(state)
     signal = record["signal"]; current = client.market(ticker)
+    elapsed = time.time() - started.timestamp()
+    if update_prediction(record, ticker, current, elapsed): save_state(state)
+    reconcile_entries(state)
+    # Only the independent paired monitor owns exits. Never fall back to a
+    # single-price exit path when both entry tiers can hold inventory.
+    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and any(p.get("ask") is not None for p in record["predictions"]) and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    if can_buy:
+        ask, _ = quotes(current, signal["prediction"])
+        counted = False
+        for price, result, quantity in paired_entries(record, state, ticker, signal["prediction"], closed, "regular"):
+            if result.get("order_id"):
+                if not counted:
+                    record["buys"] += 1; record["last_buy"] = time.time()
+                    counted = True
+                record["orders"].append(result["order_id"])
+                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"paired purchase {record['buys']} of {MAX_BUYS}")
+                save_state(state)
     if DUAL_LIMIT_BUYS_ENABLED and START <= elapsed < END and not record["dual_limit_attempted"]:
         record["dual_limit_attempted"] = True
         save_state(state)
@@ -598,22 +667,6 @@ def cycle(state):
                     save_state(state)
                     details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
                     write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(price), quantity=str(quantity), details=json.dumps(details))
-    if update_prediction(record, ticker, current, elapsed): save_state(state)
-    reconcile_entries(state)
-    # Only the independent paired monitor owns exits. Never fall back to a
-    # single-price exit path when both entry tiers can hold inventory.
-    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and record["predictions"] and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
-    if can_buy:
-        ask, _ = quotes(current, signal["prediction"])
-        counted = False
-        for price, result, quantity in paired_entries(record, state, ticker, signal["prediction"], closed, "regular"):
-            if result.get("order_id"):
-                if not counted:
-                    record["buys"] += 1; record["last_buy"] = time.time()
-                    counted = True
-                record["orders"].append(result["order_id"])
-                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"paired purchase {record['buys']} of {MAX_BUYS}")
-                save_state(state)
 
 def check():
     balance = client.balance(); markets = client.markets(series_ticker="KXBTC15M", status="open", limit=1)
@@ -625,6 +678,16 @@ def main():
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
+    ignored = ("TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
+               "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
+               "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")
+    for name in ignored:
+        if name in os.environ:
+            print(f"CONFIG_IGNORED: {name}; paired prices apply and no stop-loss is active", flush=True)
+    if seconds_from_minutes(os.getenv("ENTRY_END_MINUTE", "5")) > END:
+        print("CONFIG_CAPPED: entry cutoff is five minutes", flush=True)
+    if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
+        print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
@@ -634,58 +697,37 @@ def main():
     # Railway uses Linux. Hold the volume lock for this process's lifetime.
     import fcntl
     import signal
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    if EXECUTION_STRATEGY == "market_making" and os.getenv("RAILWAY_ENVIRONMENT_ID"):
-        mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
-        if not mount or not os.path.ismount(mount) or not all(
-            p.resolve().is_relative_to(Path(mount).resolve()) for p in (STATE, LOG)
-        ):
-            raise SystemExit("MM requires STATE_PATH and LOG_PATH on a mounted persistent Railway volume")
-        if not STATE.exists():
-            print("MM_WAIT_STATE_RESTORE: restore state.json to the volume before trading", flush=True)
-            while not STATE.exists():
-                time.sleep(3)
+    validate_storage()
     with STATE.with_suffix(".lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise SystemExit("Another bot already owns this state volume")
         state = load_state()
-        mm = MarketMaker(client, save_state, write_log) if EXECUTION_STRATEGY == "market_making" else None
-        if mm is None:
-            # Separate client and receipt file: signal/CF timeouts cannot block
-            # exits, and this worker never writes the entry budget/strategy state.
-            exit_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
-                os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
-            EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
-                STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ENTRY_EXIT_PAIRS,
-                poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
-            EXIT_MONITOR.start()
-            print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
+        # Separate client and receipt file: signal/CF timeouts cannot block
+        # exits, and this worker never writes the entry budget/strategy state.
+        exit_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
+            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
+        EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
+            STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ENTRY_EXIT_PAIRS,
+            poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
+        EXIT_MONITOR.start()
+        print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)
         try:
             while True:
                 try:
-                    if mm:
-                        market, _, closed = active_market(datetime.now(timezone.utc))
-                        mm.cycle(state, market, closed)
-                    else:
-                        cycle(state)
+                    cycle(state)
                 except Exception as error:
                     write_log("ERROR", details=repr(error))
-                    if mm:
-                        try: mm.cancel_all(state)
-                        except Exception as cancel_error: write_log("MM_CANCEL_ERROR", details=repr(cancel_error))
-                time.sleep(mm.config.poll if mm else int(os.getenv("POLL_SECONDS", "7")))
+                time.sleep(int(os.getenv("POLL_SECONDS", "5")))
         except KeyboardInterrupt:
-            if mm:
-                try: mm.cancel_all(state)
-                except Exception as error: write_log("MM_CANCEL_ERROR", details=repr(error))
             save_state(state)
         finally:
             if EXIT_MONITOR is not None:
                 EXIT_MONITOR.stop()
 
 if __name__ == "__main__": main()
+

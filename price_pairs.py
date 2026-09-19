@@ -2,12 +2,12 @@
 from decimal import Decimal as D
 
 
-def parse_pairs(value="25:31,39:46"):
+def parse_pairs(value="32:39,39:46"):
     pairs = {}
     for item in value.split(","):
         fields = item.strip().split(":")
         if len(fields) != 2:
-            raise ValueError("ENTRY_EXIT_PAIRS_CENTS must look like 25:31,39:46")
+            raise ValueError("ENTRY_EXIT_PAIRS_CENTS must look like 32:39,39:46")
         entry, target = (D(x.strip()) for x in fields)
         if not all(x.is_finite() and x == x.to_integral_value() and 1 <= x <= 99
                    for x in (entry, target)) or target <= entry:
@@ -45,15 +45,18 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
         quantity = D(str(fill.get("count_fp", fill.get("count", "NaN"))))
         if not quantity.is_finite() or quantity <= 0:
             raise ValueError("Invalid fill quantity")
-        book_side = fill.get("book_side")
-        side = fill.get("outcome_side") or fill.get("side")
-        action = fill.get("action")
-        legacy_sign = None
-        if side in {"yes", "no"} and action in {"buy", "sell"}:
-            legacy_sign = (1 if side == "yes" else -1) * (1 if action == "buy" else -1)
+        # Kalshi's REST payload has used both lowercase and uppercase enums.
+        # Normalize before deriving the net YES-position direction.
+        book_side = str(fill.get("book_side", "")).lower()
+        side = str(fill.get("outcome_side") or fill.get("side") or "").lower()
+        action = str(fill.get("action", "")).lower()
+        outcome_sign = {"yes": 1, "no": -1}.get(side)
+        action_sign = {"buy": 1, "sell": -1}.get(action)
+        legacy_sign = outcome_sign * action_sign if outcome_sign and action_sign else None
         sign = {"bid": 1, "ask": -1}.get(book_side, legacy_sign)
         if sign is None or (legacy_sign is not None and legacy_sign != sign):
-            raise ValueError("Fill direction unavailable or contradictory")
+            fields = {name: fill.get(name) for name in ("book_side", "outcome_side", "side", "action", "order_id") if name in fill}
+            raise ValueError(f"Fill direction unavailable or contradictory: {fields}")
         if fill.get("created_time"):
             stamp = datetime.fromisoformat(fill["created_time"].replace("Z", "+00:00"))
             if stamp.tzinfo is None:
@@ -106,3 +109,4 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
     for lot in lots:
         buckets[lot["target"]] = buckets.get(lot["target"], D(0)) + lot["quantity"] * lot["sign"]
     return dict(sorted(buckets.items()))
+
