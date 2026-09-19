@@ -47,7 +47,7 @@ class InventoryClient:
             self.historical -= abs(held)
         return {"order_id": order_id}
 
-    def cancel(self, order_id):
+    def cancel(self, order_id, ticker):
         self.cancelled.append(order_id)
         self.resting = [item for item in self.resting if item["order_id"] != order_id]
 
