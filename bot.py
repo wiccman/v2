@@ -18,6 +18,10 @@ EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
 ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "32:39,39:46"))
+OPENING_BIAS_ENABLED = os.getenv("OPENING_BIAS_ENABLED", "true").lower() == "true"
+OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
+OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
+ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR}.items()))
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
 MARKET_BUDGET = market_budget()
@@ -252,24 +256,25 @@ def cancellation_deadline(closed):
     return closed.timestamp() - 900 + CANCEL_AFTER
 
 
-def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None):
+def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Independent exit monitor is not healthy")
         return {}, Decimal("0")
-    if Decimal(str(price)) not in ENTRY_EXIT_PAIRS:
+    if Decimal(str(price)) not in ALL_ENTRY_EXIT_PAIRS:
         raise ValueError("Entry price must match a configured fixed entry limit")
-    if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) not in ENTRY_EXIT_PAIRS
+    if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS
            for i in record.get("entry_intents", [])):
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     cutoff = min(entry_deadline(closed), submit_before or entry_deadline(closed))
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
+    cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
-                           MARKET_BUDGET, cancellation_deadline(closed), kind)
+                           MARKET_BUDGET, cancel_at, kind)
     if intent is None:
         return {}, Decimal("0")
-    intent["exit_target"] = str(ENTRY_EXIT_PAIRS[Decimal(str(price))])
+    intent["exit_target"] = str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
     save_state(state)  # Persist allowance and client ID before any exchange request.
     quantity = Decimal(intent["quantity"])
     try:
@@ -341,7 +346,8 @@ def reconcile_entries(state, now_timestamp=None):
                 # On a price-policy upgrade, cancel tracked incompatible buys
                 # immediately; keep their spending reservations across restarts.
                 ids = {i["order_id"] for i in pending if i.get("order_id")
-                       and Decimal(str(i.get("price", "-1"))) not in ENTRY_EXIT_PAIRS}
+                       and Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS}
+                ids |= {i["order_id"] for i in pending if i.get("order_id") and now_timestamp >= i.get("cancel_at", float("inf"))}
             else:
                 ids = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
                 ids |= {i["order_id"] for i in pending if i.get("order_id")}
@@ -597,6 +603,7 @@ def cycle(state):
     record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": []})
     if "predictions" not in record: record["predictions"] = []
     if "spot_entry_attempted" not in record: record["spot_entry_attempted"] = False
+    if "opening_bias_attempted" not in record: record["opening_bias_attempted"] = False
     if "final_entry_attempted" not in record: record["final_entry_attempted"] = False
     if "dual_limit_attempted" not in record: record["dual_limit_attempted"] = False
     if "dual_limit_orders" not in record: record["dual_limit_orders"] = []
@@ -627,6 +634,18 @@ def cycle(state):
                 save_state(state)
     signal = record["signal"]; current = client.market(ticker)
     elapsed = time.time() - started.timestamp()
+    # One bias-selected opening order: never quote both complementary outcomes.
+    if OPENING_BIAS_ENABLED and 0 <= elapsed < OPENING_WINDOW and not record["opening_bias_attempted"] and signal["prediction"] in ("YES", "NO"):
+        record["opening_bias_attempted"] = True
+        save_state(state)  # Persist before POST so a lost acknowledgement cannot duplicate it.
+        price, target = next(iter(OPENING_BIAS_PAIR.items()))
+        result, quantity = funded_entry(record, state, ticker, signal["prediction"], price, closed, "opening_bias",
+            submit_before=started.timestamp() + OPENING_WINDOW, cancel_at=started.timestamp() + OPENING_WINDOW)
+        if result.get("order_id"):
+            record["orders"].append(result["order_id"])
+        write_log("OPENING_BIAS_LIMIT", ticker, prediction=signal["prediction"], price=str(price), quantity=str(quantity),
+                  details=json.dumps({"exit_target": str(target), "entry_cutoff": started.timestamp() + OPENING_WINDOW, "order": result}))
+        save_state(state)
     if update_prediction(record, ticker, current, elapsed): save_state(state)
     reconcile_entries(state)
     # Only the independent paired monitor owns exits. Never fall back to a
@@ -709,10 +728,10 @@ def main():
         exit_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
-            STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ENTRY_EXIT_PAIRS,
+            STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
         EXIT_MONITOR.start()
-        print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
+        print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ALL_ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)

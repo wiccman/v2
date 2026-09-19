@@ -34,6 +34,8 @@ All routes use these default outcome-price pairs, configurable through
 | 32¢ | 39¢ |
 | 39¢ | 46¢ |
 
+During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same per-trigger budget and market allowance as every other route.
+
 Regular bias-based entries run first when a valid prediction snapshot is available.
 An optional dual batch submits both tiers on both YES and NO. Historical-strike
 touches use the side of approach; the optional early spot trigger buys YES when
@@ -74,6 +76,8 @@ Important defaults:
 | --- | --- | --- |
 | `ENTRY_EXIT_PAIRS_CENTS` | `32:39,39:46` | Entry limits and corresponding exits |
 | `ENTRY_BUDGET_DOLLARS` | `0.77` | Principal per trigger or entire dual batch |
+| `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
+| `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
 | `MARKET_BUDGET_DOLLARS` | `5` | Shared cap including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
