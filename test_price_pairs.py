@@ -301,3 +301,18 @@ def test_retired_tier_keeps_saved_exit_after_pair_change(tmp_path, sign, wire):
     m.run_once()
     assert m.healthy and e.held == 0
     assert e.submissions[0]["price"] == wire
+
+
+def test_uppercase_kalshi_fill_enums_reconcile_like_lowercase():
+    e = PairExchange(bid="0.40")
+    oid = e.buy("0.32", "2")
+    e.history[0].update(book_side="BID", outcome_side="YES", action="BUY")
+    entries = {oid: {"side": "YES", "target": "0.39"}}
+    assert paired_inventory(e.history, entries, {}, e.held, "T") == {D("0.39"): D("2")}
+
+
+def test_fill_direction_error_reports_only_relevant_fields():
+    fill = {"fill_id": "f", "ticker": "T", "count_fp": "1", "ts": 1,
+            "outcome_side": "MAYBE", "action": "BUY", "order_id": "o"}
+    with pytest.raises(ValueError, match="outcome_side"):
+        paired_inventory([fill], {}, {}, D("1"), "T")
