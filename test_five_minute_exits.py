@@ -31,9 +31,10 @@ class CycleClient(KalshiClient):
     def orders(self, ticker, status):
         return list(self.resting)
 
-    def cancel(self, order_id):
+    def cancel(self, order_id, ticker):
         self.cancelled.append(order_id)
         self.resting = [o for o in self.resting if o["order_id"] != order_id]
+        return {"order_id": order_id, "reduced_by": "1.00"}
 
     def positions(self, ticker):
         return [{"ticker": ticker, "position_fp": str(self.held)}]
@@ -51,7 +52,7 @@ def cycle_setup(monkeypatch, elapsed):
     started = datetime.fromtimestamp(1000000000, timezone.utc)
     closed = datetime.fromtimestamp(1000000900, timezone.utc)
     fake = CycleClient()
-    record = {"buys": 0, "last_buy": 0, "orders": [],
+    record = {"entry_intents": [], "entry_budget_legacy": False, "entry_cancel_at": 1000000360, "buys": 0, "last_buy": 0, "orders": [],
               "signal": {"prediction": "YES", "base_confidence": "HIGH"},
               "predictions": [{"ask": "0.70"}] * 3,
               "historical_strikes": ["100000"],
@@ -77,15 +78,15 @@ def test_all_new_buys_stop_at_five_minutes_but_exits_continue(monkeypatch, elaps
     assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
 
 
-def test_last_second_entries_expire_at_absolute_five_minute_cutoff(monkeypatch):
+def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
     assert len(fake.entries) == 4  # dual YES/NO, historical touch, regular signal
-    assert all(x[3]["expiration_time"] == 1000000300 for x in fake.entries)
+    assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
 def test_restart_cancels_legacy_entries_even_when_signal_lookup_fails(monkeypatch):
-    fake, record, state, clock, closed = cycle_setup(monkeypatch, 300)
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 360)
     record.update(orders=["regular-old", "spot-old"], dual_limit_orders=["dual-old"],
                   dual_limit_cancel_at=1000000500, signal=None,
                   historical_strike_orders=[{"order_id": "hist-old", "cancel_at": 1000000800}])

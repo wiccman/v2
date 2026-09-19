@@ -91,7 +91,9 @@ class KalshiClient:
         return self.request("GET", "/portfolio/orders/" + order_id, auth=True)["order"]
 
     def all_orders(self, ticker, status=None):
-        params = {"ticker": ticker, "limit": 100}
+        params = {"limit": 100}
+        if ticker:
+            params["ticker"] = ticker
         if status is not None:
             params["status"] = status
         found, cursors = [], set()
@@ -118,14 +120,13 @@ class KalshiClient:
         return self.request("GET", "/portfolio/positions", params=params, auth=True).get("market_positions", [])
 
     def fills(self, ticker=None):
-        params = {"ticker": ticker, "limit": 100} if ticker else {"limit": 100}
+        params = {"limit": 100}
+        if ticker:
+            params["ticker"] = ticker if ticker else {"limit": 100}
         return self.request("GET", "/portfolio/fills", params=params, auth=True).get("fills", [])
 
     def orders(self, ticker=None, status="resting"):
-        params = {"status": status}
-        if ticker:
-            params["ticker"] = ticker
-        return self.request("GET", "/portfolio/orders", params=params, auth=True).get("orders", [])
+        return self.all_orders(ticker, status)
 
     def _order(self, ticker, book_side, quantity, yes_price, reduce_only=False, expiration_time=None, ioc=False, post_only=False, client_order_id=None):
         body = {
@@ -160,15 +161,15 @@ class KalshiClient:
                 order.pop("expiration_time", None)
         return self.request("POST", "/portfolio/events/orders/batched", body={"orders": orders}, auth=True)["orders"]
 
-    def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time):
+    def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time, *, submit_before=None, client_order_id=None):
         # A slow quote request or preceding order must not submit an expired entry.
-        if time.time() >= expiration_time:
+        if time.time() >= min(expiration_time, submit_before if submit_before is not None else expiration_time):
             return {}
         outcome_price = Decimal(outcome_price)
         if prediction == "YES":
-            return self._order(ticker, "bid", quantity, outcome_price, expiration_time=expiration_time)
+            return self._order(ticker, "bid", quantity, outcome_price, expiration_time=expiration_time, client_order_id=client_order_id)
         if prediction == "NO":
-            return self._order(ticker, "ask", quantity, Decimal("1") - outcome_price, expiration_time=expiration_time)
+            return self._order(ticker, "ask", quantity, Decimal("1") - outcome_price, expiration_time=expiration_time, client_order_id=client_order_id)
         raise ValueError("prediction must be YES or NO")
 
     def close_position(self, ticker, signed_quantity, yes_bid, yes_ask):
@@ -195,5 +196,6 @@ class KalshiClient:
             )
         return {}
 
-    def cancel(self, order_id):
-        return self.request("DELETE", "/portfolio/events/orders/" + order_id, auth=True)
+    def cancel(self, order_id, ticker):
+        return self.request("DELETE", "/portfolio/events/orders/" + order_id,
+                            params={"market_ticker": ticker, "exchange_index": -1}, auth=True)

@@ -86,7 +86,7 @@ class Exchange:
         if D(order["remaining_count_fp"]) == 0:
             order["status"] = "executed"
 
-    def cancel(self, order_id):
+    def cancel(self, order_id, ticker):
         self.cancelled.append(order_id)
         if self.cancel_pending:
             return {}

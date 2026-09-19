@@ -18,7 +18,7 @@ class DualLimitClient:
         self.resting = []
         self.cancelled = []
 
-    def place_entry(self, ticker, side, quantity, price, expiration_time):
+    def place_entry(self, ticker, side, quantity, price, expiration_time, **kwargs):
         order_id = f"dual-{side.lower()}"
         self.entries.append((ticker, side, quantity, price, expiration_time))
         self.resting.append({"order_id": order_id})
@@ -27,22 +27,24 @@ class DualLimitClient:
     def orders(self, ticker, status):
         return list(self.resting)
 
-    def cancel(self, order_id):
+    def cancel(self, order_id, ticker):
         self.cancelled.append(order_id)
+        return {"order_id": order_id, "reduced_by": "1.00"}
 
 
-def test_dual_limit_buys_post_both_sides_at_25_cents_for_five_minutes(monkeypatch):
+def test_dual_limit_buys_post_both_sides_at_25_cents_until_six_minute_deadline(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {"dual_limit_orders": []}
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
-    assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000) is True
+    assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES", "NO"]
     assert all(entry[2] == Decimal("3.08") for entry in fake.entries)
     assert all(entry[3] == Decimal("0.25") for entry in fake.entries)
-    assert all(entry[4] == 1300 for entry in fake.entries)
+    assert all(entry[4] == 1460 for entry in fake.entries)
     assert record["dual_limit_orders"] == ["dual-yes", "dual-no"]
 
 
@@ -50,6 +52,7 @@ def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {
         "dual_limit_orders": ["dual-yes", "dual-no"],
         "dual_limit_cancel_at": 1300,
@@ -69,10 +72,11 @@ def test_historical_strike_reaction_uses_approach_side():
     assert bot.strike_reaction_side(Decimal("100000"), Decimal("100000")) is None
 
 
-def test_historical_strike_touch_posts_25_cent_order_for_five_minutes(monkeypatch):
+def test_historical_strike_touch_posts_25_cent_order_until_six_minute_deadline(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {
         "historical_strikes": ["100000", "101000", "102000"],
         "historical_last_spot": "99950",
@@ -82,9 +86,9 @@ def test_historical_strike_touch_posts_25_cent_order_for_five_minutes(monkeypatc
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
     assert bot.place_historical_strike_entries(
-        record, "MARKET", Decimal("99980"), closed, now_timestamp=1000,
+        record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
-    assert fake.entries == [("MARKET", "NO", Decimal("3.08"), Decimal("0.25"), 1300)]
+    assert fake.entries == [("MARKET", "NO", Decimal("3.08"), Decimal("0.25"), 1460)]
     assert record["historical_triggered_strikes"] == ["100000"]
     assert record["historical_strike_orders"][0]["strike"] == "100000"
 
@@ -103,7 +107,7 @@ class HistoricalExitClient:
         self.actions.append((ticker, held, target, expiration_time))
         return {"order_id": "historical-tp"}
 
-    def cancel(self, order_id):
+    def cancel(self, order_id, ticker):
         self.actions.append(("cancel", order_id))
 
     def fills(self, ticker):
@@ -132,6 +136,7 @@ def test_historical_strike_fill_gets_ten_cent_exit_from_actual_fill(monkeypatch)
     fake = HistoricalExitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {"historical_take_profit_orders": []}
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
@@ -201,7 +206,7 @@ class ExitClient:
         self.actions.append(("take_profit", ticker, held, target, expiration_time))
         return {"order_id": "tp-1"}
 
-    def cancel(self, order_id):
+    def cancel(self, order_id, ticker):
         self.actions.append(("cancel", order_id))
 
     def close_position(self, ticker, held, yes_bid, yes_ask):
@@ -213,6 +218,7 @@ def test_manage_exit_submits_ioc_when_target_reachable(monkeypatch):
     fake = ExitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {}
     market = {"yes_ask_dollars": "0.24", "yes_bid_dollars": "0.23", "no_ask_dollars": "0.80", "no_bid_dollars": "0.78"}
     closed = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)
@@ -228,6 +234,7 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     fake = ExitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
+    monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {}
     market = {"yes_ask_dollars": "0.04", "yes_bid_dollars": "0.03", "no_ask_dollars": "0.97", "no_bid_dollars": "0.96"}
     closed = datetime(2026, 1, 1, 0, 15, tzinfo=timezone.utc)

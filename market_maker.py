@@ -4,6 +4,7 @@ Prices follow the external book midpoint, not the Strike Ruler prediction.
 The persisted order ledger is deliberately conservative: buys are costed at
 their limit and sales credited at their limit; actual exchange fees are deducted.
 """
+from entry_policy import market_budget, FEE_RESERVE
 import os
 import time
 import uuid
@@ -221,7 +222,7 @@ class MarketMaker:
                 confirmed = False
                 continue
             try:
-                self.client.cancel(order["order_id"])
+                self.client.cancel(order["order_id"], order["ticker"])
             except KalshiAPIError as error:
                 if error.status_code not in (404, 409):
                     raise
@@ -236,6 +237,14 @@ class MarketMaker:
                 self._cancel(record, state)
 
     def _place(self, record, state, ticker, desired, expiry):
+        entries = [(side, price, qty) for side, price, qty, reduce_only in desired if not reduce_only]
+        spent = sum((D(o["quantity"]) * ((D(o["price"]) if o["side"] == "bid" else ONE - D(o["price"])) + FEE_RESERVE)
+                     for o in record["orders"] if not o["reduce_only"]), ZERO)
+        required = sum((qty * ((price if side == "bid" else ONE - price) + FEE_RESERVE)
+                        for side, price, qty in entries), ZERO)
+        if entries and spent + required > market_budget():
+            self.log("MM_MARKET_BUDGET_BLOCK", ticker, details=f"reserved={spent}; required={required}; cap={market_budget()}")
+            return
         intents = [dict(ticker=ticker, side=side, price=str(price), quantity=str(quantity),
                         reduce_only=reduce_only, expiry=expiry, client_id=str(uuid.uuid4()),
                         status="pending", filled="0", remaining=str(quantity), fees="0")
