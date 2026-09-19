@@ -50,7 +50,12 @@ def parse_time(value): return datetime.fromisoformat(value.replace("Z", "+00:00"
 def load_state(): return json.loads(STATE.read_text()) if STATE.exists() else {"markets": {}}
 def save_state(state):
     STATE.parent.mkdir(parents=True, exist_ok=True)
-    temp = STATE.with_suffix(".tmp"); temp.write_text(json.dumps(state, indent=2)); temp.replace(STATE)
+    temp = STATE.with_suffix(".tmp")
+    with temp.open("w") as handle:
+        json.dump(state, handle, indent=2)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp.replace(STATE)
 def write_log(event, ticker="", **values):
     LOG.parent.mkdir(parents=True, exist_ok=True); exists = LOG.exists()
     fields = ["time_utc", "ticker", "event", "prediction", "confidence", "price", "quantity", "details"]
@@ -515,6 +520,16 @@ def main():
     import fcntl
     import signal
     STATE.parent.mkdir(parents=True, exist_ok=True)
+    if EXECUTION_STRATEGY == "market_making" and os.getenv("RAILWAY_ENVIRONMENT_ID"):
+        mount = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
+        if not mount or not os.path.ismount(mount) or not all(
+            p.resolve().is_relative_to(Path(mount).resolve()) for p in (STATE, LOG)
+        ):
+            raise SystemExit("MM requires STATE_PATH and LOG_PATH on a mounted persistent Railway volume")
+        if not STATE.exists():
+            print("MM_WAIT_STATE_RESTORE: restore state.json to the volume before trading", flush=True)
+            while not STATE.exists():
+                time.sleep(3)
     with STATE.with_suffix(".lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

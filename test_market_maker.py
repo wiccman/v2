@@ -118,8 +118,8 @@ def test_five_distinct_prices_per_side_budget_and_restart():
     assert all(D(o["quantity"]) == 1 and o["expiry"] == 1015 for o in batch)
     assert len({o["client_id"] for o in batch}) == 10
     # Intents for every order must be durable BEFORE the exchange call.
-    assert len(saved[1]["mm"]["markets"]["BTC"]["orders"]) == 10
-    assert not any("order_id" in o for o in saved[1]["mm"]["markets"]["BTC"]["orders"])
+    intents_saved = next(s for s in saved if len(s["mm"]["markets"]["BTC"]["orders"]) == 10)
+    assert not any("order_id" in o for o in intents_saved["mm"]["markets"]["BTC"]["orders"])
     restored = json.loads(json.dumps(state))
     restarted = MarketMaker(ex, lambda s: None, lambda *a, **k: None, clock=lambda: ex.now)
     cycle(restarted, restored)
@@ -133,6 +133,7 @@ def test_partial_fill_only_exits_exact_quantity(side_index, exit_side):
     ex.fill(f"order-{side_index}", ".37", ".003")
     cycle(mm, state)  # cancel first, including the partial remainder
     assert not ex.all_orders("BTC", "resting")
+    ex.bid, ex.ask = (D('.52'), D('.54')) if exit_side == 'ask' else (D('.46'), D('.48'))
     cycle(mm, state)
     exits = ex.batches[-1]
     assert len(exits) == 1
@@ -146,6 +147,7 @@ def test_all_five_fills_create_five_distinct_reduce_only_exits():
     for i in range(5):
         ex.fill(f"order-{i}", "1")
     cycle(mm, state)
+    ex.bid, ex.ask = D('.56'), D('.58')
     cycle(mm, state)
     exits = ex.batches[-1]
     assert len(exits) == 5
@@ -161,6 +163,8 @@ def test_cancel_race_fill_is_reconciled_before_replacement():
     ex.now += 11  # renewal
     cycle(mm, state)
     assert len(ex.batches) == 1
+    cycle(mm, state)
+    ex.bid, ex.ask = D('.52'), D('.54')
     cycle(mm, state)
     assert len(ex.batches[-1]) == 1 and ex.batches[-1][0]["reduce_only"]
     assert ledger(state["mm"]["markets"]["BTC"])[0] == 1
@@ -279,16 +283,17 @@ def test_stale_book_and_fast_price_jump_cancel_quotes():
 
 def test_cutoff_cancels_entries_but_still_quotes_held_inventory():
     ex, state, mm, _, _ = setup()
-    ex.now = 1830
+    ex.now = 1410
     cycle(mm, state)
-    assert all(o["expiry"] == 1840 for o in ex.batches[0])
+    assert all(o["expiry"] == 1420 for o in ex.batches[0])
     ex.fill("order-0", "1")
-    ex.now = 1841
+    ex.now = 1421
     cycle(mm, state)
+    ex.bid, ex.ask = D('.52'), D('.54')
     cycle(mm, state)
     assert all(o["reduce_only"] and o["expiry"] < 1900 for o in ex.batches[-1])
     flat_ex, flat_state, flat_mm, _, _ = setup()
-    flat_ex.now = 1841
+    flat_ex.now = 1421
     cycle(flat_mm, flat_state)
     assert not flat_ex.batches
 
@@ -356,10 +361,11 @@ def test_batch_api_uses_post_only_expiry_and_reduce_only():
     method, path, _, body, auth = client.calls[0]
     assert method == "POST" and path == "/portfolio/events/orders/batched" and auth
     order = body["orders"][0]
-    assert order["post_only"] and order["reduce_only"] and order["cancel_order_on_pause"]
+    assert not order["post_only"] and order["reduce_only"] and order["cancel_order_on_pause"]
     assert order["client_order_id"] == "persisted-id"
     assert order["price"] == "0.5400" and order["count"] == ".37"
-    assert order["expiration_time"] == 1015
+    assert "expiration_time" not in order
+    assert order["time_in_force"] == "immediate_or_cancel"
 
 
 def test_order_recovery_paginates():

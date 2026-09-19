@@ -152,6 +152,12 @@ class KalshiClient:
             "time_in_force": "good_till_canceled", "self_trade_prevention_type": "taker_at_cross",
             "post_only": True, "cancel_order_on_pause": True, "reduce_only": o["reduce_only"],
         } for o in intents]
+        for order in orders:
+            if order["reduce_only"]:
+                # V2 rejects resting reduce-only orders. Preserve price protection.
+                order["time_in_force"] = "immediate_or_cancel"
+                order["post_only"] = False
+                order.pop("expiration_time", None)
         return self.request("POST", "/portfolio/events/orders/batched", body={"orders": orders}, auth=True)["orders"]
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time):

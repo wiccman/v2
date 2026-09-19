@@ -16,6 +16,13 @@ D = Decimal
 ZERO = D("0")
 ONE = D("1")
 TERMINAL = {"canceled", "executed", "rejected"}
+ENTRY_WINDOW_SECONDS = 7 * 60
+ENTRY_INTERVAL_SECONDS = 60
+
+
+def entry_minute(now, close_ts):
+    elapsed = now - (close_ts - 900)
+    return int(elapsed // ENTRY_INTERVAL_SECONDS) if 0 <= elapsed < ENTRY_WINDOW_SECONDS else None
 
 
 @dataclass(frozen=True)
@@ -115,7 +122,7 @@ def quote_prices(book, own_orders, market, config, held=ZERO):
     mid = (best_bid + best_ask) / 2
     if held:
         # Inventory exits may join the outside ask/bid even when an eight-cent
-        # entry spread is impossible near 0/1. Post-only still prevents crossing.
+        # entry spread is impossible near 0/1. Saved targets gate IOC exits.
         return snap(best_bid, market.get("price_ranges"), False), snap(best_ask, market.get("price_ranges"), True), mid
     bid = snap(mid - config.spread / 2, market.get("price_ranges"), False)
     ask = snap(mid + config.spread / 2, market.get("price_ranges"), True)
@@ -258,8 +265,9 @@ class MarketMaker:
                 incomplete = True
             elif result.get("order_id"):
                 order["order_id"] = result["order_id"]
-                self.log("MM_QUOTE", ticker, price=order["price"], quantity=order["quantity"],
-                         details=f"{order['side']} post-only; reduce_only={order['reduce_only']}; expires={expiry}")
+                self.log("MM_EXIT_IOC" if order["reduce_only"] else "MM_QUOTE", ticker,
+                         price=order["price"], quantity=order["quantity"],
+                         details=f"{order['side']}; reduce_only={order['reduce_only']}; expires={expiry}")
             self.save(state)
         self.save(state)
         if incomplete or any(not o.get("order_id") for o in intents):
@@ -309,7 +317,7 @@ class MarketMaker:
         if now >= close_ts:
             self._cancel(record, state)
             return
-        if now < record.get("pause_until", 0):
+        if not held and now < record.get("pause_until", 0):
             self._cancel(record, state)
             return
         balance = self.client.balance()
@@ -320,7 +328,8 @@ class MarketMaker:
             self._cancel(record, state)
             return
         try:
-            bid, ask, mid = quote_prices(self.client.orderbook(ticker), record["orders"], current, self.config, held)
+            book = self.client.orderbook(ticker)
+            bid, ask, mid = quote_prices(book, record["orders"], current, self.config, held)
         except (ValueError, KeyError):
             self._cancel(record, state)
             self.log("MM_INVALID_BOOK", ticker)
@@ -332,15 +341,34 @@ class MarketMaker:
             return
         previous_mid = D(record.get("mid", str(mid)))
         record["mid"] = str(mid)
-        if abs(mid - previous_mid) >= self.config.max_mid_move:
+        if not held and abs(mid - previous_mid) >= self.config.max_mid_move:
             record["pause_until"] = now + self.config.cooldown
             self.save(state)
             self._cancel(record, state)
             self.log("MM_VOLATILITY_PAUSE", ticker)
             return
-        # While carrying even a partial fill, quote only a reduce-only exit.
+        minute = entry_minute(now, close_ts)
+        # Fix the first exit ladder's anchor instead of chasing an ask/bid that
+        # an immediate-or-cancel order can never reach. Never remove reduce-only.
+        if held:
+            exit_side = "ask" if held > 0 else "bid"
+            if record.get("exit_side") != exit_side or "exit_anchor" not in record:
+                record["exit_side"] = exit_side
+                record["exit_anchor"] = str(ask if held > 0 else bid)
+                self.save(state)
+                self.log("MM_EXIT_TARGET", ticker, price=record["exit_anchor"],
+                         quantity=str(abs(held)), details=exit_side)
+            anchor = D(record["exit_anchor"])
+            exit_bid, exit_ask = (bid, anchor) if held > 0 else (anchor, ask)
+        else:
+            record.pop("exit_side", None)
+            record.pop("exit_anchor", None)
         try:
-            desired = ladder(bid, ask, current, self.config, held) if held or now < close_ts - self.config.stop_before_close else []
+            if held:
+                desired = ladder(exit_bid, exit_ask, current, self.config, held)
+                desired = [q for q in desired if (bid >= q[1] if held > 0 else ask <= q[1])]
+            else:
+                desired = ladder(bid, ask, current, self.config) if minute is not None else []
         except ValueError:
             self._cancel(record, state)
             self.log("MM_LADDER_UNAVAILABLE", ticker)
@@ -356,6 +384,8 @@ class MarketMaker:
         if not desired:
             return
         if held == 0:
+            if minute <= record.get("last_entry_minute", -1):
+                return
             # Ledger includes past realized losses/fees; profits do not increase order size.
             capital = self.config.budget + sum((ledger(r)[1] + min(ledger(r)[0], ZERO) for r in records.values()), ZERO)
             required = sum((qty * ((price if side == "bid" else ONE - price) + self.config.fee_reserve)
@@ -363,12 +393,22 @@ class MarketMaker:
             if not available.is_finite() or min(capital, available, self.config.budget) < required:
                 self.log("MM_BUDGET_BLOCK", ticker, details=f"required={required}; capital={capital}; cash={available}")
                 return
-        expiry = int(min(now + self.config.ttl, close_ts if held else close_ts - self.config.stop_before_close))
+        entry_cutoff = close_ts - 900 + ENTRY_WINDOW_SECONDS
+        expiry = int(min(now + self.config.ttl, close_ts if held else entry_cutoff))
         if expiry <= now + self.config.poll:
             return
         try:
             if self.clock() - data_at > self.config.max_data_age or self.clock() >= expiry - 1:
                 raise RuntimeError("MM quote snapshot expired before submission")
+            if not held:
+                submit_minute = entry_minute(self.clock(), close_ts)
+                if submit_minute is None or submit_minute <= record.get("last_entry_minute", -1):
+                    return
+                # Durable slot reservation prevents duplicate batches on restart
+                # or an ambiguous response. Missed minutes are never burst-replayed.
+                record["last_entry_minute"] = submit_minute
+                self.save(state)
+                self.log("MM_ENTRY_MINUTE", ticker, details=str(submit_minute))
             self._place(record, state, ticker, desired, expiry)
         except Exception:
             record["pause_until"] = self.clock() + self.config.cooldown

@@ -1,4 +1,4 @@
-# Strike Ruler Kalshi Bot v0.9.0 (MM)
+# Strike Ruler Kalshi Bot v0.9.1 (MM)
 
 Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
@@ -6,8 +6,8 @@ Production-only Kalshi KXBTC15M bot. It contains no demo or paper mode.
 
 This release adds an **opt-in alternative execution mode**. The default remains
 `EXECUTION_STRATEGY=strike_ruler`, so deploying the code alone does not activate MM.
-The historical v1.9 Beta prediction rules are unchanged. Tests use a simulated
-exchange; this release has not been validated with live MM orders.
+The historical prediction collection rules are unchanged. Tests use a simulated
+exchange. This repair adds minute-based entries, IOC exits, and durable storage checks.
 
 For MM, configure `EXECUTION_STRATEGY=market_making`. The existing
 `TRADING_ENABLED` master switch still applies. Run only one service/replica on
@@ -28,7 +28,7 @@ taking over the other strategy's inventory.
 | `MM_QUOTE_TTL_SECONDS` | `15` | Exchange-side quote expiration |
 | `MM_POLL_SECONDS` | `3` | Delay between completed polling cycles |
 | `MM_MAX_DATA_AGE_SECONDS` | `5` | Maximum book-request/processing age before submission |
-| `MM_STOP_BEFORE_CLOSE_SECONDS` | `60` | Stop new exposure in the final minute |
+| Entry timing (fixed) | minutes `0–6` | At most one batch per minute; no entries at or after 7:00 elapsed |
 | `MM_MAX_MID_MOVE_CENTS` | `10` | Midpoint jump triggering a pause |
 | `MM_COOLDOWN_SECONDS` | `30` | Pause following that jump |
 
@@ -47,12 +47,19 @@ taking over the other strategy's inventory.
   orders. The account's API tier must support ten-order batches.
 - Once even a partial position is detected, new exposure pauses and only a
   reduce-only exit ladder works exactly the held quantity, including fractions.
-  The exit joins the current outside ask (YES holdings) or bid (NO holdings).
+  The first outside ask (YES holdings) or bid (NO holdings) becomes a saved exit target.
   At a price boundary, remaining exit quantity consolidates at the last valid tick.
-  The exit follows the current book;
+  Kalshi requires reduce-only exits to be immediate-or-cancel. The bot monitors
+  these saved prices and submits only executable exit levels, with post-only off.
+  Unfilled amounts remain held and are retried while the target is reachable.
+  IOC fills may incur taker fees;
   **it may realize a loss** and does not use the legacy 15% or 10-cent target.
-- A confirmed cancellation and another polling cycle precede replacement. Stable
-  quotes stay queued until repricing or expiry renewal is needed. Polling plus
+- Entry batches are reserved durably once per elapsed minute, from minute 0
+  through minute 6. A restart cannot repeat the same minute's batch. Unfilled
+  orders expire after their TTL; the bot does not renew them within that minute.
+  Missed minutes are not replayed. Existing inventory, budget, stale-data, and
+  other safety checks may prevent a batch; seven fills are not guaranteed.
+  A confirmed cancellation and another polling cycle precede replacement. Polling plus
   network time is slower than a streaming market maker; fast adverse moves can
   still fill stale quotes.
 - Persisted client order IDs recover orders after an ambiguous POST or restart.
@@ -67,7 +74,7 @@ taking over the other strategy's inventory.
   ledger, not a fresh $10 allocation. Do not delete state to restart a spent budget.
 - Validate the fee allowance against current fees for the selected market.
   The 8-cent spread and 2-cent fee reserve are test defaults, not evidence of an edge.
-- New-entry orders expire by the final-minute cutoff; reduce-only quotes continue
+- New-entry orders expire by seven minutes after opening; reduce-only exits continue
   until close. Unfilled inventory may settle for a loss. There is no forced market
   liquidation or guaranteed take profit. Unsettled prior MM inventory blocks new
   markets until settlement is confirmed.
@@ -77,7 +84,8 @@ taking over the other strategy's inventory.
 
 Run `python -m pytest -q` for offline verification; it does not authenticate or
 send trades. `python bot.py --check` remains a read-only production access check.
-Logs identify `MM_QUOTE`, `MM_FILL`, and blocked/pause conditions separately.
+Logs identify `MM_ENTRY_MINUTE`, `MM_QUOTE`, `MM_EXIT_TARGET`, `MM_EXIT_IOC`,
+`MM_FILL`, and blocked/pause conditions separately.
 
 API references: [V2 orders](https://docs.kalshi.com/api-reference/orders/create-order-v2),
 [order status](https://docs.kalshi.com/api-reference/orders/get-order),
@@ -132,7 +140,12 @@ Maximum planned entry principal is $10.78 per market before fees: three historic
 5. Keep `TRADING_ENABLED=false` during the first deployment.
 6. Run `python bot.py --check` in Railway. This only checks authentication and cannot place orders.
 7. If the check succeeds, change `TRADING_ENABLED=true` and redeploy.
-8. In Railway, attach a persistent volume to the service and set its mount path to `/data`.
+8. Before enabling trading, attach a persistent volume to the service at `/data`.
+   Both `STATE_PATH` and `LOG_PATH` must be on that volume. Migrate the existing
+   `state.json` and `trades.csv` before restarting an existing bot; never reset the
+   ledger to bypass a budget or reconciliation block. MM waits for state restoration
+   on an empty volume. For a genuinely new bot only, initialize `state.json` with
+   `{"markets": {}}` after confirming there is no previous ledger to restore.
 
 The `/data` volume preserves per-market purchase counters, one-time entry flags, and trade logs across restarts and deployments. Do not enable live trading without this volume; otherwise a restart during an active market can allow duplicate entries.
 
