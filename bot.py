@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
+from market_maker import MarketMaker
 from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, gross_take_profit_target, fixed_take_profit_target
 
 load_dotenv()
@@ -11,6 +12,9 @@ if os.getenv("MODE", "live").lower() != "live" or os.getenv("KALSHI_ENV", "produ
     raise SystemExit("This package supports live Kalshi production only")
 
 ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
+EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
+if EXECUTION_STRATEGY not in ("strike_ruler", "market_making"):
+    raise SystemExit("EXECUTION_STRATEGY must be strike_ruler or market_making")
 ENTRY_MIN = Decimal(os.getenv("ENTRY_MIN_CENTS", "10")) / 100
 ENTRY_MAX = Decimal(os.getenv("ENTRY_MAX_CENTS", "47")) / 100
 MODERATE_ENTRY_MAX = Decimal(os.getenv("MODERATE_ENTRY_MAX_CENTS", "30")) / 100
@@ -415,6 +419,9 @@ def cycle(state):
     now = datetime.now(timezone.utc); market, started, closed = active_market(now)
     if not market: return
     ticker = market["ticker"]; elapsed = (now - started).total_seconds()
+    if ticker in state.get("mm", {}).get("markets", {}):
+        write_log("STRATEGY_SWITCH_WAIT", ticker, details="MM already owns this market; wait for the next contract")
+        return
     record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": []})
     if "predictions" not in record: record["predictions"] = []
     if "spot_entry_attempted" not in record: record["spot_entry_attempted"] = False
@@ -496,17 +503,46 @@ def check():
 
 def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
-    print("Strike Ruler bot v0.8.1", flush=True)
+    version = Path(__file__).with_name("VERSION").read_text().strip()
+    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
     if args.check: check(); return
     if not ENABLED:
         print("Checking Kalshi production credentials (read-only)...", flush=True)
         check()
         print("LOCKED: production service is online; live order routing is disabled", flush=True)
         while True: time.sleep(3600)
-    state = load_state()
-    while True:
-        try: cycle(state)
-        except Exception as error: write_log("ERROR", details=repr(error))
-        time.sleep(int(os.getenv("POLL_SECONDS", "7")))
+    # Railway uses Linux. Hold the volume lock for this process's lifetime.
+    import fcntl
+    import signal
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    with STATE.with_suffix(".lock").open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise SystemExit("Another bot already owns this state volume")
+        state = load_state()
+        mm = MarketMaker(client, save_state, write_log) if EXECUTION_STRATEGY == "market_making" else None
+        def stop(signum, frame):
+            raise KeyboardInterrupt
+        signal.signal(signal.SIGTERM, stop)
+        try:
+            while True:
+                try:
+                    if mm:
+                        market, _, closed = active_market(datetime.now(timezone.utc))
+                        mm.cycle(state, market, closed)
+                    else:
+                        cycle(state)
+                except Exception as error:
+                    write_log("ERROR", details=repr(error))
+                    if mm:
+                        try: mm.cancel_all(state)
+                        except Exception as cancel_error: write_log("MM_CANCEL_ERROR", details=repr(cancel_error))
+                time.sleep(mm.config.poll if mm else int(os.getenv("POLL_SECONDS", "7")))
+        except KeyboardInterrupt:
+            if mm:
+                try: mm.cancel_all(state)
+                except Exception as error: write_log("MM_CANCEL_ERROR", details=repr(error))
+            save_state(state)
 
 if __name__ == "__main__": main()
