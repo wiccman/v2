@@ -26,11 +26,17 @@ class Exchange:
         self.manual_position = D(0)
         self.slow_book = False
         self.settled = {}
+        self.fill_history = []
+        self.ioc_fill_limit = D(100)
+        self.before_ioc = None
 
     def market(self, ticker):
         if ticker in self.settled:
             return {"ticker": ticker, "status": "settled", "result": self.settled[ticker]}
         return {"ticker": ticker, "status": "active"}
+
+    def all_fills(self, ticker):
+        return copy.deepcopy([f for f in self.fill_history if f["ticker"] == ticker])
 
     def positions(self, ticker):
         held = self.manual_position + sum((D(o["fill_count_fp"]) * (1 if o["side"] == "bid" else -1)
@@ -72,6 +78,18 @@ class Exchange:
             self.remote[order_id] = dict(intent, order_id=order_id, client_order_id=cid,
                 status="resting", fill_count_fp="0", remaining_count_fp=intent["quantity"],
                 maker_fees_dollars="0", taker_fees_dollars="0")
+            if intent['reduce_only']:
+                if self.before_ioc:
+                    self.before_ioc(self, intent)
+                    self.before_ioc = None
+                held = D(self.positions(intent['ticker'])[0]['position_fp'])
+                direction = D(1) if intent['side']=='bid' else D(-1)
+                crossed = D(intent['price']) >= self.ask if direction > 0 else D(intent['price']) <= self.bid
+                count = min(abs(held), D(intent['quantity']), self.ioc_fill_limit) if crossed and direction*held < 0 else D(0)
+                if count:
+                    self.fill(order_id, str(count), '.01')
+                if self.remote[order_id]['status'] != 'executed':
+                    self.remote[order_id].update(status='canceled', remaining_count_fp='0')
             result.append({"client_order_id": cid, "order_id": order_id})
         if self.timeout_after_accept:
             self.timeout_after_accept = False
@@ -80,6 +98,10 @@ class Exchange:
 
     def fill(self, order_id, count, fee="0"):
         order = self.remote[order_id]
+        self.fill_history.append(dict(fill_id=f"fill-{len(self.fill_history):04}", order_id=order_id,
+            ticker=order['ticker'], book_side=order['side'], outcome_side='yes' if order['side']=='bid' else 'no',
+            count_fp=count, yes_price_dollars=order['price'], fee_cost=fee,
+            created_time=datetime.fromtimestamp(self.now, timezone.utc).isoformat()))
         order["fill_count_fp"] = str(D(order["fill_count_fp"]) + D(count))
         order["remaining_count_fp"] = str(D(order["remaining_count_fp"]) - D(count))
         order["maker_fees_dollars"] = str(D(order["maker_fees_dollars"]) + D(fee))
@@ -140,7 +162,7 @@ def test_partial_fill_only_exits_exact_quantity(side_index, exit_side):
     assert D(exits[0]["quantity"]) == D(".37")
 
 
-def test_all_five_fills_create_five_distinct_reduce_only_exits():
+def test_all_five_fills_exit_exact_inventory_with_protected_ioc():
     ex, state, mm, _, _ = setup()
     cycle(mm, state)
     for i in range(5):
@@ -148,10 +170,11 @@ def test_all_five_fills_create_five_distinct_reduce_only_exits():
     cycle(mm, state)
     cycle(mm, state)
     exits = ex.batches[-1]
-    assert len(exits) == 5
-    assert all(o["side"] == "ask" and o["reduce_only"] for o in exits)
-    assert sum(D(o["quantity"]) for o in exits) == 5
-    assert len({o["price"] for o in exits}) == 5
+    assert len(exits) == 1
+    assert exits[0]["side"] == "ask" and exits[0]["reduce_only"]
+    assert D(exits[0]["quantity"]) == 5 and D(exits[0]["price"]) == ex.bid
+    assert D(ex.positions('BTC')[0]['position_fp']) == 0
+    assert not ex.all_orders('BTC','resting')
 
 
 def test_cancel_race_fill_is_reconciled_before_replacement():
@@ -349,17 +372,18 @@ class RecordingClient(KalshiClient):
         return {"orders": []}
 
 
-def test_batch_api_uses_post_only_expiry_and_reduce_only():
+def test_batch_api_uses_ioc_for_reduce_only_without_post_only_or_expiry():
     client = RecordingClient()
     client.place_mm_batch([dict(ticker="BTC", side="ask", quantity=".37", price=".54",
                                expiry=1015, client_id="persisted-id", reduce_only=True)])
     method, path, _, body, auth = client.calls[0]
     assert method == "POST" and path == "/portfolio/events/orders/batched" and auth
     order = body["orders"][0]
-    assert order["post_only"] and order["reduce_only"] and order["cancel_order_on_pause"]
+    assert not order["post_only"] and order["reduce_only"] and order["cancel_order_on_pause"]
+    assert order['time_in_force'] == 'immediate_or_cancel'
     assert order["client_order_id"] == "persisted-id"
     assert order["price"] == "0.5400" and order["count"] == ".37"
-    assert order["expiration_time"] == 1015
+    assert 'expiration_time' not in order
 
 
 def test_order_recovery_paginates():
@@ -386,3 +410,66 @@ def test_legacy_execution_will_not_manage_an_mm_market(monkeypatch):
     monkeypatch.setattr(bot, "active_market", lambda now: ({"ticker": "BTC"}, current, current))
     monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
     bot.cycle({"markets": {}, "mm": {"markets": {"BTC": {"orders": []}}}})
+
+
+def test_entry_batch_still_posts_five_levels_each_side_with_ttl():
+    client=RecordingClient()
+    intents=[dict(ticker='BTC',side=side,quantity='1',price=str(price),expiry=1015,client_id=str(i),reduce_only=False)
+             for i,(side,price,_,_) in enumerate(ladder(D('.46'),D('.54'),{},MMConfig()))]
+    client.place_mm_batch(intents)
+    orders=client.calls[0][3]['orders']
+    assert len(orders)==10
+    assert all(o['post_only'] and not o['reduce_only'] and o['time_in_force']=='good_till_canceled' and o['expiration_time']==1015 for o in orders)
+
+
+@pytest.mark.parametrize('index', [0,5])
+def test_ioc_partial_fill_retries_only_remaining_inventory(index):
+    ex,state,mm,_,_=setup();cycle(mm,state);ex.fill(f'order-{index}','1');cycle(mm,state)
+    ex.ioc_fill_limit=D('.40');cycle(mm,state)
+    assert abs(D(ex.positions('BTC')[0]['position_fp']))==D('.60')
+    cycle(mm,state)
+    assert D(ex.batches[-1][0]['quantity'])==D('.60')
+    assert abs(D(ex.positions('BTC')[0]['position_fp']))==D('.20')
+
+
+def test_ioc_position_change_at_exchange_cannot_reverse_position():
+    ex,state,mm,_,_=setup();cycle(mm,state);ex.fill('order-0','1');cycle(mm,state)
+    ex.before_ioc=lambda exchange,intent:setattr(exchange,'manual_position',D('-1'))
+    cycle(mm,state)
+    assert D(ex.positions('BTC')[0]['position_fp'])==0
+    assert ex.remote['order-10']['fill_count_fp']=='0'
+    assert ex.remote['order-10']['status']=='canceled'
+
+
+def test_external_close_reconciles_and_waits_for_new_contract():
+    ex,state,mm,_,events=setup();cycle(mm,state);ex.fill('order-5','1');cycle(mm,state)
+    ex.now+=1;ex.manual_position=D(1)
+    ex.fill_history.append(dict(fill_id='external',order_id='manual',ticker='BTC',book_side='bid',outcome_side='yes',
+        count_fp='1',yes_price_dollars='.50',fee_cost='.01',created_time=datetime.fromtimestamp(ex.now,timezone.utc).isoformat()))
+    cycle(mm,state)
+    assert ledger(state['mm']['markets']['BTC'])==(D(0),D('.03'))
+    cycle(mm,json.loads(json.dumps(state)))
+    assert len(ex.batches)==1
+    ex.settled['BTC']='no';ex.manual_position=D(0)
+    cycle(mm,state,ticker='NEXT')
+    assert len(ex.batches)==2
+    assert ledger(state['mm']['markets']['BTC'])==(D(0),D('.03'))
+
+
+def test_finalized_market_status_is_accepted_for_rollover():
+    ex,state,mm,_,_=setup();cycle(mm,state);ex.fill('order-0','1')
+    original=ex.market
+    ex.market=lambda t: {'ticker':t,'status':'finalized','result':'yes'} if t=='BTC' else original(t)
+    cycle(mm,state,ticker='NEXT')
+    assert state['mm']['markets']['BTC']['settled']
+    assert ledger(state['mm']['markets']['BTC'])==(D(0),D('.54'))
+
+
+def test_fill_pagination_and_repeated_cursor_block():
+    client=RecordingClient();seen=[]
+    def request(method,path,params=None,**kwargs):
+        seen.append(dict(params));return {'fills':[{'fill_id':'second'}], 'cursor':''} if params.get('cursor') else {'fills':[{'fill_id':'first'}], 'cursor':'next'}
+    client.request=request
+    assert len(client.all_fills('BTC'))==2 and seen[1]['cursor']=='next'
+    client.request=lambda *a,**k: {'fills':[],'cursor':'same'}
+    with pytest.raises(RuntimeError,match='cursor repeated'):client.all_fills('BTC')

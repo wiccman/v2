@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient
 from market_maker import MarketMaker
+from storage import atomic_json, require_mm_storage
 from strategy import strike_ruler, quantity_for_budget, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes, gross_take_profit_target, fixed_take_profit_target
 
 load_dotenv()
@@ -49,8 +50,7 @@ client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""), os.getenv("KALSHI_PRIV
 def parse_time(value): return datetime.fromisoformat(value.replace("Z", "+00:00"))
 def load_state(): return json.loads(STATE.read_text()) if STATE.exists() else {"markets": {}}
 def save_state(state):
-    STATE.parent.mkdir(parents=True, exist_ok=True)
-    temp = STATE.with_suffix(".tmp"); temp.write_text(json.dumps(state, indent=2)); temp.replace(STATE)
+    atomic_json(STATE, state)
 def write_log(event, ticker="", **values):
     LOG.parent.mkdir(parents=True, exist_ok=True); exists = LOG.exists()
     fields = ["time_utc", "ticker", "event", "prediction", "confidence", "price", "quantity", "details"]
@@ -58,6 +58,7 @@ def write_log(event, ticker="", **values):
         writer = csv.DictWriter(handle, fieldnames=fields)
         if not exists: writer.writeheader()
         row = {field: "" for field in fields}; row.update(time_utc=datetime.now(timezone.utc).isoformat(), ticker=ticker, event=event); row.update(values); writer.writerow(row)
+    print(json.dumps(row), flush=True)
 
 def active_market(now):
     for market in client.markets(series_ticker="KXBTC15M", status="open", limit=100):
@@ -511,6 +512,8 @@ def main():
         check()
         print("LOCKED: production service is online; live order routing is disabled", flush=True)
         while True: time.sleep(3600)
+    if EXECUTION_STRATEGY == "market_making":
+        require_mm_storage(STATE, LOG)
     # Railway uses Linux. Hold the volume lock for this process's lifetime.
     import fcntl
     import signal
