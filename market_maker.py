@@ -276,7 +276,8 @@ class MarketMaker:
             if not self._cancel(old, state):
                 return
             status = self.client.market(old_ticker)
-            if status.get("status") == "settled" and status.get("result") in ("yes", "no"):
+            # Kalshi market responses use finalized; retain settled compatibility.
+            if status.get("status") in ("finalized", "settled") and status.get("result") in ("yes", "no"):
                 old.update(settled=True, settlement="1" if status["result"] == "yes" else "0")
                 self.save(state)
             elif ledger(old)[0] != 0:
