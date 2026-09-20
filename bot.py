@@ -21,7 +21,16 @@ ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "32:39,39:46"
 OPENING_BIAS_ENABLED = os.getenv("OPENING_BIAS_ENABLED", "true").lower() == "true"
 OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
 OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
-ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR}.items()))
+LATE_PROBABILITY_ENABLED = os.getenv("LATE_PROBABILITY_ENABLED", "true").lower() == "true"
+LATE_PROBABILITY_PAIR = parse_pairs(os.getenv("LATE_PROBABILITY_PAIR_CENTS", "85:92"))
+LATE_DUAL_PAIR = parse_pairs(os.getenv("LATE_DUAL_PAIR_CENTS", "73:81"))
+LATE_ENTRY_START = seconds_from_minutes(os.getenv("LATE_ENTRY_START_MINUTE", "12"))
+LATE_ENTRY_END = seconds_from_minutes(os.getenv("LATE_ENTRY_END_MINUTE", "15"))
+if not 720 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
+    raise ValueError("Late entries must stay within minutes 12 through 15")
+if len(LATE_PROBABILITY_PAIR) != 1 or len(LATE_DUAL_PAIR) != 1:
+    raise ValueError("Each late route requires exactly one entry/exit pair")
+ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_PROBABILITY_PAIR, **LATE_DUAL_PAIR}.items()))
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
 MARKET_BUDGET = market_budget()
@@ -38,7 +47,9 @@ SPOT_ENTRY_WINDOW = min(seconds_from_minutes(os.getenv("SPOT_ENTRY_WINDOW_MINUTE
 SPOT_ENTRY_THRESHOLD = Decimal(os.getenv("SPOT_ENTRY_THRESHOLD_DOLLARS", "80"))
 TAKE_PROFIT_RETRY_SECONDS = int(os.getenv("TAKE_PROFIT_RETRY_SECONDS", "60"))
 DUAL_LIMIT_BUYS_ENABLED = os.getenv("DUAL_LIMIT_BUYS_ENABLED", "true").lower() == "true"
-HISTORICAL_STRIKE_ENABLED = os.getenv("HISTORICAL_STRIKE_ENABLED", "true").lower() == "true"
+# Retained only to reconcile/cancel historical orders saved by older versions.
+# This release never creates a new historical-strike entry.
+HISTORICAL_STRIKE_ENABLED = False
 HISTORICAL_STRIKE_COUNT = int(os.getenv("HISTORICAL_STRIKE_COUNT", "3"))
 HISTORICAL_STRIKE_TOUCH_DOLLARS = Decimal(os.getenv("HISTORICAL_STRIKE_TOUCH_DOLLARS", "25"))
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
@@ -266,7 +277,20 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
            for i in record.get("entry_intents", [])):
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
-    cutoff = min(entry_deadline(closed), submit_before or entry_deadline(closed))
+    if kind == "historical":
+        return {}, Decimal("0")
+    if kind in ("late_probability", "late_dual"):
+        started_at = closed.timestamp() - 900
+        if not LATE_PROBABILITY_ENABLED or now_timestamp < started_at + LATE_ENTRY_START:
+            return {}, Decimal("0")
+        allowed = LATE_PROBABILITY_PAIR if kind == "late_probability" else LATE_DUAL_PAIR
+        if Decimal(str(price)) not in allowed:
+            raise ValueError("Late entry price must match its route's pair")
+        default_deadline = min(closed.timestamp(), started_at + LATE_ENTRY_END)
+        cancel_at = closed.timestamp()
+    else:
+        default_deadline = entry_deadline(closed)
+    cutoff = min(default_deadline, submit_before if submit_before is not None else default_deadline)
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
     cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
@@ -307,6 +331,50 @@ def paired_entries(record, state, ticker, side, closed, kind, now_timestamp=None
         yield price, result, quantity
 
 
+def late_probability_side(market):
+    """Use the market's current favorite, never the Strike Ruler signal."""
+    yes_ask, no_ask = Decimal(market["yes_ask_dollars"]), Decimal(market["no_ask_dollars"])
+    if not all(p.is_finite() and 0 < p < 1 for p in (yes_ask, no_ask)):
+        raise ValueError("Late entries require valid YES and NO ask prices")
+    if yes_ask == no_ask:
+        return None
+    return "YES" if yes_ask >= no_ask else "NO"
+
+
+def place_late_probability_entries(record, state, ticker, market, closed, elapsed):
+    """Post final-three-minute 85c favorite and 73c YES/NO limit entries."""
+    if (not LATE_PROBABILITY_ENABLED or record.get("late_probability_attempted")
+            or not LATE_ENTRY_START <= elapsed < LATE_ENTRY_END):
+        return False
+    if EXIT_MONITOR is None or not EXIT_MONITOR.healthy:
+        return False
+    favorite = late_probability_side(market)
+    if favorite is None:
+        return False
+    record["late_probability_attempted"] = True
+    save_state(state)  # Restart-safe before any live request.
+    close_at = closed.timestamp()
+    routes = [("LATE_PROBABILITY_LIMIT", "late_probability", favorite, *next(iter(LATE_PROBABILITY_PAIR.items())))]
+    price, target = next(iter(LATE_DUAL_PAIR.items()))
+    routes.extend(("LATE_DUAL_LIMIT", "late_dual", side, price, target) for side in ("YES", "NO"))
+    submitted = False
+    for event, kind, side, price, target in routes:
+        result, quantity = funded_entry(
+            record, state, ticker, side, price, closed, kind,
+            submit_before=close_at, cancel_at=close_at,
+        )
+        if result.get("order_id"):
+            record["orders"].append(result["order_id"])
+            submitted = True
+        write_log(event, ticker, prediction=side, price=str(price), quantity=str(quantity),
+                  details=json.dumps({
+                      "exit_target": str(target), "entry_window": "12:00-15:00",
+                      "favorite_side": favorite, "order": result,
+                  }))
+    save_state(state)
+    return submitted
+
+
 def reconcile_entries(state, now_timestamp=None):
     """Run before market discovery/signals, including markets from earlier cycles."""
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
@@ -340,18 +408,28 @@ def reconcile_entries(state, now_timestamp=None):
                         "order_id": item["order_id"], "side": item["side"],
                         "cancel_at": item["cancel_at"], "entry_closed": item.get("entry_closed", False)})
                     save_state(state)
-            # Old budgets cannot be reconstructed reliably. Cancel their unfilled
-            # remainder on upgrade and resume entries only in a clean market.
-            if now_timestamp < record["entry_cancel_at"] and not record.get("entry_budget_legacy"):
-                # On a price-policy upgrade, cancel tracked incompatible buys
-                # immediately; keep their spending reservations across restarts.
-                ids = {i["order_id"] for i in pending if i.get("order_id")
-                       and Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS}
-                ids |= {i["order_id"] for i in pending if i.get("order_id") and now_timestamp >= i.get("cancel_at", float("inf"))}
-            else:
-                ids = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
-                ids |= {i["order_id"] for i in pending if i.get("order_id")}
-                ids |= {i["order_id"] for i in record.get("historical_strike_orders", []) if i.get("order_id") and not i.get("entry_closed")}
+            # Tracked orders own their deadlines. The six-minute fallback applies
+            # only to early/untracked orders, never to valid late-route intents.
+            tracked = {i["order_id"] for i in record.get("entry_intents", []) if i.get("order_id")}
+            ids = set()
+            for item in pending:
+                order_id = item.get("order_id")
+                if not order_id:
+                    continue
+                late = item.get("kind") in ("late_probability", "late_dual")
+                deadline = item.get("cancel_at", record["entry_cancel_at"])
+                if not late:
+                    deadline = min(deadline, record["entry_cancel_at"])
+                if (record.get("entry_budget_legacy") or item.get("kind") == "historical"
+                        or Decimal(str(item.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS
+                        or now_timestamp >= deadline):
+                    ids.add(order_id)
+            # Historical entries are retired immediately, but retain their
+            # intents and budget reservations for fill/exit reconciliation.
+            ids |= {i["order_id"] for i in record.get("historical_strike_orders", [])
+                    if i.get("order_id") and not i.get("entry_closed")}
+            if record.get("entry_budget_legacy") or now_timestamp >= record["entry_cancel_at"]:
+                ids |= (set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))) - tracked
             for order_id in sorted(ids):
                 if not cancel_confirmed(order_id, ticker):
                     continue
@@ -416,6 +494,8 @@ def strike_reaction_side(reference_spot, strike):
     return None
 
 def place_historical_strike_entries(record, ticker, spot, closed, now_timestamp=None, *, state):
+    if not HISTORICAL_STRIKE_ENABLED:
+        return False
     initialize_budget(record)
     now_timestamp = time.time() if now_timestamp is None else float(now_timestamp)
     if now_timestamp >= entry_deadline(closed):
@@ -600,11 +680,11 @@ def cycle(state):
     if ticker in state.get("mm", {}).get("markets", {}):
         write_log("STRATEGY_SWITCH_WAIT", ticker, details="Archived strategy owns this market; wait for the next contract")
         return
-    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": []})
+    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "late_probability_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": []})
     if "predictions" not in record: record["predictions"] = []
     if "spot_entry_attempted" not in record: record["spot_entry_attempted"] = False
     if "opening_bias_attempted" not in record: record["opening_bias_attempted"] = False
-    if "final_entry_attempted" not in record: record["final_entry_attempted"] = False
+    if "late_probability_attempted" not in record: record["late_probability_attempted"] = False
     if "dual_limit_attempted" not in record: record["dual_limit_attempted"] = False
     if "dual_limit_orders" not in record: record["dual_limit_orders"] = []
     if "historical_strike_orders" not in record: record["historical_strike_orders"] = []
@@ -618,20 +698,17 @@ def cycle(state):
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
         return
+    # The late favorite comes from current quotes, not lookbacks or old signal
+    # snapshots. Missing early-session data must not block this separate route.
+    if LATE_ENTRY_START <= time.time() - started.timestamp() < LATE_ENTRY_END:
+        current = client.market(ticker)
+        place_late_probability_entries(record, state, ticker, current, closed,
+                                      time.time() - started.timestamp())
+        return
     if record["signal"] is None:
         signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
         record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
         write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
-    if HISTORICAL_STRIKE_ENABLED and "historical_strikes" not in record:
-        try:
-            record["historical_strikes"] = [str(value) for value in prior_strikes(started)]
-            write_log("HISTORICAL_STRIKES", ticker, details=json.dumps(record["historical_strikes"]))
-            save_state(state)
-        except Exception as error:
-            if not record.get("historical_strikes_error_logged"):
-                record["historical_strikes_error_logged"] = True
-                write_log("HISTORICAL_STRIKES_UNAVAILABLE", ticker, details=repr(error))
-                save_state(state)
     signal = record["signal"]; current = client.market(ticker)
     elapsed = time.time() - started.timestamp()
     # One bias-selected opening order: never quote both complementary outcomes.
@@ -666,15 +743,7 @@ def cycle(state):
         record["dual_limit_attempted"] = True
         save_state(state)
         if place_dual_limit_buys(record, ticker, closed, state=state): save_state(state)
-    if HISTORICAL_STRIKE_ENABLED and START <= elapsed < END and record.get("historical_strikes"):
-        try:
-            reference_spot = client.btc_reference_price()
-            if place_historical_strike_entries(record, ticker, reference_spot, closed, state=state): save_state(state)
-        except Exception as error:
-            if not record.get("historical_spot_error_logged"):
-                record["historical_spot_error_logged"] = True
-                write_log("HISTORICAL_SPOT_UNAVAILABLE", ticker, details=repr(error))
-                save_state(state)
+    place_late_probability_entries(record, state, ticker, current, closed, elapsed)
     if 0 <= elapsed < SPOT_ENTRY_WINDOW and not record["spot_entry_attempted"]:
         spot = client.btc_reference_price(); strike = Decimal(str(current["floor_strike"]))
         if spot_is_above_strike(spot, strike, SPOT_ENTRY_THRESHOLD):
@@ -697,6 +766,7 @@ def main():
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
+    print(f"Historical-strike entries disabled; late window={LATE_ENTRY_START}-{LATE_ENTRY_END}s; favorite pair={LATE_PROBABILITY_PAIR}; dual pair={LATE_DUAL_PAIR}", flush=True)
     ignored = ("TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
                "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")
@@ -749,4 +819,3 @@ def main():
                 EXIT_MONITOR.stop()
 
 if __name__ == "__main__": main()
-

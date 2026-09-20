@@ -19,14 +19,16 @@ marks overdue slots missed instead of inventing earlier prices. The final averag
 is available only when all three captures exist. These quoted prices are market
 implied values, not calibrated probabilities of success.
 
-New regular, dual and historical entries run from minute 2 until strictly before
-minute 5. No route may submit after 5:00, including after a slow API call. Entry
-orders expire at the absolute 6:00 market boundary; cancellation sweeps retry
-failed requests. Exit monitoring continues after both cutoffs.
+New regular and dual entries run from minute 2 until strictly before minute 5.
+Those early routes cannot submit after 5:00, including after a slow API call,
+and their orders expire at the absolute 6:00 market boundary. The separate late
+routes operate from 12:00 until strictly before 15:00 and expire at market close.
+Cancellation sweeps honor each tracked route's own deadline and retry failures.
+Exit monitoring continues until market close.
 
 ## Entries, exits and budgets
 
-All routes use these default outcome-price pairs, configurable through
+Regular, dual and spot routes use these default outcome-price pairs, configurable through
 `ENTRY_EXIT_PAIRS_CENTS`:
 
 | Entry limit | Exit target |
@@ -36,17 +38,32 @@ All routes use these default outcome-price pairs, configurable through
 
 During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same per-trigger budget and market allowance as every other route.
 
-Regular bias-based entries run first when a valid prediction snapshot is available.
-An optional dual batch submits both tiers on both YES and NO. Historical-strike
-touches use the side of approach; the optional early spot trigger buys YES when
-spot is sufficiently above the current strike. This early route operates before
-minute 2 by default; `ENTRY_START_MINUTE` applies to the other three routes.
+During minutes 12–15, it posts one 85¢ limit on whichever side (YES or NO) the market currently prices higher, with a 92¢ target. This late order expires at contract close.
+It also posts 73¢ limits on both YES and NO, each with an 81¢ target; all three late orders share the normal per-market allowance.
 
-`ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular, historical
-and spot triggers split it across two tiers. A dual batch splits the same amount
+Historical-strike reactions no longer submit entries. Previously placed historical
+buys are canceled on reconciliation without erasing their spending reservations
+or their filled inventory's saved take-profit targets.
+
+**Review before deployment:** the late prices above are buy-limit ceilings, not
+probability-crossing triggers. A 73¢ NO limit can execute immediately at a lower
+NO ask; it does not wait for NO to rise to 73¢. Opposing fills can reduce or flip
+the account's net position rather than creating two independently managed lots.
+The current favorite is selected from the higher ask, not an 85% calibrated
+probability estimate. Confirm these semantics before enabling the late routes.
+
+Regular bias-based entries run first when a valid prediction snapshot is available.
+An optional dual batch submits both tiers on both YES and NO. The optional early
+spot trigger buys YES when spot is sufficiently above the current strike.
+
+`ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular
+and spot triggers split it across two tiers. An early dual batch splits the same amount
 across **both sides and both tiers**, rather than receiving a separate allowance
 per side. All routes share `MARKET_BUDGET_DOLLARS`, hard-capped at $5 per market.
-The current Railway override is $2 per trigger; the source default is $0.77.
+The source default is $0.77. Railway overrides have not been verified for this
+branch. Each late order requests this principal, in order: favorite, YES, NO.
+All still share the $5 cap, so earlier spending or reservations may leave no
+allowance for some or all late orders. Cancellations do not restore allowance.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
 saved before submission. Rejections, cancellations, partial fills, sales and
@@ -82,7 +99,12 @@ Important defaults:
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `2` | Earliest new entry |
-| `ENTRY_END_MINUTE` | `5` | Entry cutoff, capped at five minutes |
+| `ENTRY_END_MINUTE` | `5` | Regular and dual-entry cutoff, capped at five minutes |
+| `LATE_PROBABILITY_PAIR_CENTS` | `85:92` | Final-three-minute favorite-side entry and exit |
+| `LATE_DUAL_PAIR_CENTS` | `73:81` | Final-three-minute YES and NO entry/exit pairs |
+| `LATE_PROBABILITY_ENABLED` | `true` | Enable the late batch (favorite plus both 73¢ sides) |
+| `LATE_ENTRY_START_MINUTE` | `12` | Late-window start, constrained to the last three minutes |
+| `LATE_ENTRY_END_MINUTE` | `15` | Exclusive late-window cutoff, no later than market close |
 | `POLL_SECONDS` | `5` | Entry-loop delay |
 | `EXIT_POLL_SECONDS` | `1` | Independent exit-loop delay |
 | `STATE_PATH` | `/data/state.json` | Durable entry ledger |
@@ -118,3 +140,6 @@ The tests use fake exchange clients and do not place live trades.
 Review the change branch before updating Railway's deployed branch. Keep the
 existing volume and ledger, deploy one replica, and verify startup and event logs.
 With `TRADING_ENABLED=true`, deploying starts live operation immediately.
+This branch does not change `kalshi.py` or `take_profit.py`, and does not include
+the experimental non-reduce-only resting TP implementation. Passing offline
+tests does not verify live Kalshi acceptance or resolve the reported TP failure.

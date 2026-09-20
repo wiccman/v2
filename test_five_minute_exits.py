@@ -71,8 +71,9 @@ def cycle_setup(monkeypatch, elapsed):
 
 
 @pytest.mark.parametrize("elapsed", [300, 301, 360, 720, 899])
-def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeypatch, elapsed):
+def test_early_routes_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeypatch, elapsed):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    monkeypatch.setattr(bot, "LATE_PROBABILITY_ENABLED", False)
     bot.cycle(state)
     assert fake.entries == []
     assert fake.exits == []  # Independent worker owns exits; no single-target fallback.
@@ -82,7 +83,7 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) == 8  # Both levels: dual YES/NO, historical touch, regular signal
+    assert len(fake.entries) == 6  # Regular pair plus dual YES/NO; historical is retired.
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
@@ -143,5 +144,4 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
     assert fake.exits == []  # Retired backoff cannot trigger overlapping exits.
-
 

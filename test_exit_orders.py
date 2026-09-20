@@ -75,7 +75,7 @@ def test_historical_strike_reaction_uses_approach_side():
     assert bot.strike_reaction_side(Decimal("100000"), Decimal("100000")) is None
 
 
-def test_historical_strike_touch_posts_both_pairs_until_six_minute_deadline(monkeypatch):
+def test_historical_strike_touch_no_longer_posts_entries(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -90,11 +90,10 @@ def test_historical_strike_touch_posts_both_pairs_until_six_minute_deadline(monk
 
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
-    ) is True
-    assert fake.entries == [("MARKET", "NO", Decimal("1.20"), Decimal("0.32"), 1460),
-                            ("MARKET", "NO", Decimal("0.98"), Decimal("0.39"), 1460)]
-    assert record["historical_triggered_strikes"] == ["100000"]
-    assert record["historical_strike_orders"][0]["strike"] == "100000"
+    ) is False
+    assert fake.entries == []
+    assert record["historical_triggered_strikes"] == []
+    assert record["historical_strike_orders"] == []
 
 
 class HistoricalExitClient:
@@ -248,5 +247,4 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is False
     assert fake.actions == []
     assert all(action[0] != "close" for action in fake.actions)
-
 
