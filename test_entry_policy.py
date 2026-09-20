@@ -34,7 +34,7 @@ def test_all_entry_routes_share_six_dollars_and_restart_does_not_refund(monkeypa
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
     assert D("5.99") < spent <= D("6")
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("6")
-    assert len(fake.entries) == 6
+    assert len(fake.entries) == 5
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
@@ -162,3 +162,32 @@ def test_budget_setting_cannot_exceed_six(monkeypatch):
     monkeypatch.setenv("MARKET_BUDGET_DOLLARS", "4")
     assert entry_policy.market_budget() == 4
 
+
+def test_entry_gateway_enforces_current_bias_and_logs_reason(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    record["signal"] = {"prediction": "YES", "base_confidence": "HIGH"}
+    record["previous_bias"] = "YES"
+    events = []
+    monkeypatch.setattr(bot, "write_log", lambda event, ticker="", **values: events.append((event, values)))
+    result, quantity = bot.funded_entry(record, state, "TEST", "NO", D("0.32"), closed, "spot")
+    assert result == {} and quantity == 0
+    decision = json.loads(events[-1][1]["details"])
+    assert decision == {
+        "selected_side": "NO", "current_bias": "YES", "previous_bias": "YES",
+        "entry_price": "0.32", "entry_reason": "selected_side_opposes_current_bias", "decision": "SKIP",
+    }
+    assert not fake.entries
+
+
+def test_entry_gateway_skips_previous_current_bias_conflict(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    record["signal"] = {"prediction": "YES", "base_confidence": "HIGH"}
+    record["previous_bias"] = "NO"
+    events = []
+    monkeypatch.setattr(bot, "write_log", lambda event, ticker="", **values: events.append((event, values)))
+    result, quantity = bot.funded_entry(record, state, "TEST", "YES", D("0.32"), closed, "regular")
+    assert result == {} and quantity == 0
+    decision = json.loads(events[-1][1]["details"])
+    assert decision["entry_reason"] == "previous_current_bias_conflict"
+    assert decision["decision"] == "SKIP"
+    assert not fake.entries
