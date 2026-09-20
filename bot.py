@@ -21,7 +21,12 @@ ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "32:39,39:46"
 OPENING_BIAS_ENABLED = os.getenv("OPENING_BIAS_ENABLED", "true").lower() == "true"
 OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
 OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
-ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR}.items()))
+LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
+LATE_ENTRY_START = seconds_from_minutes(os.getenv("LATE_ENTRY_START_MINUTE", "11"))
+LATE_ENTRY_END = seconds_from_minutes(os.getenv("LATE_ENTRY_END_MINUTE", "13"))
+if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
+    raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
+ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
 MARKET_BUDGET = market_budget()
@@ -266,7 +271,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
            for i in record.get("entry_intents", [])):
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
-    cutoff = min(entry_deadline(closed), submit_before or entry_deadline(closed))
+    cutoff = entry_deadline(closed) if submit_before is None else float(submit_before)
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
     cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
@@ -304,6 +309,17 @@ def paired_entries(record, state, ticker, side, closed, kind, now_timestamp=None
     for price in ENTRY_EXIT_PAIRS:
         result, quantity = funded_entry(record, state, ticker, side, price, closed, kind,
             now_timestamp, submit_before, order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
+        yield price, result, quantity
+
+
+def paired_late_entries(record, state, ticker, side, closed, now_timestamp, submit_before, cancel_at):
+    """Place both late tiers on the bias side and split one trigger budget between them."""
+    for price in LATE_ENTRY_PAIRS:
+        result, quantity = funded_entry(
+            record, state, ticker, side, price, closed, "late_bias", now_timestamp,
+            submit_before=submit_before, order_budget=BUDGET / len(LATE_ENTRY_PAIRS),
+            cancel_at=cancel_at,
+        )
         yield price, result, quantity
 
 
@@ -600,12 +616,13 @@ def cycle(state):
     if ticker in state.get("mm", {}).get("markets", {}):
         write_log("STRATEGY_SWITCH_WAIT", ticker, details="Archived strategy owns this market; wait for the next contract")
         return
-    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": []})
+    record = state["markets"].setdefault(ticker, {"buys": 0, "last_buy": 0, "signal": None, "predictions": [], "orders": [], "spot_entry_attempted": False, "final_entry_attempted": False, "dual_limit_attempted": False, "dual_limit_orders": [], "historical_strike_orders": [], "historical_triggered_strikes": [], "historical_take_profit_orders": [], "late_entry_attempted": False})
     if "predictions" not in record: record["predictions"] = []
     if "spot_entry_attempted" not in record: record["spot_entry_attempted"] = False
     if "opening_bias_attempted" not in record: record["opening_bias_attempted"] = False
     if "final_entry_attempted" not in record: record["final_entry_attempted"] = False
     if "dual_limit_attempted" not in record: record["dual_limit_attempted"] = False
+    if "late_entry_attempted" not in record: record["late_entry_attempted"] = False
     if "dual_limit_orders" not in record: record["dual_limit_orders"] = []
     if "historical_strike_orders" not in record: record["historical_strike_orders"] = []
     if "historical_triggered_strikes" not in record: record["historical_triggered_strikes"] = []
@@ -662,6 +679,24 @@ def cycle(state):
                 record["orders"].append(result["order_id"])
                 write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"paired purchase {record['buys']} of {MAX_BUYS}")
                 save_state(state)
+    late_start = started.timestamp() + LATE_ENTRY_START
+    late_end = started.timestamp() + LATE_ENTRY_END
+    if late_start <= time.time() < late_end and not record["late_entry_attempted"] and signal["prediction"] in ("YES", "NO"):
+        record["late_entry_attempted"] = True
+        save_state(state)
+        for price, result, quantity in paired_late_entries(
+            record, state, ticker, signal["prediction"], closed, time.time(), late_end, late_end
+        ):
+            if result.get("order_id"):
+                record["orders"].append(result["order_id"])
+            write_log(
+                "LATE_BIAS_LIMIT", ticker, prediction=signal["prediction"], price=str(price),
+                quantity=str(quantity), details=json.dumps({
+                    "exit_target": str(LATE_ENTRY_PAIRS[price]), "entry_start": late_start,
+                    "entry_cutoff": late_end, "cancel_at": late_end, "order": result,
+                }),
+            )
+            save_state(state)
     if DUAL_LIMIT_BUYS_ENABLED and START <= elapsed < END and not record["dual_limit_attempted"]:
         record["dual_limit_attempted"] = True
         save_state(state)
@@ -697,6 +732,7 @@ def main():
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
+    print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     ignored = ("TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
                "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")
