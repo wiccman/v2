@@ -342,7 +342,7 @@ def late_probability_side(market):
 
 
 def place_late_probability_entries(record, state, ticker, market, closed, elapsed):
-    """Post final-three-minute 85c favorite and 73c YES/NO limit entries."""
+    """Submit each late limit only when its side's ask reaches that price."""
     if (not LATE_PROBABILITY_ENABLED or record.get("late_probability_attempted")
             or not LATE_ENTRY_START <= elapsed < LATE_ENTRY_END):
         return False
@@ -351,14 +351,20 @@ def place_late_probability_entries(record, state, ticker, market, closed, elapse
     favorite = late_probability_side(market)
     if favorite is None:
         return False
-    record["late_probability_attempted"] = True
-    save_state(state)  # Restart-safe before any live request.
+    attempted = record.setdefault("late_price_attempts", [])
     close_at = closed.timestamp()
     routes = [("LATE_PROBABILITY_LIMIT", "late_probability", favorite, *next(iter(LATE_PROBABILITY_PAIR.items())))]
     price, target = next(iter(LATE_DUAL_PAIR.items()))
     routes.extend(("LATE_DUAL_LIMIT", "late_dual", side, price, target) for side in ("YES", "NO"))
     submitted = False
     for event, kind, side, price, target in routes:
+        # Exact-price observation avoids chasing a jump or queuing a lower
+        # retracement order. Keep the entry limit as protection against slippage.
+        key = kind if kind == "late_probability" else kind + ":" + side
+        if key in attempted or Decimal(market[side.lower() + "_ask_dollars"]) != price:
+            continue
+        attempted.append(key)
+        save_state(state)  # Persist each trigger before an ambiguous request.
         result, quantity = funded_entry(
             record, state, ticker, side, price, closed, kind,
             submit_before=close_at, cancel_at=close_at,

@@ -38,19 +38,13 @@ Regular, dual and spot routes use these default outcome-price pairs, configurabl
 
 During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same per-trigger budget and market allowance as every other route.
 
-During minutes 12–15, it posts one 85¢ limit on whichever side (YES or NO) the market currently prices higher, with a 92¢ target. This late order expires at contract close.
-It also posts 73¢ limits on both YES and NO, each with an 81¢ target; all three late orders share the normal per-market allowance.
+During minutes 12–15, it waits for the current favorite's ask to reach 85¢ before submitting one 85¢ limit with a 92¢ target. It separately watches YES and NO for an ask of 73¢, then submits that side's 73¢ limit with an 81¢ target. Each 73¢ side and the single 85¢ route can trigger once per market, persisted across restarts. These orders expire at contract close and share the normal per-market allowance.
 
 Historical-strike reactions no longer submit entries. Previously placed historical
 buys are canceled on reconciliation without erasing their spending reservations
 or their filled inventory's saved take-profit targets.
 
-**Review before deployment:** the late prices above are buy-limit ceilings, not
-probability-crossing triggers. A 73¢ NO limit can execute immediately at a lower
-NO ask; it does not wait for NO to rise to 73¢. Opposing fills can reduce or flip
-the account's net position rather than creating two independently managed lots.
-The current favorite is selected from the higher ask, not an 85% calibrated
-probability estimate. Confirm these semantics before enabling the late routes.
+Late triggers require an observed ask exactly at the configured entry price; cheaper quotes do not trigger orders, and jumps past the price are skipped. The submitted limit prevents paying more, but can fill cheaper if the quote changes after submission. Opposing fills still net inventory. These are market prices, not calibrated probability estimates. The live take-profit failure remains unresolved by this entry change.
 
 Regular bias-based entries run first when a valid prediction snapshot is available.
 An optional dual batch submits both tiers on both YES and NO. The optional early
@@ -102,7 +96,7 @@ Important defaults:
 | `ENTRY_END_MINUTE` | `5` | Regular and dual-entry cutoff, capped at five minutes |
 | `LATE_PROBABILITY_PAIR_CENTS` | `85:92` | Final-three-minute favorite-side entry and exit |
 | `LATE_DUAL_PAIR_CENTS` | `73:81` | Final-three-minute YES and NO entry/exit pairs |
-| `LATE_PROBABILITY_ENABLED` | `true` | Enable the late batch (favorite plus both 73¢ sides) |
+| `LATE_PROBABILITY_ENABLED` | `true` | Enable late price triggers |
 | `LATE_ENTRY_START_MINUTE` | `12` | Late-window start, constrained to the last three minutes |
 | `LATE_ENTRY_END_MINUTE` | `15` | Exclusive late-window cutoff, no later than market close |
 | `POLL_SECONDS` | `5` | Entry-loop delay |

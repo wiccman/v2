@@ -32,7 +32,7 @@ def setup(monkeypatch, elapsed=720, favorite="YES"):
 
 
 @pytest.mark.parametrize("favorite", ["YES", "NO"])
-@pytest.mark.parametrize("elapsed,count", [(719, 0), (720, 3), (899, 3), (900, 0)])
+@pytest.mark.parametrize("elapsed,count", [(719, 0), (720, 1), (899, 1), (900, 0)])
 def test_late_window_exact_sides_targets_and_expiry(monkeypatch, favorite, elapsed, count):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, favorite)
     bot.cycle(state)
@@ -42,8 +42,6 @@ def test_late_window_exact_sides_targets_and_expiry(monkeypatch, favorite, elaps
     intents = record["entry_intents"]
     assert [(i["side"], D(i["price"]), D(i["exit_target"])) for i in intents] == [
         (favorite, D("0.85"), D("0.92")),
-        ("YES", D("0.73"), D("0.81")),
-        ("NO", D("0.73"), D("0.81")),
     ]
     assert all(i["cancel_at"] == closed.timestamp() for i in intents)
     assert all(o[3]["expiration_time"] == closed.timestamp() for o in fake.entries)
@@ -56,7 +54,7 @@ def test_late_orders_survive_old_six_minute_sweep_and_restart(monkeypatch):
     restored = json.loads(json.dumps(state))
     clock[0] += 1
     bot.cycle(restored)
-    assert not fake.cancelled and len(fake.entries) == 3
+    assert not fake.cancelled and len(fake.entries) == 1
     clock[0] = closed.timestamp() - 1
     bot.reconcile_entries(restored)
     assert not fake.cancelled
@@ -74,7 +72,32 @@ def test_late_entry_does_not_need_strike_ruler_lookbacks(monkeypatch):
         raise AssertionError("Late route must not request signal history")
     monkeypatch.setattr(bot, "prior_three", unavailable)
     bot.cycle(state)
-    assert len(fake.entries) == 3 and record["signal"] is None
+    assert len(fake.entries) == 1 and record["signal"] is None
+
+
+def test_wait_for_each_price_and_preserve_triggers_across_restart(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch)
+    quote = fake.market("TEST")
+    monkeypatch.setattr(fake, "market", lambda ticker: dict(quote))
+    for yes, no, count in [("0.60", "0.40", 0), ("0.73", "0.27", 1),
+                           ("0.74", "0.26", 1), ("0.85", "0.15", 2),
+                           ("0.27", "0.73", 3), ("0.15", "0.85", 3)]:
+        quote.update(yes_ask_dollars=yes, no_ask_dollars=no)
+        bot.cycle(state)
+        assert len(fake.entries) == count
+        state = json.loads(json.dumps(state))
+    intents = state["markets"]["TEST"]["entry_intents"]
+    assert [(i["side"], i["price"], i["exit_target"]) for i in intents] == [
+        ("YES", "0.73", "0.81"), ("YES", "0.85", "0.92"),
+        ("NO", "0.73", "0.81")]
+
+
+def test_jumping_over_prices_does_not_queue_retracement_orders(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch)
+    quote = dict(fake.market("TEST"), yes_ask_dollars="0.86", no_ask_dollars="0.14")
+    monkeypatch.setattr(fake, "market", lambda ticker: quote)
+    bot.cycle(state)
+    assert not fake.entries and not record["late_price_attempts"]
 
 
 def test_slow_quote_cannot_buy_after_contract_close(monkeypatch):
@@ -114,7 +137,7 @@ def test_remove_pending_historical_without_cancelling_late_orders(monkeypatch):
     record["orders"].append("old-historical")
     bot.reconcile_entries(state)
     assert fake.cancelled == ["old-historical"]
-    assert len(record["orders"]) == 3
+    assert len(record["orders"]) == 1
     assert record["entry_intents"][-1]["reserved_dollars"] == "0.35"
 
 
@@ -137,7 +160,7 @@ def test_unhealthy_exit_monitor_does_not_consume_late_attempt(monkeypatch):
     assert not fake.entries and not record.get("late_probability_attempted")
     bot.EXIT_MONITOR.healthy = True
     bot.cycle(state)
-    assert len(fake.entries) == 3
+    assert len(fake.entries) == 1
 
 
 def test_ambiguous_submission_is_not_retried_after_restart(monkeypatch):
@@ -146,7 +169,7 @@ def test_ambiguous_submission_is_not_retried_after_restart(monkeypatch):
     monkeypatch.setattr(bot, "save_state", lambda s: saved.append(copy.deepcopy(s)))
     calls = []
     def lost_ack(*args, **kwargs):
-        assert saved[-1]["markets"]["TEST"]["late_probability_attempted"]
+        assert "late_probability" in saved[-1]["markets"]["TEST"]["late_price_attempts"]
         assert saved[-1]["markets"]["TEST"]["entry_intents"][-1]["client_id"] == kwargs["client_order_id"]
         calls.append(kwargs)
         raise TimeoutError("unknown response")
