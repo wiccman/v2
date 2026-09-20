@@ -39,16 +39,16 @@ def test_dual_limit_buys_post_both_levels_until_six_minute_deadline(monkeypatch)
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot, "save_state", lambda state: None)
-    record = {"dual_limit_orders": []}
+    record = {"dual_limit_orders": [], "signal": {"prediction": "YES"}, "previous_bias": "YES"}
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
-    assert [entry[1] for entry in fake.entries] == ["YES", "YES", "NO", "NO"]
-    assert [entry[2] for entry in fake.entries] == [Decimal("0.60"), Decimal("0.49")] * 2
-    assert [entry[3] for entry in fake.entries] == [Decimal("0.32"), Decimal("0.39")] * 2
+    assert [entry[1] for entry in fake.entries] == ["YES", "YES"]
+    assert [entry[2] for entry in fake.entries] == [Decimal("1.20"), Decimal("0.98")]
+    assert [entry[3] for entry in fake.entries] == [Decimal("0.32"), Decimal("0.39")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.BUDGET
     assert all(entry[4] == 1460 for entry in fake.entries)
-    assert record["dual_limit_orders"] == ["dual-yes-0.32", "dual-yes-0.39", "dual-no-0.32", "dual-no-0.39"]
+    assert record["dual_limit_orders"] == ["dual-yes-0.32", "dual-yes-0.39"]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
@@ -85,6 +85,8 @@ def test_historical_strike_touch_posts_both_pairs_until_six_minute_deadline(monk
         "historical_last_spot": "99950",
         "historical_triggered_strikes": [],
         "historical_strike_orders": [],
+        "signal": {"prediction": "NO"},
+        "previous_bias": "NO",
     }
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
@@ -248,5 +250,3 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is False
     assert fake.actions == []
     assert all(action[0] != "close" for action in fake.actions)
-
-
