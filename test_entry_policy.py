@@ -10,10 +10,10 @@ from kalshi import KalshiClient, KalshiAPIError
 from test_five_minute_exits import cycle_setup
 
 
-def test_all_entry_routes_share_five_dollars_and_restart_does_not_refund(monkeypatch):
+def test_all_entry_routes_share_six_dollars_and_restart_does_not_refund(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     monkeypatch.setattr(bot, "BUDGET", D("2"))
-    monkeypatch.setattr(bot, "MARKET_BUDGET", D("5"))
+    monkeypatch.setattr(bot, "MARKET_BUDGET", D("6"))
     saved = []
     monkeypatch.setattr(bot, "save_state", lambda s: saved.append(copy.deepcopy(s)))
     original = fake._order
@@ -32,8 +32,8 @@ def test_all_entry_routes_share_five_dollars_and_restart_does_not_refund(monkeyp
     bot.place_historical_strike_entries(record, "TEST", D("100010"), closed, state=state)
     bot.funded_entry(record, state, "TEST", "NO", D("0.32"), closed, "regular")
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("4.99") < spent <= D("5")
-    assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("5")
+    assert D("5.99") < spent <= D("6")
+    assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("6")
     assert len(fake.entries) == 6
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
@@ -156,9 +156,9 @@ def test_orders_follows_every_page(monkeypatch):
     assert seen[-1]["cursor"] == "next"
 
 
-def test_budget_setting_cannot_exceed_five(monkeypatch):
+def test_budget_setting_cannot_exceed_six(monkeypatch):
     monkeypatch.setenv("MARKET_BUDGET_DOLLARS", "7")
-    assert entry_policy.market_budget() == 5
+    assert entry_policy.market_budget() == 6
     monkeypatch.setenv("MARKET_BUDGET_DOLLARS", "4")
     assert entry_policy.market_budget() == 4
 

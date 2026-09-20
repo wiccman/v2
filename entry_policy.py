@@ -11,7 +11,7 @@ def market_budget():
     value = D(os.getenv("MARKET_BUDGET_DOLLARS", "5"))
     if not value.is_finite() or value <= ZERO:
         raise ValueError("MARKET_BUDGET_DOLLARS must be positive and finite")
-    return min(value, D("5"))
+    return min(value, D("6"))
 
 
 def initialize(record):
