@@ -261,7 +261,49 @@ def cancellation_deadline(closed):
     return closed.timestamp() - 900 + CANCEL_AFTER
 
 
+def previous_market_bias(state, started):
+    """Return the latest completed market's recorded Strike Ruler side."""
+    candidates = []
+    for ticker, prior in state.get("markets", {}).items():
+        signal = prior.get("signal") or {}
+        side = signal.get("prediction")
+        close_timestamp = prior.get("close_timestamp")
+        if side not in ("YES", "NO") or close_timestamp is None:
+            continue
+        close_timestamp = float(close_timestamp)
+        if close_timestamp <= started.timestamp():
+            candidates.append((close_timestamp, ticker, side))
+    return max(candidates)[2] if candidates else None
+
+
+def entry_decision(record, side, price, kind):
+    current_bias = (record.get("signal") or {}).get("prediction")
+    previous_bias = record.get("previous_bias")
+    conflict = previous_bias in ("YES", "NO") and current_bias in ("YES", "NO") and previous_bias != current_bias
+    allowed = current_bias in ("YES", "NO") and side == current_bias and not conflict
+    if conflict:
+        reason = "previous_current_bias_conflict"
+    elif current_bias not in ("YES", "NO"):
+        reason = "current_bias_unavailable"
+    elif side != current_bias:
+        reason = "selected_side_opposes_current_bias"
+    else:
+        reason = kind
+    return allowed, {
+        "selected_side": side,
+        "current_bias": current_bias,
+        "previous_bias": previous_bias,
+        "entry_price": str(price),
+        "entry_reason": reason,
+        "decision": "ALLOW" if allowed else "SKIP",
+    }
+
+
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
+    allowed, decision = entry_decision(record, side, price, kind)
+    write_log("ENTRY_DECISION", ticker, prediction=side, price=str(price), details=json.dumps(decision))
+    if not allowed:
+        return {}, Decimal("0")
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Independent exit monitor is not healthy")
         return {}, Decimal("0")
@@ -383,7 +425,7 @@ def reconcile_entries(state, now_timestamp=None):
 
 
 def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state):
-    """Post fixed-price entries sharing one budget and the six-minute expiry."""
+    """Post fixed-price entries on the current bias side only."""
     initialize_budget(record)
     now_timestamp = time.time() if now_timestamp is None else float(now_timestamp)
     cancel_at = cancellation_deadline(closed)
@@ -392,12 +434,15 @@ def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state):
     record["dual_limit_cancel_at"] = cancel_at
     record.setdefault("dual_limit_orders", [])
     changed = True
-    for side in ("YES", "NO"):
+    side = (record.get("signal") or {}).get("prediction")
+    if side not in ("YES", "NO"):
+        return changed
+    for side in (side,):
         for price in ENTRY_EXIT_PAIRS:
             quantity = Decimal("0")
             try:
                 result, quantity = funded_entry(record, state, ticker, side, price, closed, "dual", now_timestamp,
-                    order_budget=BUDGET / (2 * len(ENTRY_EXIT_PAIRS)))
+                    order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
             except Exception as error:
                 write_log("DUAL_LIMIT_REJECTED", ticker, prediction=side, price=str(price),
                           quantity=str(quantity), details=repr(error))
@@ -638,7 +683,11 @@ def cycle(state):
     if record["signal"] is None:
         signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
         record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
+        record["previous_bias"] = previous_market_bias(state, started)
         write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
+    elif "previous_bias" not in record:
+        record["previous_bias"] = previous_market_bias(state, started)
+        save_state(state)
     if HISTORICAL_STRIKE_ENABLED and "historical_strikes" not in record:
         try:
             record["historical_strikes"] = [str(value) for value in prior_strikes(started)]
@@ -785,4 +834,3 @@ def main():
                 EXIT_MONITOR.stop()
 
 if __name__ == "__main__": main()
-
