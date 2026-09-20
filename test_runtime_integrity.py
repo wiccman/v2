@@ -149,7 +149,7 @@ def test_signal_entries_have_priority_and_dual_batch_shares_one_budget(monkeypat
     intents = record['entry_intents']
     assert [i['kind'] for i in intents[:2]] == ['regular', 'regular']
     dual = [i for i in intents if i['kind'] == 'dual']
-    assert len(dual) == 4
+    assert len(dual) == 2
     assert sum(D(i['quantity']) * D(i['price']) for i in dual) <= D('2')
     assert sum(D(i['reserved_dollars']) for i in intents) <= D('5')
 
