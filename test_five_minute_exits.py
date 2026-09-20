@@ -74,7 +74,10 @@ def cycle_setup(monkeypatch, elapsed):
 def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeypatch, elapsed):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     bot.cycle(state)
-    assert fake.entries == []
+    if elapsed == 720:
+        assert len(fake.entries) == 2  # The configured 11-13 minute late-bias pair.
+    else:
+        assert fake.entries == []
     assert fake.exits == []  # Independent worker owns exits; no single-target fallback.
     assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
 
@@ -82,7 +85,7 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) == 8  # Both levels: dual YES/NO, historical touch, regular signal
+    assert len(fake.entries) == 6  # Bias-only dual pair, historical touch and regular signal.
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
@@ -106,7 +109,7 @@ def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
         return D("100010")
     monkeypatch.setattr(fake, "btc_reference_price", slow_spot)
     bot.cycle(state)
-    assert len(fake.entries) == 6  # Regular pair and dual batch before the slow request.
+    assert len(fake.entries) == 4  # Regular pair and bias-only dual pair before the slow request.
     assert not any(i["kind"] == "historical" for i in record["entry_intents"])
 
 
@@ -143,5 +146,4 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
     assert fake.exits == []  # Retired backoff cannot trigger overlapping exits.
-
 
