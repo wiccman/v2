@@ -32,9 +32,10 @@ def test_all_entry_routes_share_six_dollars_and_restart_does_not_refund(monkeypa
     bot.place_historical_strike_entries(record, "TEST", D("100010"), closed, state=state)
     bot.funded_entry(record, state, "TEST", "NO", D("0.39"), closed, "regular")
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("5.99") < spent <= D("6")
+    assert spent == D("4.15")  # Two full orders; leftover cannot fund another five.
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("6")
-    assert len(fake.entries) == 12
+    assert len(fake.entries) == 2
+    assert all(q == D("5") for _, q, _, _ in fake.entries)
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
@@ -54,8 +55,8 @@ def test_failed_or_ambiguous_post_retains_reservation(monkeypatch):
     restored = json.loads(json.dumps(state))
     intent = restored["markets"]["TEST"]["entry_intents"][0]
     assert intent["client_id"] and not intent["entry_closed"]
-    assert D(intent["reserved_dollars"]) > D("4.99")
-    assert entry_policy.reserve(restored["markets"]["TEST"], "YES", D("0.39"), D("5"), D("5"), 360, "regular") is None
+    assert D(intent["reserved_dollars"]) == D("2.10")
+    assert entry_policy.reserve(restored["markets"]["TEST"], "YES", D("0.39"), D("5"), D("4.19"), 360, "regular") is None
 
 
 @pytest.mark.parametrize("elapsed", [299, 300, 359, 360, 361])
@@ -157,20 +158,23 @@ def test_orders_follows_every_page(monkeypatch):
 
 
 @pytest.mark.parametrize("legacy", [None, "4", "6", "10", "100"])
-def test_fixed_ten_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
+def test_fixed_twenty_five_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
     if legacy is None:
         monkeypatch.delenv("MARKET_BUDGET_DOLLARS", raising=False)
     else:
         monkeypatch.setenv("MARKET_BUDGET_DOLLARS", legacy)
-    assert entry_policy.market_budget() == D("10")
+    assert entry_policy.market_budget() == D("25")
 
 
-def test_ten_dollar_allowance_is_shared_and_survives_restart():
+def test_twenty_five_dollar_allowance_is_shared_and_survives_restart():
     record = {}
     for price in ("0.52", "0.38", "0.39", "0.49", "0.55", "0.56", "0.61", "0.73", "0.85"):
         entry_policy.reserve(record, "YES", D(price), D("2"), entry_policy.market_budget(), 360, "test")
+    while entry_policy.reserve(record, "YES", D("0.39"), D("0.01"), entry_policy.market_budget(), 360, "test"):
+        pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("9.99") < spent <= D("10")
+    assert D("22.90") < spent <= D("25")
+    assert all(D(i["quantity"]) == 5 for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.39"), D("2"), entry_policy.market_budget(), 360, "test") is None
 
@@ -255,3 +259,21 @@ def test_api_error_preserves_structured_rejection_code(monkeypatch):
     with pytest.raises(KalshiAPIError) as raised:
         KalshiClient().request('GET', '/test')
     assert raised.value.code == 'insufficient_balance'
+
+
+@pytest.mark.parametrize("kind", ["opening_bias", "regular", "dual", "historical", "spot", "late_bias"])
+def test_each_entry_route_requests_five_despite_old_dollar_budget(monkeypatch, kind):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    result, quantity = bot.funded_entry(record, state, "TEST", "YES", D("0.39"), closed, kind, order_budget=D("0.01"))
+    assert result["order_id"] and quantity == D("5")
+    assert fake.entries[0][1] == D("5")
+
+
+def test_cap_boundary_never_shrinks_quantity_or_resets_old_spending():
+    record = {"entry_intents": [{"quantity": "0.87", "reserved_dollars": "22.95"}]}
+    assert entry_policy.reserve(record, "YES", D("0.38"), D("0.01"), D("25"), 480, "regular")["quantity"] == "5"
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("25")
+    assert entry_policy.reserve(record, "YES", D("0.38"), D("100"), D("25"), 480, "regular") is None
+    record = {"entry_intents": [{"reserved_dollars": "22.96"}]}
+    assert entry_policy.reserve(record, "YES", D("0.38"), D("100"), D("25"), 480, "regular") is None
+    assert len(record["entry_intents"]) == 1

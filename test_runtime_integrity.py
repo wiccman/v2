@@ -151,16 +151,16 @@ def test_logs_visible_even_if_csv_write_fails(monkeypatch, tmp_path, capsys):
     assert row['event'] == 'LOOP_ERROR' and row['ticker'] == 'T'
 
 
-def test_signal_entries_have_priority_and_dual_batch_shares_one_budget(monkeypatch):
+def test_signal_entries_have_priority_and_dual_batch_shares_market_cap(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     monkeypatch.setattr(bot, 'BUDGET', D('2'))
     bot.cycle(state)
     intents = record['entry_intents']
     assert [i['kind'] for i in intents[:1]] == ['regular']
     dual = [i for i in intents if i['kind'] == 'dual']
-    assert len(dual) == 6
-    assert sum(D(i['quantity']) * D(i['price']) for i in dual) <= D('2')
-    assert sum(D(i['reserved_dollars']) for i in intents) <= D('10')
+    assert len(dual) == 3
+    assert all(D(i['quantity']) == D('5') for i in intents)
+    assert sum(D(i['reserved_dollars']) for i in intents) <= D('25')
 
 
 def test_slow_quote_is_not_backdated_to_scheduled_snapshot(monkeypatch):
