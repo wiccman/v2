@@ -8,9 +8,9 @@ from kalshi import KalshiClient
 def test_regular_entry_prices_for_both_confidences():
     for confidence in ("HIGH", "MODERATE"):
         assert not bot.entry_price_allowed(confidence, Decimal("0.32"))
-        for price in ("0.38", "0.39", "0.49", "0.55", "0.56"):
+        for price in ("0.45", "0.47", "0.49", "0.55", "0.56"):
             assert bot.entry_price_allowed(confidence, Decimal(price))
-        for price in ("0.24", "0.26", "0.30", "0.47", "0.70"):
+        for price in ("0.24", "0.26", "0.30", "0.38", "0.70"):
             assert not bot.entry_price_allowed(confidence, Decimal(price))
     assert not bot.entry_price_allowed("NONE", Decimal("0.32"))
 
@@ -52,7 +52,7 @@ def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypat
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES"] * 5
     assert [entry[2] for entry in fake.entries] == [Decimal("5")] * 5
-    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.38", "0.39", "0.49", "0.55", "0.56")]
+    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.47", "0.49", "0.55", "0.56")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.MARKET_BUDGET
     assert all(entry[4] == 1580 for entry in fake.entries)
     assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in list(bot.ENTRY_EXIT_PAIRS)[:5]]

@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.9 Boruto
+# Strike Ruler — 2.1.0 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -38,8 +38,8 @@ All routes use these default outcome-price pairs, configurable through
 
 | Entry limit | Exit target |
 | --- | --- |
-| 38¢ | 43¢ |
-| 39¢ | 46¢ |
+| 45¢ | 50¢ |
+| 47¢ | 52¢ |
 | 49¢ | 59¢ |
 | 55¢ | 62¢ |
 | 56¢ | 61¢ |
@@ -91,7 +91,7 @@ Important defaults:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ENTRY_EXIT_PAIRS_CENTS` | `38:43,39:46,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
+| `ENTRY_EXIT_PAIRS_CENTS` | `45:50,47:52,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries request 5 contracts; final settlement entry requests 10 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
@@ -115,6 +115,8 @@ before enabling trading. Preserve the adjacent take-profit receipt file too.
 
 Existing 25¢-tier inventory retains its recorded 31¢ exit target after this
 price change. Existing 32¢ inventory retains its 39¢ target; new regular entries use the six pairs listed above.
+Existing 38¢ and 39¢ inventory retains its 43¢ and 46¢ exit target respectively,
+but those two tiers are retired and cannot be reintroduced by an old Railway setting.
 The retired 32¢ regular tier is ignored even if an old environment setting lists it.
 
 Legacy strategy records remain readable only to prevent adopting inventory that

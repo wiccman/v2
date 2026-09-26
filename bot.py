@@ -19,9 +19,12 @@ ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
-ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "39:46"))
-# Add requested tiers even when Railway still has the older pair setting.
-ENTRY_EXIT_PAIRS.update(parse_pairs("55:62,49:59,38:43,56:61,61:70"))
+ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "45:50"))
+# Apply the active tiers even when Railway still has an older pair setting.
+ENTRY_EXIT_PAIRS.update(parse_pairs("45:50,47:52,49:59,55:62,56:61,61:70"))
+# Retired tiers must never be reintroduced by a stale environment variable.
+ENTRY_EXIT_PAIRS.pop(Decimal("0.38"), None)
+ENTRY_EXIT_PAIRS.pop(Decimal("0.39"), None)
 ENTRY_EXIT_PAIRS = dict(sorted(ENTRY_EXIT_PAIRS.items()))
 # Retire the old entry even when an existing environment still lists it.
 ENTRY_EXIT_PAIRS.pop(Decimal("0.32"), None)
@@ -35,7 +38,11 @@ LATE_ENTRY_START = seconds_from_minutes(os.getenv("LATE_ENTRY_START_MINUTE", "11
 LATE_ENTRY_END = seconds_from_minutes(os.getenv("LATE_ENTRY_END_MINUTE", "13"))
 if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
     raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
-ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
+# Preserve exits and reconciliation for inventory opened under retired tiers.
+LEGACY_EXIT_PAIRS = parse_pairs("38:43,39:46")
+ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
+NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
+NEW_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")
 ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inventory bucket.
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
@@ -339,7 +346,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Independent exit monitor is not healthy")
         return {}, Decimal("0")
-    if Decimal(str(price)) not in ALL_ENTRY_EXIT_PAIRS:
+    if Decimal(str(price)) not in NEW_ENTRY_EXIT_PAIRS:
         raise ValueError("Entry price must match a configured fixed entry limit")
     if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS
            for i in record.get("entry_intents", [])):
