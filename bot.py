@@ -1166,9 +1166,9 @@ def main():
             coordinator=REQUEST_COORDINATOR, role="exit")
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
-            poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
+            poll=float(os.getenv("EXIT_POLL_SECONDS", "1")), fill_cost_targets=True)
         EXIT_MONITOR.start()
-        print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ALL_ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
+        print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ALL_ENTRY_EXIT_PAIRS.items()]}; target=remaining average fill cost plus saved pair increment, rounded up to whole cents; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
         diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
             coordinator=REQUEST_COORDINATOR, role="diagnostics")
