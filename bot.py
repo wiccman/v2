@@ -18,7 +18,11 @@ ENABLED = os.getenv("TRADING_ENABLED", "false").lower() == "true"
 EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
-ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "32:39,39:46"))
+ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "39:46"))
+# Retire the old entry even when an existing environment still lists it.
+ENTRY_EXIT_PAIRS.pop(Decimal("0.32"), None)
+if not ENTRY_EXIT_PAIRS:
+    raise ValueError("Configure at least one entry pair other than retired 32 cents")
 OPENING_BIAS_ENABLED = os.getenv("OPENING_BIAS_ENABLED", "true").lower() == "true"
 OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
 OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
@@ -29,7 +33,7 @@ if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
     raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
 ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
 # Compatibility values for the retired synchronous single-tier helpers only.
-ENTRY_PRICE, EXIT_PRICE = next(iter(ENTRY_EXIT_PAIRS.items()))
+ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 360
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
@@ -287,11 +291,8 @@ def previous_market_bias(state, started):
 def entry_decision(record, side, price, kind):
     current_bias = (record.get("signal") or {}).get("prediction")
     previous_bias = record.get("previous_bias")
-    conflict = previous_bias in ("YES", "NO") and current_bias in ("YES", "NO") and previous_bias != current_bias
-    allowed = current_bias in ("YES", "NO") and side == current_bias and not conflict
-    if conflict:
-        reason = "previous_current_bias_conflict"
-    elif current_bias not in ("YES", "NO"):
+    allowed = current_bias in ("YES", "NO") and side == current_bias
+    if current_bias not in ("YES", "NO"):
         reason = "current_bias_unavailable"
     elif side != current_bias:
         reason = "selected_side_opposes_current_bias"

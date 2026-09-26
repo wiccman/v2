@@ -153,8 +153,9 @@ class TakeProfitMonitor:
             target = self.pairs.get(price)
             # Preserve the original target for inventory from the retired tier.
             # New entries use only the current pairs.
-            if target is None and price == Decimal("0.25"):
-                target = Decimal("0.31")
+            if target is None:
+                target = {Decimal("0.25"): Decimal("0.31"),
+                          Decimal("0.32"): Decimal("0.39")}.get(price)
             if order_id and target is not None:
                 saved_target = Decimal(item.get("exit_target", str(target)))
                 if saved_target != target:

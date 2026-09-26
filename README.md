@@ -1,21 +1,21 @@
-# Strike Ruler — 2.0 Boruto
+# Strike Ruler — 2.0.1 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-The signal build is **2.0 Boruto Four-Point Conflict Skip**. Four finalized
+The signal build is **2.0.1 Boruto Four-Point Current Bias**. Four finalized
 Kalshi settlements at T−60, T−45, T−30 and T−15 are compared with the official
 strike at opening T. At least three below gives YES; at least three above gives
 NO. Four agreeing votes are HIGH, three are MODERATE; other splits are SKIP.
-The immediately previous window is independently calculated from its own
-strike and four prior settlements. Opposing current/previous YES/NO biases give
-SKIP. A previous SKIP leaves the current side alone. Missing or unfinalized data
-blocks signal creation. Quotes, gaps and live spot never change the bias.
+The current YES/NO bias controls entries even when the previous bias disagrees.
+Previous-window data is optional diagnostic context and never blocks the current
+signal. Missing or unfinalized current lookbacks still block signal creation.
+Quotes, gaps and live spot never change the bias.
 
 BASE_SIGNAL logs include build, both raw biases, vote counts, exact lookback
-boundaries and source tickers, final decision and skip reason. Both windows
+boundaries and source tickers, final decision and skip reason. The current window
 must be verified before the signal is saved. Older saved market signals and
 spending records are preserved; new entries wait until a new market, while
 the independent exit monitor continues managing existing inventory.
@@ -38,7 +38,6 @@ All routes use these default outcome-price pairs, configurable through
 
 | Entry limit | Exit target |
 | --- | --- |
-| 32¢ | 39¢ |
 | 39¢ | 46¢ |
 
 During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same per-trigger budget and market allowance as every other route.
@@ -50,8 +49,8 @@ spot is sufficiently above the current strike. This early route operates before
 minute 2 by default; `ENTRY_START_MINUTE` applies to the other three routes.
 
 `ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular, historical
-and spot triggers split it across two tiers. A dual batch splits the same amount
-across **both sides and both tiers**, rather than receiving a separate allowance
+and spot triggers use the remaining 39¢ tier. A dual batch splits the same amount
+across its configured attempts, rather than receiving a separate allowance
 per side. All routes share `MARKET_BUDGET_DOLLARS`, hard-capped at $5 per market.
 The current Railway override is $2 per trigger; the source default is $0.77.
 
@@ -81,7 +80,7 @@ Important defaults:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ENTRY_EXIT_PAIRS_CENTS` | `32:39,39:46` | Entry limits and corresponding exits |
+| `ENTRY_EXIT_PAIRS_CENTS` | `39:46` | Entry limits and corresponding exits |
 | `ENTRY_BUDGET_DOLLARS` | `0.77` | Principal per trigger or entire dual batch |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
@@ -104,7 +103,8 @@ explicitly create `state.json` containing `{"markets": {}}` on the mounted volum
 before enabling trading. Preserve the adjacent take-profit receipt file too.
 
 Existing 25¢-tier inventory retains its recorded 31¢ exit target after this
-price change. New entries use 32¢→39¢ and 39¢→46¢.
+price change. Existing 32¢ inventory retains its 39¢ target; new regular entries use 39¢→46¢.
+The retired 32¢ regular tier is ignored even if an old environment setting lists it.
 
 Legacy strategy records remain readable only to prevent adopting inventory that
 belongs to an archived strategy. The old execution module and its configuration
@@ -125,3 +125,9 @@ The tests use fake exchange clients and do not place live trades.
 Review the change branch before updating Railway's deployed branch. Keep the
 existing volume and ledger, deploy one replica, and verify startup and event logs.
 With `TRADING_ENABLED=true`, deploying starts live operation immediately.
+
+## 2.0.1 entry change
+
+Removed the 32¢ regular buy tier and the previous/current bias conflict gate.
+Opening 52¢→60¢ and late entries are unchanged. This does not guarantee a fill
+or add a buy at the minute-6 snapshot after the regular minute-5 cutoff.

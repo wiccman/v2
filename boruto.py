@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-BUILD = "2.0 Boruto Four-Point Conflict Skip"
+BUILD = "2.0.1 Boruto Four-Point Current Bias"
 PERIOD = timedelta(minutes=15)
 
 
@@ -34,7 +34,7 @@ def vote(points, strike):
 
 
 def build_signal(target, history, now=None):
-    """Return a serializable, atomic current/previous signal or fail closed."""
+    """Validate current lookbacks; previous bias is optional context only."""
     try:
         opened = timestamp(target["open_time"])
         closed = timestamp(target["close_time"])
@@ -42,36 +42,47 @@ def build_signal(target, history, now=None):
         if closed - opened != PERIOD or not opened <= now < closed:
             raise ValueError("target must be an open 15-minute window")
         strike = price(target["floor_strike"])
-        # Five past settlements supply both windows' four lookbacks.
+        # Four current lookbacks are required; two other records are optional.
         expected = {opened - i * PERIOD for i in range(6)}
+        required = {opened - i * PERIOD for i in (1, 2, 3, 4)}
         records = {}
+        invalid_optional = set()
         for market in history:
             boundary = timestamp(market["close_time"])
             if boundary not in expected or market.get("status") != "finalized":
                 continue
-            if timestamp(market["open_time"]) != boundary - PERIOD:
-                raise ValueError("lookback is not a consecutive 15-minute window")
-            item = {"ticker": market["ticker"], "boundary": boundary.isoformat(),
-                    "settlement": str(price(market["expiration_value"])),
-                    "strike": str(price(market["floor_strike"]))}
-            if boundary in records and records[boundary] != item:
-                raise ValueError("conflicting finalized lookback records")
-            records[boundary] = item
-        if expected - records.keys():
+            try:
+                if timestamp(market["open_time"]) != boundary - PERIOD:
+                    raise ValueError("lookback is not a consecutive 15-minute window")
+                item = {"ticker": market["ticker"], "boundary": boundary.isoformat(),
+                        "settlement": str(price(market["expiration_value"])),
+                        "strike": str(price(market["floor_strike"]))}
+                if boundary in records and records[boundary] != item:
+                    raise ValueError("conflicting finalized lookback records")
+                records[boundary] = item
+            except (KeyError, TypeError, ValueError, InvalidOperation):
+                if boundary in required:
+                    raise
+                invalid_optional.add(boundary)
+        for boundary in invalid_optional:
+            records.pop(boundary, None)
+        if required - records.keys():
             raise ValueError("required exact lookback periods are not finalized")
         current_points = [records[opened - i * PERIOD] for i in (4, 3, 2, 1)]
-        previous_points = [records[opened - i * PERIOD] for i in (5, 4, 3, 2)]
-        previous_strike = records[opened]["strike"]
         current = vote([p["settlement"] for p in current_points], strike)
-        previous = vote([p["settlement"] for p in previous_points], previous_strike)
-        conflict = (current["bias"] in ("YES", "NO") and previous["bias"] in ("YES", "NO")
-                    and current["bias"] != previous["bias"])
-        prediction = "SKIP" if conflict else current["bias"]
-        reason = "previous_current_bias_conflict" if conflict else (
-            "no_four_point_majority" if prediction == "SKIP" else "four_point_agreement")
+        previous_points, previous_strike, previous = [], None, None
+        if opened in records and opened - 5 * PERIOD in records:
+            previous_points = [records[opened - i * PERIOD] for i in (5, 4, 3, 2)]
+            previous_strike = records[opened]["strike"]
+            previous = vote([p["settlement"] for p in previous_points], previous_strike)
+        previous_bias = previous["bias"] if previous else None
+        conflict = (current["bias"] in ("YES", "NO") and previous_bias in ("YES", "NO")
+                    and current["bias"] != previous_bias)
+        prediction = current["bias"]
+        reason = "no_four_point_majority" if prediction == "SKIP" else "four_point_agreement"
         values = [price(p["settlement"]) for p in current_points] + [strike]
         return {"build": BUILD, "prediction": prediction, "base_confidence": current["agreement"],
-                "current_bias": current["bias"], "previous_bias": previous["bias"],
+                "current_bias": current["bias"], "previous_bias": previous_bias,
                 "current": current, "previous": previous, "conflict": conflict, "reason": reason,
                 "strike": str(strike), "previous_strike": previous_strike,
                 "lookbacks": current_points, "previous_lookbacks": previous_points,

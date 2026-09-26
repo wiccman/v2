@@ -43,11 +43,11 @@ def test_exact_current_and_previous_boundaries_exclude_t():
     assert signal['build']==BUILD and signal['previous_strike']=='100'
 
 
-def test_opposing_raw_biases_skip_even_with_high_agreement():
+def test_opposing_raw_biases_allow_current_prediction():
     target, history = fixture(strike=101, previous_strike=90)
     signal=build_signal(target,history,T)
     assert signal['current_bias']=='YES' and signal['previous_bias']=='NO'
-    assert signal['prediction']=='SKIP' and signal['reason']=='previous_current_bias_conflict'
+    assert signal['prediction']=='YES' and signal['conflict'] is True
 
 
 def test_previous_skip_leaves_current_side_alone():
@@ -63,7 +63,7 @@ def test_current_split_stays_skip_despite_previous_direction():
     assert signal['reason']=='no_four_point_majority'
 
 
-@pytest.mark.parametrize('offset',range(6))
+@pytest.mark.parametrize('offset',range(1,5))
 def test_missing_period_cannot_be_replaced_by_an_older_one(offset):
     target,history=fixture()
     history=[x for x in history if x['ticker']!=f'PAST-{offset}']
@@ -73,15 +73,15 @@ def test_missing_period_cannot_be_replaced_by_an_older_one(offset):
 
 @pytest.mark.parametrize('value',['NaN','Infinity','0','-1',None])
 def test_invalid_finalized_price_blocks_signal(value):
-    target,history=fixture();history[0]['expiration_value']=value
+    target,history=fixture();history[1]['expiration_value']=value
     with pytest.raises(RuntimeError,match='DATA UNAVAILABLE'):
         build_signal(target,history,T)
 
 
 def test_unfinalized_and_conflicting_periods_block_signal():
-    target,history=fixture();history[0]['status']='closed'
+    target,history=fixture();history[1]['status']='closed'
     with pytest.raises(RuntimeError,match='DATA UNAVAILABLE'):build_signal(target,history,T)
-    history[0]['status']='finalized';history.append(dict(history[0],expiration_value=1))
+    history[1]['status']='finalized';history.append(dict(history[1],expiration_value=1))
     with pytest.raises(RuntimeError,match='conflicting'):build_signal(target,history,T)
 
 
@@ -113,3 +113,11 @@ def test_failed_signal_fetch_leaves_no_partial_lock(monkeypatch):
     monkeypatch.setattr(bot,'build_signal',lambda *args: (_ for _ in ()).throw(RuntimeError('DATA UNAVAILABLE')))
     with pytest.raises(RuntimeError,match='DATA UNAVAILABLE'):bot.cycle(state)
     assert record['signal'] is None and not fake.entries
+
+
+@pytest.mark.parametrize('offset',[0,5])
+def test_missing_previous_only_data_does_not_block_current(offset):
+    target,history=fixture()
+    history=[x for x in history if x['ticker']!=f'PAST-{offset}']
+    signal=build_signal(target,history,T)
+    assert signal['prediction']=='YES' and signal['previous_bias'] is None
