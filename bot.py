@@ -263,7 +263,7 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
 def cancel_confirmed(order_id, ticker):
     terminal = {"canceled", "executed", "expired"}
     try:
-        status = client.order(order_id).get("status")
+        status = client.order(order_id, ticker).get("status")
         if status in terminal:
             write_log("ENTRY_ALREADY_TERMINAL", ticker, details=json.dumps({"order_id": order_id, "status": status}))
             return True
@@ -279,7 +279,7 @@ def cancel_confirmed(order_id, ticker):
         cancel_error = error
     # A 404, timeout, or incomplete response is not proof of cancellation.
     try:
-        status = client.order(order_id).get("status")
+        status = client.order(order_id, ticker).get("status")
         if status in terminal:
             write_log("ENTRY_ALREADY_TERMINAL", ticker, details=json.dumps({"order_id": order_id, "status": status}))
             return True

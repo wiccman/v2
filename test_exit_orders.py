@@ -28,7 +28,7 @@ class DualLimitClient:
     def market_cash(self, ticker):
         return {"exchange_index": 2, "cash_dollars": "100"}
 
-    def order(self, order_id):
+    def order(self, order_id, ticker=None):
         return {"order_id": order_id, "status": "resting"}
 
     def place_entry(self, ticker, side, quantity, price, expiration_time, **kwargs):

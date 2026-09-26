@@ -96,10 +96,10 @@ class TakeProfitMonitor:
         ids = {record.get("take_profit_order_id"), record.get("historical_take_profit_order_id")}
         ids.update(o.get("order_id") for o in record.get("historical_take_profit_orders", []))
         for order_id in sorted(ids - {None, ""} - set(ledger.get("legacy_cleared", []))):
-            order = self.client.order(order_id)
+            order = self.client.order(order_id, ticker)
             if order.get("status") not in TERMINAL:
                 self.client.cancel(order_id, ticker)
-                order = self.client.order(order_id)
+                order = self.client.order(order_id, ticker)
             if order.get("status") not in TERMINAL:
                 raise RuntimeError(f"Legacy exit cancellation unconfirmed: {order_id}")
             ledger.setdefault("legacy_cleared", []).append(order_id)
@@ -111,7 +111,7 @@ class TakeProfitMonitor:
         if not intent:
             return
         if intent.get("order_id"):
-            order = self.client.order(intent["order_id"])
+            order = self.client.order(intent["order_id"], ticker)
         else:
             order = next((o for o in self.client.all_orders(ticker)
                           if o.get("client_order_id") == intent["client_id"]), None)

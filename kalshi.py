@@ -101,13 +101,30 @@ class KalshiClient:
     def orderbook(self, ticker):
         return self.request("GET", "/markets/" + ticker + "/orderbook", auth=True)["orderbook_fp"]
 
-    def order(self, order_id):
-        return self.request("GET", "/portfolio/orders/" + order_id, auth=True)["order"]
+    def order(self, order_id, ticker=None):
+        """Resolve an order with market context; a 404 is never terminal proof."""
+        params = {"market_ticker": ticker, "exchange_index": -1} if ticker else None
+        try:
+            order = self.request("GET", "/portfolio/orders/" + order_id,
+                                 params=params, auth=True)["order"]
+        except KalshiAPIError as error:
+            if error.status_code != 404 or not ticker:
+                raise
+            # Read models may lag an IOC response. Search the paginated,
+            # ticker-filtered order history before retrying on the next cycle.
+            matches = [o for o in self.all_orders(ticker)
+                       if o.get("order_id") == order_id and o.get("ticker") == ticker]
+            if len(matches) != 1:
+                raise error
+            order = matches[0]
+        if order.get("order_id") != order_id or (ticker and order.get("ticker") != ticker):
+            raise RuntimeError("Order lookup identity mismatch")
+        return order
 
     def all_orders(self, ticker, status=None):
         params = {"limit": 100}
         if ticker:
-            params["ticker"] = ticker
+            params.update(ticker=ticker, market_ticker=ticker, exchange_index=-1)
         if status is not None:
             params["status"] = status
         found, cursors = [], set()
