@@ -22,18 +22,39 @@ def fixture(values=(95, 96, 97, 98, 99), strike=101, previous_strike=100):
 
 
 @pytest.mark.parametrize('points,strike,side,agreement', [
-    ([97,98,99,101],100,'YES','MODERATE'),
-    ([101,102,103,104],100,'NO','HIGH'),
-    ([97,98,101,102],100,'NO','LOW'),
+    ([97,98,99,101],100,'YES','HIGH'),
+    ([101,102,103,104],100,'NO','MODERATE'),
+    ([97,98,101,102],100,'YES','HIGH'),
     ([97,98,99,100],100,'YES','MODERATE'),
     ([101,102,103,100],100,'NO','MODERATE'),
-    ([97,98,100,100],100,'YES','LOW'),
-    ([101,102,97,98],100,'YES','LOW'),
+    ([97,98,100,100],100,'YES','MODERATE'),
+    ([101,102,97,98],100,'NO','HIGH'),
     ([100,100,100,100],100,'YES','LOW'),
+    ([99,101,100,100],100,'NO','LOW'),
+    ([99,100,100,99],100,'NO','LOW'),
 ])
-def test_four_point_votes(points,strike,side,agreement):
+def test_selected_model_votes_without_skips(points,strike,side,agreement):
     result=vote(points,strike)
     assert result['bias']==side and result['agreement']==agreement
+
+
+def test_l2_does_not_change_direction():
+    for l2 in (1,100,1000):
+        result = vote([99,99,l2,101],100)
+        assert result['bias'] == 'YES'
+        assert result['votes'] == {'L1_reversed': 1, 'L3': 1, 'L4': 1}
+
+
+def test_all_price_relationship_combinations_produce_direction():
+    from itertools import product
+    for points in product((99,100,101), repeat=4):
+        assert vote(points,100)['bias'] in ('YES','NO')
+
+
+def test_small_distance_and_no_direction_are_not_filtered():
+    target, history = fixture(values=(101,102,103,104,101), strike=100)
+    signal = build_signal(target,history,T)
+    assert signal['prediction'] == 'NO'
 
 
 def test_exact_current_and_previous_boundaries_exclude_t():
@@ -55,14 +76,14 @@ def test_opposing_raw_biases_allow_current_prediction():
 def test_previous_tie_leaves_current_side_alone():
     target,history=fixture(values=(95,96,104,105,106),strike=110,previous_strike=100)
     signal=build_signal(target,history,T)
-    assert signal['previous_bias']=='NO' and signal['prediction']=='YES'
+    assert signal['previous_bias']=='YES' and signal['prediction']=='YES'
 
 
-def test_current_split_uses_latest_point_despite_previous_direction():
+def test_current_split_uses_selected_model_majority():
     target,history=fixture(values=(94,95,96,104,105),strike=100,previous_strike=110)
     signal=build_signal(target,history,T)
-    assert signal['previous_bias']=='YES' and signal['prediction']=='NO'
-    assert signal['reason']=='latest_non_equal_lookback'
+    assert signal['previous_bias']=='YES' and signal['prediction']=='YES'
+    assert signal['reason']=='l1_reverse_l3_l4_majority'
 
 
 @pytest.mark.parametrize('offset',range(1,5))
