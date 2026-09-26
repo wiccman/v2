@@ -224,3 +224,11 @@ exit targets. If opposite-side inventory or unresolved opposing entry orders
 remain, wait for them to clear so the new purchase does not merely net them out.
 The strategy checks on the regular polling cadence and needs available prediction
 account funds; the budget reservation does not transfer cash between accounts.
+
+During the final two minutes, `SETTLEMENT_97_CHECK` records both observed asks,
+time remaining, reserved allowance and why the route waits or proceeds. An ask
+of 96¢, 98¢ or 99¢ does not meet the existing exact-97¢ rule. The bot checks on
+its polling cadence, so a brief 97¢ quote can be missed between polls. An
+acknowledged order ID is required for `SETTLEMENT_97_ENTRY`; it does not prove
+that the IOC filled. Funding waits, conflicting inventory and prior attempts
+remain subject to the existing protections and one-attempt policy.

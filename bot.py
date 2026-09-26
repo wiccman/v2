@@ -724,28 +724,52 @@ def settlement_entry(record, state, ticker, closed):
     now = time.time()
     if not closed.timestamp() - 120 <= now < closed.timestamp():
         return
+    observed = {
+        "seconds_remaining": round(closed.timestamp() - now, 3),
+        "required_ask": str(SETTLEMENT_PRICE), "budget_dollars": str(SETTLEMENT_BUDGET),
+        "market_reserved_dollars": str(sum((Decimal(i["reserved_dollars"])
+            for i in record.get("entry_intents", [])), Decimal("0"))),
+        "entry_budget_legacy": bool(record.get("entry_budget_legacy")),
+    }
+    def report(reason, **details):
+        write_log("SETTLEMENT_97_CHECK", ticker,
+                  details=json.dumps({**observed, "reason": reason, **details}))
+
     if any(i.get("kind") == SETTLEMENT_KIND for i in record.get("entry_intents", [])):
+        report("attempt_already_recorded")
         return  # Persisted intent prevents repeats after partial fills or lost ACKs.
     market = client.market(ticker)
-    sides = [side for side in ("YES", "NO") if quotes(market, side)[0] == SETTLEMENT_PRICE]
+    asks = {side: quotes(market, side)[0] for side in ("YES", "NO")}
+    observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]))
+    if time.time() >= closed.timestamp():
+        report("window_closed_during_quote_read")
+        return
+    sides = [side for side, ask in asks.items() if ask == SETTLEMENT_PRICE]
     if len(sides) != 1:
+        report("waiting_for_exact_97_ask")
         return
     side = sides[0]
     held = position(ticker)
     if (side == "YES" and held < 0) or (side == "NO" and held > 0):
+        report("opposite_inventory", side=side, held=str(held))
         write_log("SETTLEMENT_WAIT_OPPOSITE_INVENTORY", ticker, prediction=side,
                   details="Wait for opposite inventory to exit; avoid netting away the settlement purchase")
         return
     # Reconciliation must cancel earlier entry orders before switching sides.
     pending = [i for i in record.get("entry_intents", []) if not i.get("entry_closed")]
     if any(i.get("side") != side for i in pending):
+        report("unresolved_opposite_entry", side=side)
         return
+    report("eligible_for_funding_check", side=side)
     result, quantity = funded_entry(record, state, ticker, side, SETTLEMENT_PRICE, closed,
         SETTLEMENT_KIND, submit_before=closed.timestamp(), cancel_at=closed.timestamp())
-    if quantity:
+    if result.get("order_id"):
         write_log("SETTLEMENT_97_ENTRY", ticker, prediction=side, price="0.97", quantity=str(quantity),
                   details=json.dumps({"budget": str(SETTLEMENT_BUDGET), "hold_to_settlement": True,
                                       "order": result}))
+    else:
+        report("not_submitted_or_unacknowledged", side=side,
+               cash_retry_at=record.get("cash_retry_at"), quantity=str(quantity))
 
 
 def cycle(state):
