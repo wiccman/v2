@@ -12,7 +12,7 @@ def amount(value):
     return result
 
 
-def balance_report(payload):
+def balance_report(payload, exchange_index=None):
     dollars = payload.get('balance_dollars')
     cents = payload.get('balance')
     if dollars is None and cents is None:
@@ -35,6 +35,18 @@ def balance_report(payload):
             {'exchange_index': int(row['exchange_index']),
              'cash_dollars': format(amount(row['balance']), 'f')}
             for row in payload['balance_breakdown']]
+    if exchange_index is not None:
+        report['exchange_index'] = exchange_index
+        report['account_scope'] = f'primary account; exchange shard {exchange_index}'
+        # Never substitute the aggregate or another shard for a missing row.
+        if 'exchange_balances' in report:
+            matches = [r for r in report['exchange_balances'] if r['exchange_index'] == exchange_index]
+            if len(matches) != 1:
+                raise ValueError('Requested exchange balance missing or ambiguous')
+            report['cash_dollars'] = matches[0]['cash_dollars']
+            report['cash_source'] = 'exchange_balance_breakdown'
+            if cents is not None:
+                report['balance_fields_agree_to_cent'] = abs(amount(report['cash_dollars']) - amount(cents) / 100) < Decimal('0.01')
     return report
 
 

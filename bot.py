@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from balance_diagnostics import log_api_cash, BalanceMonitor
@@ -252,19 +252,33 @@ def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decima
     return True
 
 def cancel_confirmed(order_id, ticker):
+    terminal = {"canceled", "executed", "expired"}
+    try:
+        status = client.order(order_id).get("status")
+        if status in terminal:
+            write_log("ENTRY_ALREADY_TERMINAL", ticker, details=json.dumps({"order_id": order_id, "status": status}))
+            return True
+    except Exception:
+        pass  # A failed read must not prevent a routed cancellation attempt.
+    cancel_error = None
     try:
         result = client.cancel(order_id, ticker)
         if result.get("order_id") == order_id and "reduced_by" in result:
             write_log("CANCEL_ENTRY_CONFIRMED", ticker, details=order_id)
             return True
     except Exception as error:
-        write_log("ENTRY_CANCEL_RETRY", ticker, details=f"{order_id}: {error!r}")
+        cancel_error = error
     # A 404, timeout, or incomplete response is not proof of cancellation.
     try:
-        return client.order(order_id).get("status") in {"canceled", "executed", "expired"}
+        status = client.order(order_id).get("status")
+        if status in terminal:
+            write_log("ENTRY_ALREADY_TERMINAL", ticker, details=json.dumps({"order_id": order_id, "status": status}))
+            return True
     except Exception as error:
         write_log("ENTRY_STATUS_RETRY", ticker, details=f"{order_id}: {error!r}")
-        return False
+    if cancel_error is not None:
+        write_log("ENTRY_CANCEL_RETRY", ticker, details=f"{order_id}: {cancel_error!r}")
+    return False
 
 
 def cancel_entries(record, ticker):
@@ -338,6 +352,28 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         cutoff = min(cutoff, closed.timestamp())
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
+    if time.time() < record.get("cash_retry_at", 0):
+        return {}, Decimal("0")
+    try:
+        funding = client.market_cash(ticker)
+        available = Decimal(funding["cash_dollars"])
+        required = entry_quantity(price, kind) * (Decimal(price) + FEE_RESERVE)
+        if not available.is_finite():
+            raise ValueError("Invalid market cash")
+    except Exception as error:
+        record["cash_retry_at"] = time.time() + 30
+        save_state(state)
+        write_log("ENTRY_CASH_UNAVAILABLE", ticker, details=json.dumps({"error_type": type(error).__name__}))
+        return {}, Decimal("0")
+    if available < required:
+        record["cash_retry_at"] = time.time() + 30
+        save_state(state)
+        write_log("ENTRY_WAIT_MARKET_CASH", ticker, price=str(price), details=json.dumps({
+            "exchange_index": funding["exchange_index"], "cash_dollars": str(available),
+            "required_dollars": str(required), "retry_seconds": 30,
+            "reason": "Fund this market's exchange shard; aggregate cash is not spendable here",
+        }))
+        return {}, Decimal("0")
     cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
                            MARKET_BUDGET, cancel_at, kind)
@@ -355,6 +391,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     except KalshiAPIError as error:
         if error.status_code == 400 and error.code == "insufficient_balance":
             release_unsubmitted(intent, "insufficient_balance")
+            record["cash_retry_at"] = time.time() + 30
             save_state(state)
             write_log("ENTRY_RESERVATION_RELEASED", ticker, price=str(price), details=json.dumps({
                 "reason": intent["release_reason"], "released_dollars": intent["released_dollars"],
@@ -860,6 +897,7 @@ def main():
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$10 reserved; quantity=10; hold to settlement; earlier allowance=$15", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
+    print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
                "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")

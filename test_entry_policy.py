@@ -214,9 +214,11 @@ def test_balance_rejection_releases_only_failed_intent_and_survives_restart(monk
     def rejected(*args, **kwargs):
         raise KalshiAPIError(400, 'insufficient balance', code='insufficient_balance')
     monkeypatch.setattr(fake, 'place_entry', rejected)
-    for _ in range(10):
+    for _ in range(3):
         with pytest.raises(KalshiAPIError):
             bot.funded_entry(record, state, 'TEST', 'YES', D('0.55'), closed, 'regular')
+        assert bot.funded_entry(record, state, 'TEST', 'YES', D('0.55'), closed, 'regular') == ({}, 0)
+        clock[0] += 30
     restored = json.loads(json.dumps(state))
     record = restored['markets']['TEST']
     assert record['entry_intents'][0]['reserved_dollars'] == original_reserved

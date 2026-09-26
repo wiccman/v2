@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from balance_diagnostics import balance_report
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -125,8 +126,16 @@ class KalshiClient:
         response = self.request("GET", "/cfbenchmarks/values", params={"id": "BRTI"}, auth=True)
         return _latest_index_value(response)
 
-    def balance(self):
-        return self.request("GET", "/portfolio/balance", auth=True)
+    def balance(self, exchange_index=None):
+        params = {} if exchange_index is None else {"exchange_index": exchange_index}
+        return self.request("GET", "/portfolio/balance", params=params, auth=True)
+
+    def market_cash(self, ticker):
+        """Read cash on the market's actual shard, never the aggregate wallet."""
+        index = self.market(ticker).get("exchange_index")
+        if type(index) is not int or index < 0:
+            raise ValueError("Market exchange_index missing or invalid")
+        return balance_report(self.balance(exchange_index=index), exchange_index=index)
 
     def subaccount_balances(self):
         return self.request("GET", "/portfolio/subaccounts/balances", auth=True)
@@ -209,4 +218,3 @@ class KalshiClient:
     def cancel(self, order_id, ticker):
         return self.request("DELETE", "/portfolio/events/orders/" + order_id,
                             params={"market_ticker": ticker, "exchange_index": -1}, auth=True)
-

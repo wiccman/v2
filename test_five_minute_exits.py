@@ -23,6 +23,12 @@ class CycleClient(KalshiClient):
                 "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.39",
                 "no_ask_dollars": "0.66", "no_bid_dollars": "0.65"}
 
+    def market_cash(self, ticker):
+        return {"exchange_index": 2, "cash_dollars": "100"}
+
+    def order(self, order_id):
+        return {"order_id": order_id, "status": "resting"}
+
     def _order(self, ticker, side, quantity, price, **kwargs):
         collection = self.exits if kwargs.get("reduce_only") else self.entries
         collection.append((side, quantity, price, kwargs))
@@ -151,4 +157,3 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
     assert fake.exits == []  # Retired backoff cannot trigger overlapping exits.
-
