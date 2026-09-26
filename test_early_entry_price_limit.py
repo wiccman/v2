@@ -28,11 +28,14 @@ def test_every_route_blocks_70_or_higher_before_eight_minutes(monkeypatch, side,
 @pytest.mark.parametrize('elapsed,expected', [(0, 0), (180, 0), (479.999, 0), (480, 1), (481, 1), (720, 0)])
 def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed, expected):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    fake.held = D('0')
+    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
     monkeypatch.setattr(bot, 'END', 720)
     monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     record['signal']['prediction'] = side
     market = dict(fake.market('TEST'))
     market[side.lower() + '_ask_dollars'] = '.70'
+    market[('no' if side == 'YES' else 'yes') + '_ask_dollars'] = '.30'
     monkeypatch.setattr(fake, 'market', lambda ticker: market)
     bot.funded_entry(record, state, 'TEST', side, D('.70'), closed, 'regular')
     assert len(fake.entries) == len(record['entry_intents']) == expected
@@ -40,7 +43,7 @@ def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed,
         wire, quantity, price, kwargs = fake.entries[0]
         assert quantity == 5 and kwargs['ioc'] is True
         assert price == (D('.70') if side == 'YES' else D('.30'))
-        assert D(record['entry_intents'][0]['exit_target']) == D('.80')
+        assert D(record['entry_intents'][0]['exit_target']) == D('.76')
         assert D(record['entry_intents'][0]['reserved_dollars']) == D('3.65')
 
 
@@ -48,6 +51,8 @@ def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed,
 @pytest.mark.parametrize('price,kind', [('.52', 'opening_bias'), ('.67', 'regular')])
 def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    fake.held = D('0')
+    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
     record['signal']['prediction'] = side
     market = dict(fake.market('TEST'))
     market[side.lower() + '_ask_dollars'] = price
@@ -79,6 +84,9 @@ def test_under_70_cent_entries_end_at_six_minutes(monkeypatch, elapsed, expected
 @pytest.mark.parametrize('price', ['.70', '.73', '.85'])
 def test_high_price_gateway_respects_eight_minute_boundary(monkeypatch, elapsed, expected, price):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    fake.held = D('0')
+    market = {**fake.market('TEST'), 'yes_ask_dollars': price, 'no_ask_dollars': '.20'}
+    monkeypatch.setattr(fake, 'market', lambda ticker: market)
     monkeypatch.setattr(bot, 'END', 720)
     monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     bot.funded_entry(record, state, 'TEST', 'YES', D(price), closed, 'late_bias',

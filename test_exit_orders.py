@@ -22,8 +22,14 @@ class DualLimitClient:
         self.cancelled = []
 
     def market(self, ticker):
-        return {"yes_ask_dollars": ".45", "yes_bid_dollars": ".44",
+        return {"floor_strike": "100000", "yes_ask_dollars": ".45", "yes_bid_dollars": ".44",
                 "no_ask_dollars": ".45", "no_bid_dollars": ".44"}
+
+    def btc_reference_price(self):
+        return Decimal("100010")
+
+    def positions(self, ticker):
+        return []
 
     def market_cash(self, ticker):
         return {"exchange_index": 2, "cash_dollars": "100"}
@@ -91,6 +97,7 @@ def test_historical_strike_reaction_uses_approach_side():
 def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(monkeypatch):
     monkeypatch.setattr(bot.time, "time", lambda: 1000)
     fake = DualLimitClient()
+    monkeypatch.setattr(fake, "btc_reference_price", lambda: Decimal("99980"))
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
     monkeypatch.setattr(bot, "save_state", lambda state: None)

@@ -113,29 +113,28 @@ def test_closed_window_cannot_get_a_fresh_lock():
     with pytest.raises(RuntimeError,match='open 15-minute'):build_signal(target,history,T+timedelta(minutes=15))
 
 
-def test_legacy_saved_signal_blocks_new_entries_without_rewriting_it(monkeypatch):
+def test_legacy_saved_signal_does_not_veto_live_strike_entries(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
     record['signal'].pop('build')
     before=dict(record['signal'])
     bot.cycle(state)
-    assert not fake.entries and record['signal']==before
-    assert record['boruto_upgrade_wait_logged']
+    assert fake.entries and record['signal']==before
 
 
-def test_skip_blocks_all_entry_routes(monkeypatch):
+def test_saved_skip_does_not_veto_live_strike_entries(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
     record['signal'].update(prediction='SKIP',reason='previous_current_bias_conflict')
     bot.cycle(state)
-    assert not fake.entries
+    assert fake.entries and all(i['side'] == 'YES' for i in record['entry_intents'])
 
 
-def test_failed_signal_fetch_leaves_no_partial_lock(monkeypatch):
+def test_missing_old_lookbacks_do_not_block_live_strike_entries(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
     record['signal']=None
     monkeypatch.setattr(fake,'markets',lambda **kw: [],raising=False)
     monkeypatch.setattr(bot,'build_signal',lambda *args: (_ for _ in ()).throw(RuntimeError('DATA UNAVAILABLE')))
-    with pytest.raises(RuntimeError,match='DATA UNAVAILABLE'):bot.cycle(state)
-    assert record['signal'] is None and not fake.entries
+    bot.cycle(state)
+    assert record['signal'] is None and fake.entries
 
 
 @pytest.mark.parametrize('offset',[0,5])

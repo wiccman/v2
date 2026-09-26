@@ -173,7 +173,7 @@ def test_slow_quote_is_not_backdated_to_scheduled_snapshot(monkeypatch):
     monkeypatch.setattr(fake, 'market', slow_market)
     bot.cycle(state)
     assert record['predictions'][0]['status'] == 'missed'
-    assert not any(i['kind'] == 'regular' for i in record['entry_intents'])
+    assert all(i['side'] == 'YES' for i in record['entry_intents'])
 
 
 def test_archived_strategy_ownership_is_preserved(monkeypatch):
@@ -214,7 +214,7 @@ def test_opening_bias_posts_one_side_at_52_and_cancels_at_two_minutes(monkeypatc
     assert intent["entry_closed"] is True
 
 
-def test_new_prediction_does_not_fetch_previous_bias(monkeypatch):
+def test_new_entry_does_not_fetch_previous_bias(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     record['signal'] = None
     from test_boruto import fixture, T
@@ -227,6 +227,6 @@ def test_new_prediction_does_not_fetch_previous_bias(monkeypatch):
         raise AssertionError('Previous bias must not be required')
     monkeypatch.setattr(bot, 'previous_market_bias', unavailable)
     bot.cycle(state)
-    assert record['signal']['prediction'] == 'YES'
+    assert record['signal'] is None
     assert fake.entries
     assert all(D(i['price']) in bot.ENTRY_EXIT_PAIRS for i in record['entry_intents'])

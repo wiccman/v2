@@ -13,6 +13,8 @@ from test_price_pairs import PairExchange
 @pytest.mark.parametrize('elapsed,expected', [(0, 0), (179.999, 0), (180, 1), (359.999, 1), (360, 0), (480, 0)])
 def test_35_cent_tier_only_runs_from_three_to_six_minutes(monkeypatch, side, elapsed, expected):
     e, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    e.held = D('0')
+    monkeypatch.setattr(e, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
     record['signal']['prediction'] = side
     market = e.market('TEST')
     market[side.lower() + '_ask_dollars'] = '.35'

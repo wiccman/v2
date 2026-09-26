@@ -21,6 +21,10 @@ def setup_current_window(monkeypatch, elapsed):
 @pytest.mark.parametrize('elapsed', [0, 180, 300, 359, 360, 420, 479, 480, 481, 600, 719, 720])
 def test_regular_entries_obey_price_based_windows(monkeypatch, elapsed):
     fake, record, state, clock, closed = setup_current_window(monkeypatch, elapsed)
+    fake.held = D('0')
+    if 480 <= elapsed < 720:
+        market = {**fake.market('TEST'), 'yes_ask_dollars': '.70', 'no_ask_dollars': '.30'}
+        monkeypatch.setattr(fake, 'market', lambda ticker: market)
     bot.cycle(state)
     assert bool(fake.entries) == (elapsed < 360 or 480 <= elapsed < 720)
     assert all(item[3]['expiration_time'] == 1000000000 + (360 if item[2] < D('.70') else 720)
@@ -34,7 +38,7 @@ def test_cancel_lower_price_orders_at_six_minutes(monkeypatch, elapsed):
     fake, record, state, clock, closed = setup_current_window(monkeypatch, elapsed)
     record.update(orders=['resting'], dual_limit_attempted=True)
     record['entry_intents'] = [dict(order_id='resting', client_id='resting', side='YES',
-        price='.53', quantity='5', reserved_dollars='2.80', entry_execution_version=3,
+        price='.53', quantity='5', reserved_dollars='2.80', entry_execution_version=4,
         kind='regular', entry_closed=False, cancel_at=1000000360)]
     monkeypatch.setattr(bot, 'MAX_BUYS', 0)
     monkeypatch.setattr(bot, 'HISTORICAL_STRIKE_ENABLED', False)

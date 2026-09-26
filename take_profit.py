@@ -191,7 +191,11 @@ class TakeProfitMonitor:
                           Decimal("0.32"): Decimal("0.39")}.get(price)
             if order_id and target is not None:
                 saved_target = Decimal(item.get("exit_target", str(target)))
-                if saved_target != target:
+                previous_target = {Decimal("0.70"): Decimal("0.80"),
+                                   Decimal("0.73"): Decimal("0.81"),
+                                   Decimal("0.85"): Decimal("0.92")}.get(price)
+                if saved_target != target and not (previous_target == saved_target and
+                    item.get("entry_execution_version", 3) < 4):
                     raise ValueError("Saved entry target conflicts with configured pair")
                 entries[order_id] = {"side": item["side"], "target": str(saved_target)}
         fills = self.client.all_fills(ticker)
