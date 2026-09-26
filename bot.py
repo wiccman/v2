@@ -46,6 +46,8 @@ NEW_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")
 ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inventory bucket.
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
+MIN_ENTRY_PRICE = Decimal("0.45")
+ENTRY_EXECUTION_VERSION = 3
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 480
 # Compatibility argument only: reserve_entry enforces ENTRY_QUANTITY.
@@ -331,6 +333,9 @@ def entry_decision(record, side, price, kind):
         reason = "selected_side_opposes_current_bias"
     else:
         reason = kind
+    if Decimal(str(price)) < MIN_ENTRY_PRICE:
+        allowed = False
+        reason = "entry_limit_below_45c"
     if allowed and locked_side and side != locked_side:
         allowed = False
         reason = "selected_side_opposes_market_lock"
@@ -355,7 +360,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         return {}, Decimal("0")
     if Decimal(str(price)) not in NEW_ENTRY_EXIT_PAIRS:
         raise ValueError("Entry price must match a configured fixed entry limit")
-    if any(not i.get("entry_closed") and Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS
+    if any(not i.get("entry_closed") and (i.get("entry_execution_version") != ENTRY_EXECUTION_VERSION
+               or Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS)
            for i in record.get("entry_intents", [])):
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
@@ -388,11 +394,27 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             "reason": "Fund this market's exchange shard; aggregate cash is not spendable here",
         }))
         return {}, Decimal("0")
+    # Read the selected outcome immediately before reserving/submitting. Fail
+    # closed on unavailable quotes; never leave a buy resting through a drop.
+    try:
+        ask, _ = quotes(client.market(ticker), side)
+        if not ask.is_finite() or not MIN_ENTRY_PRICE <= ask < Decimal("1"):
+            write_log("ENTRY_PRICE_FLOOR_WAIT", ticker, prediction=side,
+                      details=json.dumps({"ask": str(ask), "minimum": str(MIN_ENTRY_PRICE)}))
+            return {}, Decimal("0")
+        if ask > Decimal(str(price)) or (kind == SETTLEMENT_KIND and ask != SETTLEMENT_PRICE):
+            return {}, Decimal("0")
+    except Exception as error:
+        write_log("ENTRY_QUOTE_UNAVAILABLE", ticker, details=repr(error))
+        return {}, Decimal("0")
+    if time.time() >= cutoff:
+        return {}, Decimal("0")
     cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
                            MARKET_BUDGET, cancel_at, kind)
     if intent is None:
         return {}, Decimal("0")
+    intent["entry_execution_version"] = ENTRY_EXECUTION_VERSION
     intent["exit_target"] = str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
     if kind == SETTLEMENT_KIND:
         intent["hold_to_settlement"] = True
@@ -401,7 +423,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     try:
         result = client.place_entry(ticker, side, quantity, price, intent["cancel_at"],
                                     submit_before=cutoff, client_order_id=intent["client_id"],
-                                    **({"ioc": True} if kind == SETTLEMENT_KIND else {}))
+                                    ioc=True)
     except KalshiAPIError as error:
         if error.status_code == 400 and error.code == "insufficient_balance":
             release_unsubmitted(intent, "insufficient_balance")
@@ -487,7 +509,8 @@ def reconcile_entries(state, now_timestamp=None):
                 # On a price-policy upgrade, cancel tracked incompatible buys
                 # immediately; keep their spending reservations across restarts.
                 ids = {i["order_id"] for i in pending if i.get("order_id")
-                       and Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS}
+                       and (i.get("entry_execution_version") != ENTRY_EXECUTION_VERSION
+                            or Decimal(str(i.get("price", "-1"))) not in ALL_ENTRY_EXIT_PAIRS)}
                 ids |= {i["order_id"] for i in pending if i.get("order_id") and now_timestamp >= i.get("cancel_at", float("inf"))}
             else:
                 ids = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
@@ -947,6 +970,7 @@ def main():
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$6 reserved; quantity=6; hold to settlement; earlier allowance=$9", flush=True)
+    print("ENTRY_PRICE_FLOOR minimum_ask=45c; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
