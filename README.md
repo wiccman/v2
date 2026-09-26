@@ -246,3 +246,9 @@ its polling cadence, so a brief 97¢ quote can be missed between polls. An
 acknowledged order ID is required for `SETTLEMENT_97_ENTRY`; it does not prove
 that the IOC filled. Funding waits, conflicting inventory and prior attempts
 remain subject to the existing protections and one-attempt policy.
+
+## 45-cent entry quote floor
+
+All new entry routes require a fresh selected-outcome ask of at least 45 cents and no higher than the route limit. New buys use immediate-or-cancel so unfilled quantities cannot wait through a later price drop. Missing/invalid quotes block entry. Settlement still requires exactly 97 cents. Existing tracked pre-upgrade buy orders are canceled before more entries in that market; reservations, inventory, side locks and exit targets remain intact.
+
+This is a submission-time quote floor, not an exchange-enforced minimum fill price. Kalshi can still give a lower execution price if quotes move between observation and matching. Five-contract sizing and the $15 shared cap ($9 earlier / $6 settlement) remain unchanged.
