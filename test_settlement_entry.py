@@ -36,7 +36,7 @@ def test_boundary_side_and_six_contract_ioc(monkeypatch, elapsed, expected, side
         assert len(fake.entries) == 1
 
 
-@pytest.mark.parametrize('ask', ['.96','.98','.99'])
+@pytest.mark.parametrize('ask', ['.96','1','1.001'])
 def test_requires_97_cent_quote(monkeypatch, ask):
     fake, record, state, clock, closed = setup(monkeypatch)
     fake.market('TEST')['yes_ask_dollars'] = ask
@@ -47,13 +47,13 @@ def test_requires_97_cent_quote(monkeypatch, ask):
 def test_final_window_reports_actual_quotes_when_no_97_cent_side(monkeypatch):
     import json
     fake, record, state, clock, closed = setup(monkeypatch)
-    fake.market('TEST')['yes_ask_dollars'] = '0.98'
+    fake.market('TEST')['yes_ask_dollars'] = '0.96'
     events = []
     monkeypatch.setattr(bot, 'write_log', lambda event, *a, **k: events.append((event, k)))
     bot.settlement_entry(record, state, 'TEST', closed)
     checks = [json.loads(data['details']) for event, data in events if event == 'SETTLEMENT_97_CHECK']
-    assert checks[-1]['reason'] == 'waiting_for_exact_97_ask'
-    assert checks[-1]['yes_ask'] == '0.98' and checks[-1]['no_ask'] == '0.04'
+    assert checks[-1]['reason'] == 'waiting_for_97_to_below_100_ask'
+    assert checks[-1]['yes_ask'] == '0.96' and checks[-1]['no_ask'] == '0.04'
     assert checks[-1]['seconds_remaining'] == 120
     assert not fake.entries
 
@@ -139,16 +139,17 @@ def test_final_entry_never_flips_the_market_side(monkeypatch):
     assert not fake.entries
 
 
+@pytest.mark.parametrize('hold_price', ['.97', '.98', '.99', '.999'])
 @pytest.mark.parametrize('quantity', ['10','3.25'])
 @pytest.mark.parametrize('sign', [1,-1])
-def test_exit_worker_holds_settlement_lots_and_sells_only_scalps(tmp_path, quantity, sign):
+def test_exit_worker_holds_settlement_lots_and_sells_only_scalps(tmp_path, quantity, sign, hold_price):
     e = PairExchange(bid='.99')
     e.buy('.39', '5', sign)
     oid = 'hold'
     e.intents.append(dict(order_id=oid, client_id=oid, side='YES' if sign == 1 else 'NO',
-                          price='.97', exit_target='1', hold_to_settlement=True))
+                          price=hold_price, exit_target='1', hold_to_settlement=True))
     e.held += sign * D(quantity)
-    e.fill(oid, sign, D(quantity), '.97')
+    e.fill(oid, sign, D(quantity), hold_price)
     state = {'markets':{'T':{'close_timestamp':1900,'entry_intents':e.intents}}}
     m = TakeProfitMonitor(e, lambda: state, tmp_path/'hold.json',
         pairs={D('.39'):D('.46'),D('.97'):D('1')}, clock=lambda:1000, emit=lambda *a,**k:None)
@@ -161,3 +162,43 @@ def test_exit_worker_holds_settlement_lots_and_sells_only_scalps(tmp_path, quant
         pairs={D('.39'):D('.46'),D('.97'):D('1')}, clock=lambda:1001, emit=lambda *a,**k:None)
     restarted.run_once()
     assert restarted.healthy and len(e.submissions) == 1
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('ask,expected', [('.97',6),('.98',5),('.99',5),('.999',5)])
+def test_settlement_price_range_uses_actual_limit_and_fee_budget(monkeypatch, side, ask, expected):
+    fake, record, state, clock, closed = setup(monkeypatch, side=side)
+    record['signal'] = {'prediction': side}
+    record['trade_side'] = side
+    fake.market('TEST')[side.lower() + '_ask_dollars'] = ask
+    bot.settlement_entry(record, state, 'TEST', closed)
+    assert len(fake.entries) == 1
+    wire, qty, price, kwargs = fake.entries[0]
+    assert qty == expected and kwargs['ioc'] is True
+    assert price == (D(ask) if side == 'YES' else 1 - D(ask))
+    intent = record['entry_intents'][0]
+    assert D(intent['price']) == D(ask) and intent['exit_target'] == '1'
+    assert intent['hold_to_settlement'] and bot.tracked_entry_price_allowed(intent)
+    assert D(intent['reserved_dollars']) <= 6
+    bot.settlement_entry(copy.deepcopy(record), state, 'TEST', closed)
+    assert len(fake.entries) == 1
+
+@pytest.mark.parametrize('ask', ['.98','.999'])
+def test_higher_price_does_not_override_same_side_lock(monkeypatch, ask):
+    fake, record, state, clock, closed = setup(monkeypatch, side='NO')
+    fake.market('TEST')['no_ask_dollars'] = ask
+    record['trade_side'] = 'YES'
+    bot.settlement_entry(record, state, 'TEST', closed)
+    assert not fake.entries
+
+
+def test_price_drop_below_97_before_post_does_not_reserve(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch)
+    market = dict(fake.market('TEST'))
+    count = [0]
+    def changing(ticker):
+        count[0] += 1
+        return {**market, 'yes_ask_dollars': '.98' if count[0] == 1 else '.96'}
+    monkeypatch.setattr(fake, 'market', changing)
+    bot.settlement_entry(record, state, 'TEST', closed)
+    assert not fake.entries and not record['entry_intents']
