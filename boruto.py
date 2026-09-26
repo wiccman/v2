@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-BUILD = "2.0.1 Boruto Four-Point Current Bias"
+BUILD = "2.0.4 Boruto Direction Every Window"
 PERIOD = timedelta(minutes=15)
 
 
@@ -27,9 +27,16 @@ def vote(points, strike):
     strike = price(strike)
     below = sum(value < strike for value in values)
     above = sum(value > strike for value in values)
-    side = "YES" if below >= 3 else "NO" if above >= 3 else "SKIP"
+    side = "YES" if below >= 3 else "NO" if above >= 3 else None
+    reason = "four_point_agreement"
+    if side is None:
+        # Input points are chronological. Use the newest non-equal point for
+        # mixed windows; a fully flat window has a deterministic YES fallback.
+        newest = next((value for value in reversed(values) if value != strike), None)
+        side = "YES" if newest is None or newest < strike else "NO"
+        reason = "flat_yes_fallback" if newest is None else "latest_non_equal_lookback"
     return {"bias": side, "agreement": "HIGH" if max(below, above) == 4 else
-            "MODERATE" if max(below, above) == 3 else "NONE",
+            "MODERATE" if max(below, above) == 3 else "LOW", "reason": reason,
             "below": below, "above": above, "equal": 4 - below - above}
 
 
@@ -79,7 +86,7 @@ def build_signal(target, history, now=None):
         conflict = (current["bias"] in ("YES", "NO") and previous_bias in ("YES", "NO")
                     and current["bias"] != previous_bias)
         prediction = current["bias"]
-        reason = "no_four_point_majority" if prediction == "SKIP" else "four_point_agreement"
+        reason = current["reason"]
         values = [price(p["settlement"]) for p in current_points] + [strike]
         return {"build": BUILD, "prediction": prediction, "base_confidence": current["agreement"],
                 "current_bias": current["bias"], "previous_bias": previous_bias,

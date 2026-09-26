@@ -167,7 +167,7 @@ def position(ticker):
     return Decimal("0")
 
 def entry_price_allowed(base_confidence, price):
-    return base_confidence in ("HIGH", "MODERATE") and Decimal(str(price)) in ENTRY_EXIT_PAIRS
+    return base_confidence in ("HIGH", "MODERATE", "LOW") and Decimal(str(price)) in ENTRY_EXIT_PAIRS
 
 def manage_exit(record, ticker, market, signal, closed, reserved_quantity=Decimal("0"), excluded_order_ids=None):
     held = position(ticker)
@@ -741,7 +741,7 @@ def cycle(state):
     reconcile_entries(state)
     # Only the independent paired monitor owns exits. Never fall back to a
     # single-price exit path when both entry tiers can hold inventory.
-    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE") and any(p.get("ask") is not None for p in record["predictions"]) and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = START <= elapsed < END and signal["prediction"] in ("YES", "NO") and signal.get("base_confidence") in ("HIGH", "MODERATE", "LOW") and any(p.get("ask") is not None for p in record["predictions"]) and record["buys"] < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, signal["prediction"])
         counted = False
