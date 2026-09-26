@@ -1,20 +1,24 @@
-# Strike Ruler — v0.9.8
+# Strike Ruler — 2.0.1 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-The base signal compares the three immediately preceding finalized settlement
-prices with the current strike. Two or three prices below the strike produce YES;
-two or three above produce NO. Three on the same side gives HIGH confidence,
-two gives MODERATE; otherwise the signal is SKIP. Missing, invalid or conflicting
-lookback data blocks signal creation; older settlements cannot fill a gap.
-The signal is retained for that market. Every valid YES/NO prediction is eligible
-regardless of the previous contract’s bias; previous-bias lookup and conflict skips
-are removed. Missing current data or no valid direction still blocks entry, and
-budget, timing, inventory reconciliation, and exit-monitor checks still apply. `ABSOLUTE_GAP_AVERAGE` is a legacy input
-and does not change this majority rule.
+The signal build is **2.0.1 Boruto Four-Point Current Bias**. Four finalized
+Kalshi settlements at T−60, T−45, T−30 and T−15 are compared with the official
+strike at opening T. At least three below gives YES; at least three above gives
+NO. Four agreeing votes are HIGH, three are MODERATE; other splits are SKIP.
+The current YES/NO bias controls entries even when the previous bias disagrees.
+Previous-window data is optional diagnostic context and never blocks the current
+signal. Missing or unfinalized current lookbacks still block signal creation.
+Quotes, gaps and live spot never change the bias.
+
+BASE_SIGNAL logs include build, both raw biases, vote counts, exact lookback
+boundaries and source tickers, final decision and skip reason. The current window
+must be verified before the signal is saved. Older saved market signals and
+spending records are preserved; new entries wait until a new market, while
+the independent exit monitor continues managing existing inventory.
 
 Predicted-side ask snapshots are scheduled at minutes 2, 4 and 6. A capture may
 be at most 15 seconds late and records its actual observation time. A later cycle
@@ -122,7 +126,7 @@ Review the change branch before updating Railway's deployed branch. Keep the
 existing volume and ledger, deploy one replica, and verify startup and event logs.
 With `TRADING_ENABLED=true`, deploying starts live operation immediately.
 
-## v0.9.8 entry change
+## 2.0.1 entry change
 
 Removed the 32¢ regular buy tier and the previous/current bias conflict gate.
 Opening 52¢→60¢ and late entries are unchanged. This does not guarantee a fill
