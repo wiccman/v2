@@ -208,7 +208,7 @@ def test_both_targets_keep_running_after_entry_cutoff_until_close(tmp_path):
     assert len(e.submissions) == 2
 
 
-def test_pair_target_is_saved_before_entry_post_and_cash_is_split(monkeypatch):
+def test_pair_target_is_saved_before_five_contract_entry_post(monkeypatch):
     e, record, state, clock, closed = cycle_setup(monkeypatch, 180)
     saved = []
     monkeypatch.setattr(bot, "save_state", lambda s: saved.append(copy.deepcopy(s)))
@@ -216,12 +216,13 @@ def test_pair_target_is_saved_before_entry_post_and_cash_is_split(monkeypatch):
     def checked(ticker, side, quantity, price, *args, **kwargs):
         intent = saved[-1]["markets"]["TEST"]["entry_intents"][-1]
         assert D(intent["exit_target"]) == {D(p): D(t) for p, t in [("0.38", "0.43"), ("0.39", "0.46"), ("0.49", "0.59"), ("0.55", "0.62"), ("0.56", "0.61"), ("0.61", "0.70")]}[price]
-        assert price * quantity <= bot.BUDGET / 6
+        assert quantity == D("5")
         return place(ticker, side, quantity, price, *args, **kwargs)
     monkeypatch.setattr(e, "place_entry", checked)
     result = list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert [p for p, _, _ in result] == [D(p) for p in ("0.38", "0.39", "0.49", "0.55", "0.56", "0.61")]
-    assert sum(p * q for p, _, q in result) <= bot.BUDGET
+    assert sum(p * q for p, _, q in result) == D("14.90")
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= bot.MARKET_BUDGET
     bot.reconcile_entries(state)
     assert not e.cancelled  # A 39-cent order is a supported price, not a legacy mismatch.
 

@@ -1,15 +1,16 @@
 """Durable, conservative spending reservations shared by every entry route."""
 import uuid
-from decimal import Decimal as D, ROUND_DOWN
+from decimal import Decimal as D
 
 FEE_RESERVE = D("0.03")  # per contract, including fractional-fill rounding cushion
 ZERO = D("0")
+ENTRY_QUANTITY = D("5")
 
 
 def market_budget():
     # Fixed requested allowance; stale Railway budget settings must not keep
-    # this release at the previous $6 cap.
-    return D("10")
+    # this release at an older cap.
+    return D("25")
 
 
 def initialize(record):
@@ -30,13 +31,15 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
     initialize(record)
     if record.get("entry_budget_legacy"):
         return None
-    price, order_budget, cap = D(price), D(order_budget), D(cap)
-    if not all(x.is_finite() and x > ZERO for x in (price, order_budget, cap)) or price >= 1:
+    # order_budget is retained for caller compatibility; dollar-based sizing
+    # and tier splitting no longer control order quantity.
+    price, cap = D(price), D(cap)
+    if not all(x.is_finite() and x > ZERO for x in (price, cap)) or price >= 1:
         return None
     spent = sum((D(item["reserved_dollars"]) for item in record["entry_intents"]), ZERO)
-    quantity = min(order_budget / price, max(ZERO, cap - spent) / (price + FEE_RESERVE))
-    quantity = quantity.quantize(D("0.01"), rounding=ROUND_DOWN)
-    if quantity <= ZERO:
+    quantity = ENTRY_QUANTITY
+    # Never shrink the requested five contracts to fit leftover allowance.
+    if quantity * (price + FEE_RESERVE) > cap - spent:
         return None
     intent = dict(client_id=str(uuid.uuid4()), side=side, price=str(price),
                   quantity=str(quantity), reserved_dollars=str(quantity * (price + FEE_RESERVE)),

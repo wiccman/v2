@@ -45,7 +45,7 @@ All routes use these default outcome-price pairs, configurable through
 | 56¢ | 61¢ |
 | 61¢ | 70¢ |
 
-During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same per-trigger budget and market allowance as every other route.
+During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same five-contract sizing and shared market allowance as every other route.
 
 Regular bias-based entries run first when a valid prediction snapshot is available.
 An optional limit batch submits the regular tiers only on the current bias side. Historical-strike
@@ -53,12 +53,14 @@ touches use the side of approach; the optional early spot trigger buys YES when
 spot is sufficiently above the current strike. This early route operates before
 minute 2 by default; the other three routes start at minute 0.
 
-`ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular, historical
-and spot triggers split their trigger budget across all six regular tiers. A dual batch splits the same amount
-across its configured attempts, rather than receiving a separate allowance
-per side. All routes share a fixed $10 allowance per 15-minute market, including entry fee reserves.
-The legacy `MARKET_BUDGET_DOLLARS` setting is ignored, so an older Railway value cannot retain the former cap.
-The source default is $0.77 per trigger; Railway can override it.
+Every new entry order requests exactly **5 contracts**, on opening, regular,
+limit-batch, historical, spot and late routes. All routes share a fixed **$25
+allowance per 15-minute market**, including entry fee reserves. An order is not
+submitted if five contracts plus the fee reserve will not fit the remaining
+allowance; the bot does not shrink it to a fractional order. Exchange partial
+fills remain possible, and exits sell only verified filled inventory.
+Legacy `ENTRY_BUDGET_DOLLARS` and `MARKET_BUDGET_DOLLARS` settings are ignored.
+Existing reservations remain intact when upgrading or restarting.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
 saved before submission. Explicit HTTP 400 `insufficient_balance` rejections
@@ -88,10 +90,10 @@ Important defaults:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `ENTRY_EXIT_PAIRS_CENTS` | `38:43,39:46,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
-| `ENTRY_BUDGET_DOLLARS` | `0.77` | Principal per trigger or entire dual batch |
+| `ENTRY_BUDGET_DOLLARS` | Ignored | Every new entry requests 5 contracts |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $10 including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $25 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `0` (fixed) | Earliest new entry |
@@ -175,3 +177,7 @@ A structured HTTP 400 `insufficient_balance` rejection releases only that new in
 ## 2.0.6 — Eight-minute regular entry window
 
 Regular, bias-limit and historical-strike entries are eligible from 0:00 through 7:59 of each 15-minute market. Unfilled regular orders expire at 8:00, and no regular POST may occur at or after that boundary. Previous Railway start/end values cannot shorten this window. The 52¢ opening rule remains limited to the first two minutes; the separate late rules remain at minutes 11–13. Exit monitoring continues throughout the market. The $10 shared cap, purchase-count limit and entry interval still apply, so eligibility for eight minutes does not guarantee continuous purchases. Existing saved order expirations are respected; new regular orders use the eight-minute deadline.
+
+## 2.0.7 — Five-contract orders and $25 shared allowance
+
+All entry routes request five contracts per order. The shared market allowance is $25 including entry fee reserves. Prior reservations are preserved; insufficient remaining allowance prevents a new order rather than reducing its quantity. Existing exits and price targets are unchanged. Five contracts do not guarantee 25¢ net profit at every price pair.

@@ -45,9 +45,9 @@ def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypat
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES"] * 6
-    assert [entry[2] for entry in fake.entries] == [Decimal(q) for q in ("0.33", "0.32", "0.26", "0.23", "0.22", "0.21")]
+    assert [entry[2] for entry in fake.entries] == [Decimal("5")] * 6
     assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.38", "0.39", "0.49", "0.55", "0.56", "0.61")]
-    assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.BUDGET
+    assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.MARKET_BUDGET
     assert all(entry[4] == 1580 for entry in fake.entries)
     assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in bot.ENTRY_EXIT_PAIRS]
 
@@ -97,7 +97,8 @@ def test_historical_strike_touch_posts_remaining_pair_with_eight_minute_expiry(m
     assert len(fake.entries) == 6
     assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1580 for e in fake.entries)
     assert [e[3] for e in fake.entries] == list(bot.ENTRY_EXIT_PAIRS)
-    assert sum(e[2] * e[3] for e in fake.entries) <= bot.BUDGET
+    assert all(e[2] == Decimal("5") for e in fake.entries)
+    assert sum(e[2] * e[3] for e in fake.entries) <= bot.MARKET_BUDGET
     assert record["historical_triggered_strikes"] == ["100000"]
     assert record["historical_strike_orders"][0]["strike"] == "100000"
 

@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, ENTRY_QUANTITY
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from balance_diagnostics import log_api_cash, BalanceMonitor
@@ -40,7 +40,8 @@ ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **L
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 480
-BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
+# Compatibility argument only: reserve_entry enforces ENTRY_QUANTITY.
+BUDGET = Decimal("0.77")
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 START = 0
@@ -367,7 +368,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
 
 
 def paired_entries(record, state, ticker, side, closed, kind, now_timestamp=None, submit_before=None):
-    """Split the existing per-trigger principal across both levels, not double it."""
+    """Submit five contracts per tier while sharing the market allowance."""
     for price in ENTRY_EXIT_PAIRS:
         result, quantity = funded_entry(record, state, ticker, side, price, closed, kind,
             now_timestamp, submit_before, order_budget=BUDGET / len(ENTRY_EXIT_PAIRS))
@@ -375,7 +376,7 @@ def paired_entries(record, state, ticker, side, closed, kind, now_timestamp=None
 
 
 def paired_late_entries(record, state, ticker, side, closed, now_timestamp, submit_before, cancel_at):
-    """Place both late tiers on the bias side and split one trigger budget between them."""
+    """Submit five contracts per late tier within the shared market allowance."""
     for price in LATE_ENTRY_PAIRS:
         result, quantity = funded_entry(
             record, state, ticker, side, price, closed, "late_bias", now_timestamp,
@@ -814,12 +815,13 @@ def main():
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    ignored = ("TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
+    print(f"ENTRY_SIZING quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
+    ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
                "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")
     for name in ignored:
         if name in os.environ:
-            print(f"CONFIG_IGNORED: {name}; paired prices apply and no stop-loss is active", flush=True)
+            print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
         print("CONFIG_IGNORED: regular entry window is fixed at minutes 0 through 8", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
