@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.4 Boruto
+# Strike Ruler — 2.0.5 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -162,3 +162,7 @@ Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongs
 ## 2.0.4 — Direction on every valid window
 
 Four-point majorities keep their existing direction (3 below → YES, 3 above → NO). Mixed windows use the most recent non-equal lookback: below → YES, above → NO. If all four equal the strike, the explicit fallback is YES. These fallback signals have LOW confidence and are eligible for regular entries. Previous bias does not veto a signal. Valid four-point data always produces YES or NO; missing/invalid data still blocks execution. Timing, $10 allowance, entry pairs and order checks remain in place. A saved older-build window waits until the next market before using this signal revision.
+
+## 2.0.5 — Fresh account-scope diagnostics
+
+Every 60 seconds a separate GET-only worker logs available cash from the default API account and balances returned by `/portfolio/subaccounts/balances`, preserving each subaccount number, exchange index and update timestamp. Default-account scope is explicit: the report is not the entire website portfolio. Failed/restricted lookups log only error type and status, never a fabricated zero or credentials. The diagnostic client has a five-second timeout and does not block the entry or exit workers. Order routing, account selection, trading rules and signal build are unchanged.

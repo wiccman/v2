@@ -7,7 +7,7 @@ from kalshi import KalshiClient, KalshiAPIError
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
-from balance_diagnostics import log_api_cash
+from balance_diagnostics import log_api_cash, BalanceMonitor
 from boruto import BUILD as SIGNAL_BUILD, build_signal
 from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
 
@@ -846,8 +846,10 @@ def main():
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
         EXIT_MONITOR.start()
         print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ALL_ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
-        # Exit monitoring is already active during this bounded read-only request.
-        log_api_cash(client)
+        diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
+            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
+        balance_monitor = BalanceMonitor(diagnostics_client)
+        balance_monitor.start()
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)
@@ -861,6 +863,7 @@ def main():
         except KeyboardInterrupt:
             save_state(state)
         finally:
+            balance_monitor.stop()
             if EXIT_MONITOR is not None:
                 EXIT_MONITOR.stop()
 

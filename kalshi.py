@@ -118,6 +118,9 @@ class KalshiClient:
     def balance(self):
         return self.request("GET", "/portfolio/balance", auth=True)
 
+    def subaccount_balances(self):
+        return self.request("GET", "/portfolio/subaccounts/balances", auth=True)
+
     def positions(self, ticker=None):
         params = {"ticker": ticker} if ticker else None
         return self.request("GET", "/portfolio/positions", params=params, auth=True).get("market_positions", [])
