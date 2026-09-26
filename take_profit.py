@@ -1,3 +1,4 @@
+from entry_policy import settlement_price_allowed
 """Independent, durable fixed-price exit monitor. No signal or quote dependency.
 
 Kalshi V2 rejects resting reduce-only orders. The worker sends price-protected
@@ -151,6 +152,10 @@ class TakeProfitMonitor:
             order_id = item.get("order_id") or by_client.get(item.get("client_id"))
             price = Decimal(item.get("price", "-1"))
             target = self.pairs.get(price)
+            if item.get("hold_to_settlement") is True:
+                if not settlement_price_allowed(price) or Decimal(item.get("exit_target", "-1")) != 1:
+                    raise ValueError("Invalid settlement inventory target")
+                target = Decimal("1")
             # Preserve the original target for inventory from the retired tier.
             # New entries use only the current pairs.
             if target is None:
