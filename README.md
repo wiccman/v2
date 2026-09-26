@@ -249,6 +249,10 @@ remain subject to the existing protections and one-attempt policy.
 
 ## 45-cent entry quote floor
 
-All new entry routes require a fresh selected-outcome ask of at least 45 cents and no higher than the route limit. New buys use immediate-or-cancel so unfilled quantities cannot wait through a later price drop. Missing/invalid quotes block entry. Settlement still requires exactly 97 cents. Existing tracked pre-upgrade buy orders are canceled before more entries in that market; reservations, inventory, side locks and exit targets remain intact.
+All new entry routes require a fresh selected-outcome ask of at least 45 cents and no higher than the route limit. New buys use immediate-or-cancel so unfilled quantities cannot wait through a later price drop. Missing/invalid quotes block entry. Settlement requires an ask from 97 cents up to, but excluding, $1. Existing tracked pre-upgrade buy orders are canceled before more entries in that market; reservations, inventory, side locks and exit targets remain intact.
 
 This is a submission-time quote floor, not an exchange-enforced minimum fill price. Kalshi can still give a lower execution price if quotes move between observation and matching. Five-contract sizing and the $15 shared cap ($9 earlier / $6 settlement) remain unchanged.
+
+## Final-two-minute 97-cent-plus entry
+
+In minutes 13–15, the settlement route accepts the locked outcome at an ask >=97 cents and <100 cents, including fractional prices. It submits IOC at that observed ask and checks the quote again before submission; an upward move beyond the limit waits for the next cycle. The $6 reserve sizes whole contracts using price plus the existing 3-cent per-contract fee cushion: 6 at 97 cents, 5 above 97 cents. The overall cap remains $15. One attempt per market, side/inventory checks and monitor-health gating remain. Settlement lots at every eligible entry price retain a $1 target and are excluded from scalp exits. No fill or profit is guaranteed.
