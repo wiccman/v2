@@ -1,17 +1,24 @@
-# Strike Ruler — v0.9.6
+# Strike Ruler — 2.0 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-The base signal compares the three immediately preceding finalized settlement
-prices with the current strike. Two or three prices below the strike produce YES;
-two or three above produce NO. Three on the same side gives HIGH confidence,
-two gives MODERATE; otherwise the signal is SKIP. Missing, invalid or conflicting
-lookback data blocks signal creation; older settlements cannot fill a gap.
-The signal is retained for that market. `ABSOLUTE_GAP_AVERAGE` is a legacy input
-and does not change this majority rule.
+The signal build is **2.0 Boruto Four-Point Conflict Skip**. Four finalized
+Kalshi settlements at T−60, T−45, T−30 and T−15 are compared with the official
+strike at opening T. At least three below gives YES; at least three above gives
+NO. Four agreeing votes are HIGH, three are MODERATE; other splits are SKIP.
+The immediately previous window is independently calculated from its own
+strike and four prior settlements. Opposing current/previous YES/NO biases give
+SKIP. A previous SKIP leaves the current side alone. Missing or unfinalized data
+blocks signal creation. Quotes, gaps and live spot never change the bias.
+
+BASE_SIGNAL logs include build, both raw biases, vote counts, exact lookback
+boundaries and source tickers, final decision and skip reason. Both windows
+must be verified before the signal is saved. Older saved market signals and
+spending records are preserved; new entries wait until a new market, while
+the independent exit monitor continues managing existing inventory.
 
 Predicted-side ask snapshots are scheduled at minutes 2, 4 and 6. A capture may
 be at most 15 seconds late and records its actual observation time. A later cycle
