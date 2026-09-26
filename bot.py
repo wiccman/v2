@@ -606,7 +606,7 @@ def place_historical_strike_entries(record, ticker, spot, closed, now_timestamp=
             record["historical_strike_orders"].append(order_record)
             details = {**order_record, "spot": str(spot), "order": result}
             write_log(
-                "HISTORICAL_STRIKE_RESTING", ticker, prediction=side,
+                "HISTORICAL_STRIKE_ACKNOWLEDGED" if order_id else "HISTORICAL_STRIKE_NO_ORDER", ticker, prediction=side,
                 price=str(price), quantity=str(quantity),
                 details=json.dumps(details),
             )
@@ -873,7 +873,7 @@ def cycle(state):
             submit_before=started.timestamp() + OPENING_WINDOW, cancel_at=started.timestamp() + OPENING_WINDOW)
         if result.get("order_id"):
             record["orders"].append(result["order_id"])
-        write_log("OPENING_BIAS_LIMIT", ticker, prediction=signal["prediction"], price=str(price), quantity=str(quantity),
+        write_log("OPENING_BIAS_LIMIT" if result.get("order_id") else "OPENING_BIAS_NO_ORDER", ticker, prediction=signal["prediction"], price=str(price), quantity=str(quantity),
                   details=json.dumps({"exit_target": str(target), "entry_cutoff": started.timestamp() + OPENING_WINDOW, "order": result}))
         save_state(state)
     if update_prediction(record, ticker, current, elapsed): save_state(state)
@@ -903,7 +903,7 @@ def cycle(state):
             if result.get("order_id"):
                 record["orders"].append(result["order_id"])
             write_log(
-                "LATE_BIAS_LIMIT", ticker, prediction=signal["prediction"], price=str(price),
+                "LATE_BIAS_LIMIT" if result.get("order_id") else "LATE_BIAS_NO_ORDER", ticker, prediction=signal["prediction"], price=str(price),
                 quantity=str(quantity), details=json.dumps({
                     "exit_target": str(LATE_ENTRY_PAIRS[price]), "entry_start": late_start,
                     "entry_cutoff": late_end, "cancel_at": late_end, "order": result,
