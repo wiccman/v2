@@ -24,7 +24,10 @@ class SwitchExchange(PairExchange):
         self.entry_failure = None
 
     def market(self, ticker):
-        return dict(self.quotes, ticker=ticker)
+        return dict(self.quotes, ticker=ticker, floor_strike='100000')
+
+    def btc_reference_price(self):
+        return D('100010') if self.desired == 'YES' else D('99990')
 
     def market_cash(self, ticker):
         return {'exchange_index': 2, 'cash_dollars': '100'}
@@ -32,7 +35,7 @@ class SwitchExchange(PairExchange):
     def request(self, method, path, params=None, body=None, auth=False):
         if body['reduce_only']:
             return super().request(method, path, params, body, auth)
-        assert method == 'POST' and body['time_in_force'] == 'immediate_or_cancel'
+        assert method == 'POST' and body['time_in_force'] == 'good_till_canceled'
         assert self.held == 0, 'A settlement buy must not merely net out old inventory'
         self.buys.append(dict(body))
         sign = 1 if body['side'] == 'bid' else -1
