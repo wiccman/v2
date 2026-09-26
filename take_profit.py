@@ -1,9 +1,11 @@
-from entry_policy import settlement_price_allowed
-"""Independent, durable fixed-price exit monitor. No signal or quote dependency.
+from entry_policy import SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed
+"""Independent, durable exit monitor and authorized settlement-side transition.
 
 Kalshi V2 rejects resting reduce-only orders. The worker sends price-protected
 reduce-only IOCs for observed holdings and reconciles each submission before
 retrying. This is a bot-managed target, not an exchange-hosted resting bracket.
+Normal take-profit orders do not depend on quotes. A requested settlement-side
+transition uses the observed bid to close opposite inventory, even at a loss.
 """
 import json
 import os
@@ -42,6 +44,16 @@ class TakeProfitMonitor:
     @property
     def healthy(self):
         return self._healthy and self.clock() - self._last_success <= max(10, 3 * self.poll)
+
+    def settlement_ready(self, ticker, side):
+        """Read an atomic receipt, never mutable state halfway through a pass."""
+        if not self.healthy or not self.path.exists():
+            return False
+        ledger = json.loads(self.path.read_text()).get("markets", {}).get(ticker, {})
+        ready = ledger.get("settlement_ready", {})
+        return (ready.get("side") == side and not ledger.get("pending")
+                and 0 <= self.clock() - ready.get("checked_at", 0) <= max(10, 3 * self.poll)
+                and self.clock() < ready.get("close_timestamp", 0))
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,7 +147,8 @@ class TakeProfitMonitor:
             self.save()
         filled = Decimal(str(order.get("fill_count_fp", order.get("fill_count", "0"))))
         if filled > Decimal(intent.get("reported_fill", "0")):
-            self.emit("TP_FILL", ticker=ticker, order_id=order["order_id"],
+            event = "SETTLEMENT_CLOSE_FILL" if intent.get("purpose") == "settlement_switch" else "TP_FILL"
+            self.emit(event, ticker=ticker, order_id=order["order_id"],
                       cumulative_quantity=str(filled), side=intent["side"], target=intent["target"])
             intent["reported_fill"] = str(filled)
             self.save()
@@ -144,7 +157,8 @@ class TakeProfitMonitor:
         if filled:
             ledger.setdefault("exit_orders", {})[order["order_id"]] = {
                 "side": intent["side"], "target": intent["target"],
-                "paired": intent.get("paired", False), "filled": str(filled)}
+                "paired": intent.get("paired", False), "filled": str(filled),
+                "purpose": intent.get("purpose", "take_profit")}
         ledger.pop("pending")
         self.save()
         return True
@@ -211,6 +225,8 @@ class TakeProfitMonitor:
                 self.save()
                 self.emit("TP_WINDOW_CLOSED", ticker=ticker, fill_confirmed=False)
             return True
+        if ledger.pop("settlement_ready", None):
+            self.save()
         if self.clock() < ledger.get("retry_after", 0):
             return False
         self._clear_legacy(ticker, record, ledger)
@@ -223,13 +239,40 @@ class TakeProfitMonitor:
         held = Decimal(str(matches[0]["position_fp"])) if matches else Decimal("0")
         if not held.is_finite():
             raise ValueError("Invalid position quantity")
+        switch = record.get("settlement_switch", {})
+        switching = (switch.get("side") in {"YES", "NO"} and switch.get("allow_loss") is True
+                     and not any(item.get("kind") == SETTLEMENT_KIND for item in record.get("entry_intents", []))
+                     and float(close) - SETTLEMENT_WINDOW <= self.clock() < float(close))
+        if switching:
+            # Entry worker cancels/reconciles buys. Unknown ACKs remain a block
+            # so an old buy cannot refill the position after this close.
+            if any(not item.get("entry_closed") and item.get("kind") != SETTLEMENT_KIND
+                   for item in record.get("entry_intents", [])):
+                return False
+            opposite = (switch["side"] == "YES" and held < 0) or (switch["side"] == "NO" and held > 0)
+            if opposite:
+                market = self.client.market(ticker)
+                if not settlement_entry_price_allowed(market[switch["side"].lower() + "_ask_dollars"]):
+                    return False
+                held_side = "yes" if held > 0 else "no"
+                bid = Decimal(str(market[held_side + "_bid_dollars"]))
+                if not bid.is_finite() or not Decimal("0") < bid < Decimal("1"):
+                    return False
+                # Full net position, reduce-only, at the observed bid: the
+                # authorized settlement transition may realize a loss. FIFO
+                # attribution allows this close to span all old entry tiers.
+                return self._submit(ticker, ledger, close, held, bid,
+                                    paired=False, purpose="settlement_switch")
         buckets = self._paired_buckets(ticker, record, ledger, held) if self.pairs is not None else {self.target: held}
+        if switching:
+            ledger["settlement_ready"] = {"side": switch["side"], "checked_at": self.clock(),
+                                           "close_timestamp": float(close)}
+            self.save()
         if held == 0:
             if ledger.pop("armed", None):
                 self.save()
                 self.emit("TP_POSITION_FLAT", ticker=ticker)
             return True
-        side = "YES" if held > 0 else "NO"
         # Rotate across occupied targets: an unfilled low-price IOC cannot
         # starve the other tier. Quantities come from fills, never average cost.
         # A target of $1 is reserved for held settlement inventory, never an IOC exit.
@@ -241,18 +284,29 @@ class TakeProfitMonitor:
         previous = Decimal(ledger.get("last_target", "-1"))
         target = next((t for t in targets if t > previous), targets[0])
         quantity = buckets[target]
+        return self._submit(ticker, ledger, close, quantity, target, paired=self.pairs is not None)
+
+    def _submit(self, ticker, ledger, close, quantity, target, *, paired, purpose="take_profit"):
+        if self.clock() >= float(close):
+            return False
+        side = "YES" if quantity > 0 else "NO"
+        prefix = "SETTLEMENT_CLOSE" if purpose == "settlement_switch" else "TP"
         armed = {"side": side, "quantity": str(abs(quantity)), "target": str(target)}
         if ledger.get("armed") != armed:
             ledger["armed"] = armed
             self.save()
-            self.emit("TP_ARMED", ticker=ticker, **armed, execution="reduce_only_ioc")
+            self.emit(prefix + "_ARMED", ticker=ticker, **armed, execution="reduce_only_ioc")
         # The exchange, rather than a potentially stale quote, tests the limit.
         # One net-position exit covers all entry routes without double allocation.
         intent = {**armed, "client_id": str(uuid.uuid4()), "created_at": self.clock(),
-                  "paired": self.pairs is not None}
+                  "paired": paired, "purpose": purpose}
         ledger["pending"] = intent
         ledger["last_target"] = str(target)
         self.save()  # No submission unless its recovery ID is durable.
+        if self.clock() >= float(close):
+            ledger.pop("pending")  # Deadline passed during save; no POST was sent.
+            self.save()
+            return False
         try:
             result = self.client.place_take_profit(ticker, quantity, target, close,
                                                   client_order_id=intent["client_id"])
@@ -271,7 +325,7 @@ class TakeProfitMonitor:
             raise RuntimeError("Exit response missing order ID; saved for reconciliation")
         intent["order_id"] = result["order_id"]
         self.save()
-        self.emit("TP_SUBMITTED", ticker=ticker, order_id=result["order_id"], **armed,
+        self.emit(prefix + "_SUBMITTED", ticker=ticker, order_id=result["order_id"], **armed,
                   execution="reduce_only_ioc", fill_confirmed=False)
         return True
 

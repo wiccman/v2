@@ -8,6 +8,7 @@ ENTRY_QUANTITY = D("5")
 SETTLEMENT_BUDGET = D("6")
 SETTLEMENT_PRICE = D("0.97")
 SETTLEMENT_KIND = "settlement_97"
+SETTLEMENT_WINDOW = 180
 
 
 def settlement_price_allowed(price):

@@ -1,4 +1,4 @@
-"""Offline tests for the first-three-minute entry ceiling."""
+"""Offline tests for the eight-minute entry floor on 70c-plus orders."""
 from decimal import Decimal as D
 
 import pytest
@@ -12,7 +12,7 @@ from test_price_pairs import PairExchange
 @pytest.mark.parametrize('side', ['YES', 'NO'])
 @pytest.mark.parametrize('kind', ['opening_bias', 'regular', 'dual', 'historical', 'spot', 'late_bias'])
 @pytest.mark.parametrize('price', ['.70', '.73', '.85'])
-def test_every_route_blocks_70_or_higher_before_three_minutes(monkeypatch, side, kind, price):
+def test_every_route_blocks_70_or_higher_before_eight_minutes(monkeypatch, side, kind, price):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     record['signal']['prediction'] = side
     # A cheaper current ask cannot bypass the ceiling on the submitted limit.
@@ -25,9 +25,11 @@ def test_every_route_blocks_70_or_higher_before_three_minutes(monkeypatch, side,
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('elapsed,expected', [(0, 0), (179.999, 0), (180, 1), (181, 1)])
-def test_70_cent_tier_opens_at_exactly_three_minutes(monkeypatch, side, elapsed, expected):
+@pytest.mark.parametrize('elapsed,expected', [(0, 0), (180, 0), (479.999, 0), (480, 1), (481, 1), (720, 0)])
+def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed, expected):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    monkeypatch.setattr(bot, 'END', 720)
+    monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     record['signal']['prediction'] = side
     market = dict(fake.market('TEST'))
     market[side.lower() + '_ask_dollars'] = '.70'
@@ -57,8 +59,41 @@ def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
 def test_future_caller_timestamp_cannot_bypass_early_ceiling(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     result = bot.funded_entry(record, state, 'TEST', 'YES', D('.70'), closed,
-                              'regular', now_timestamp=clock[0] + 120)
+                              'regular', now_timestamp=clock[0] + 480)
     assert result == ({}, 0) and not fake.entries and not record['entry_intents']
+
+
+@pytest.mark.parametrize('elapsed,expected', [(359.999, 1), (360, 0), (479, 0), (480, 0), (719, 0)])
+def test_under_70_cent_entries_end_at_six_minutes(monkeypatch, elapsed, expected):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    monkeypatch.setattr(bot, 'END', 720)
+    monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.67'), closed, 'regular',
+                     submit_before=closed.timestamp(), cancel_at=closed.timestamp())
+    assert len(fake.entries) == expected
+    if expected:
+        assert fake.entries[0][3]['expiration_time'] == closed.timestamp() - 540
+
+
+@pytest.mark.parametrize('elapsed,expected', [(479.999, 0), (480, 1), (660, 1)])
+@pytest.mark.parametrize('price', ['.70', '.73', '.85'])
+def test_high_price_gateway_respects_eight_minute_boundary(monkeypatch, elapsed, expected, price):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    monkeypatch.setattr(bot, 'END', 720)
+    monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
+    bot.funded_entry(record, state, 'TEST', 'YES', D(price), closed, 'late_bias',
+                     submit_before=closed.timestamp(), cancel_at=closed.timestamp())
+    assert len(fake.entries) == expected
+
+
+def test_slow_funding_cannot_cross_six_minute_cutoff(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 359)
+    def slow(ticker):
+        clock[0] += 2
+        return {'exchange_index': 2, 'cash_dollars': '100'}
+    monkeypatch.setattr(fake, 'market_cash', slow)
+    assert bot.funded_entry(record, state, 'TEST', 'YES', D('.67'), closed, 'regular') == ({}, 0)
+    assert not fake.entries and not record['entry_intents']
 
 
 @pytest.mark.parametrize('sign', [1, -1])

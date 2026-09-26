@@ -45,7 +45,7 @@ class DualLimitClient:
         return {"order_id": order_id, "reduced_by": "1.00"}
 
 
-def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypatch):
+def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch):
     monkeypatch.setattr(bot.time, "time", lambda: 1000)
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
@@ -59,8 +59,8 @@ def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypat
     assert [entry[2] for entry in fake.entries] == [Decimal("5")] * 3
     assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.48", "0.51")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.MARKET_BUDGET
-    assert all(entry[4] == 1580 for entry in fake.entries)
-    assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in list(bot.ENTRY_EXIT_PAIRS)[:3]]
+    assert all(entry[4] == 1460 for entry in fake.entries)
+    assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in (Decimal('.45'), Decimal('.48'), Decimal('.51'))]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
@@ -88,7 +88,7 @@ def test_historical_strike_reaction_uses_approach_side():
     assert bot.strike_reaction_side(Decimal("100000"), Decimal("100000")) is None
 
 
-def test_historical_strike_touch_posts_remaining_pair_with_eight_minute_expiry(monkeypatch):
+def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(monkeypatch):
     monkeypatch.setattr(bot.time, "time", lambda: 1000)
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
@@ -108,8 +108,8 @@ def test_historical_strike_touch_posts_remaining_pair_with_eight_minute_expiry(m
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
     assert len(fake.entries) == 3
-    assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1580 for e in fake.entries)
-    assert [e[3] for e in fake.entries] == list(bot.ENTRY_EXIT_PAIRS)[:3]
+    assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1460 for e in fake.entries)
+    assert [e[3] for e in fake.entries] == [Decimal('.45'), Decimal('.48'), Decimal('.51')]
     assert all(e[2] == Decimal("5") for e in fake.entries)
     assert sum(e[2] * e[3] for e in fake.entries) <= bot.MARKET_BUDGET
     assert record["historical_triggered_strikes"] == ["100000"]
