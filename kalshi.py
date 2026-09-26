@@ -171,15 +171,15 @@ class KalshiClient:
             body["expiration_time"] = int(expiration_time)
         return self.request("POST", "/portfolio/events/orders", body=body, auth=True)
 
-    def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time, *, submit_before=None, client_order_id=None):
+    def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time, *, submit_before=None, client_order_id=None, ioc=False):
         # A slow quote request or preceding order must not submit an expired entry.
         if time.time() >= min(expiration_time, submit_before if submit_before is not None else expiration_time):
             return {}
         outcome_price = Decimal(outcome_price)
         if prediction == "YES":
-            return self._order(ticker, "bid", quantity, outcome_price, expiration_time=expiration_time, client_order_id=client_order_id)
+            return self._order(ticker, "bid", quantity, outcome_price, expiration_time=expiration_time, client_order_id=client_order_id, **({"ioc": True} if ioc else {}))
         if prediction == "NO":
-            return self._order(ticker, "ask", quantity, Decimal("1") - outcome_price, expiration_time=expiration_time, client_order_id=client_order_id)
+            return self._order(ticker, "ask", quantity, Decimal("1") - outcome_price, expiration_time=expiration_time, client_order_id=client_order_id, **({"ioc": True} if ioc else {}))
         raise ValueError("prediction must be YES or NO")
 
     def close_position(self, ticker, signed_quantity, yes_bid, yes_ask):

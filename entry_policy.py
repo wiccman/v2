@@ -5,6 +5,9 @@ from decimal import Decimal as D
 FEE_RESERVE = D("0.03")  # per contract, including fractional-fill rounding cushion
 ZERO = D("0")
 ENTRY_QUANTITY = D("5")
+SETTLEMENT_BUDGET = D("10")
+SETTLEMENT_PRICE = D("0.97")
+SETTLEMENT_KIND = "settlement_97"
 
 
 def market_budget():
@@ -37,7 +40,14 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
     if not all(x.is_finite() and x > ZERO for x in (price, cap)) or price >= 1:
         return None
     spent = sum((D(item["reserved_dollars"]) for item in record["entry_intents"]), ZERO)
-    quantity = ENTRY_QUANTITY
+    if kind == SETTLEMENT_KIND:
+        if price != SETTLEMENT_PRICE or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
+            return None
+        quantity = (SETTLEMENT_BUDGET / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
+    else:
+        # Earlier trades cannot consume the ten dollars reserved for settlement.
+        cap = min(cap, market_budget() - SETTLEMENT_BUDGET)
+        quantity = ENTRY_QUANTITY
     # Never shrink the requested five contracts to fit leftover allowance.
     if quantity * (price + FEE_RESERVE) > cap - spent:
         return None

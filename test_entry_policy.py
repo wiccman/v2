@@ -173,7 +173,7 @@ def test_twenty_five_dollar_allowance_is_shared_and_survives_restart():
     while entry_policy.reserve(record, "YES", D("0.39"), D("0.01"), entry_policy.market_budget(), 360, "test"):
         pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("22.90") < spent <= D("25")
+    assert D("12.90") < spent <= D("15")
     assert all(D(i["quantity"]) == 5 for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.39"), D("2"), entry_policy.market_budget(), 360, "test") is None
@@ -270,10 +270,10 @@ def test_each_entry_route_requests_five_despite_old_dollar_budget(monkeypatch, k
 
 
 def test_cap_boundary_never_shrinks_quantity_or_resets_old_spending():
-    record = {"entry_intents": [{"quantity": "0.87", "reserved_dollars": "22.95"}]}
+    record = {"entry_intents": [{"quantity": "0.87", "reserved_dollars": "12.95"}]}
     assert entry_policy.reserve(record, "YES", D("0.38"), D("0.01"), D("25"), 480, "regular")["quantity"] == "5"
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("25")
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("15")
     assert entry_policy.reserve(record, "YES", D("0.38"), D("100"), D("25"), 480, "regular") is None
-    record = {"entry_intents": [{"reserved_dollars": "22.96"}]}
+    record = {"entry_intents": [{"reserved_dollars": "12.96"}]}
     assert entry_policy.reserve(record, "YES", D("0.38"), D("100"), D("25"), 480, "regular") is None
     assert len(record["entry_intents"]) == 1

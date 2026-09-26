@@ -88,7 +88,7 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) == 10  # Six regular, three dual and one cheaper historical order fit.
+    assert len(fake.entries) == 6  # Five regular and one cheaper dual order fit $15.
     assert all(q == D("5") for _, q, _, _ in fake.entries)
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("25")
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
@@ -114,7 +114,7 @@ def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
         return D("100010")
     monkeypatch.setattr(fake, "btc_reference_price", slow_spot)
     bot.cycle(state)
-    assert len(fake.entries) == 9  # The shared cap allows six regular and three dual orders.
+    assert len(fake.entries) == 6  # Five regular and one dual order fit the earlier allowance.
     assert not any(i["kind"] == "historical" for i in record["entry_intents"])
 
 
