@@ -1,0 +1,75 @@
+"""Read-only status recovery; never place live orders."""
+import json
+import pytest
+from kalshi import KalshiClient, KalshiAPIError
+from test_take_profit_monitor import Exchange, monitor
+
+
+def test_routed_lookup_sends_ticker(monkeypatch):
+    client = KalshiClient()
+    calls = []
+    def request(method, path, **kw):
+        calls.append((method, path, kw))
+        return {'order': {'order_id': 'O', 'ticker': 'T', 'status': 'executed'}}
+    monkeypatch.setattr(client, 'request', request)
+    assert client.order('O', 'T')['status'] == 'executed'
+    assert calls == [('GET', '/portfolio/orders/O', {'params': {'market_ticker': 'T', 'exchange_index': -1}, 'auth': True})]
+
+
+def test_404_recovers_exact_order_on_later_page(monkeypatch):
+    client = KalshiClient()
+    def request(method, path, params=None, **kw):
+        assert method == 'GET'
+        assert params['market_ticker'] == 'T' and params['exchange_index'] == -1
+        if path.endswith('/O'):
+            raise KalshiAPIError(404, 'not found')
+        assert params['ticker'] == 'T'
+        if not params.get('cursor'):
+            return {'orders': [{'order_id': 'other', 'ticker': 'T'}], 'cursor': 'next'}
+        return {'orders': [{'order_id': 'O', 'ticker': 'T', 'status': 'canceled', 'fill_count_fp': '2'}]}
+    monkeypatch.setattr(client, 'request', request)
+    assert client.order('O', 'T')['fill_count_fp'] == '2'
+
+@pytest.mark.parametrize('rows', [[], [{'order_id':'O','ticker':'WRONG'}], [{'order_id':'OTHER','ticker':'T'}]])
+def test_missing_or_wrong_identity_does_not_clear_404(monkeypatch, rows):
+    client = KalshiClient()
+    def request(*a, **k):
+        raise KalshiAPIError(404, 'not found')
+    monkeypatch.setattr(client, 'request', request)
+    monkeypatch.setattr(client, 'all_orders', lambda ticker: rows)
+    with pytest.raises(KalshiAPIError):
+        client.order('O', 'T')
+
+@pytest.mark.parametrize('code', [401,403,429,500])
+def test_other_errors_are_not_hidden(monkeypatch, code):
+    client = KalshiClient()
+    monkeypatch.setattr(client, 'request', lambda *a,**k: (_ for _ in ()).throw(KalshiAPIError(code, 'failure')))
+    monkeypatch.setattr(client, 'all_orders', lambda t: pytest.fail('Unexpected fallback'))
+    with pytest.raises(KalshiAPIError) as caught:
+        client.order('O', 'T')
+    assert caught.value.status_code == code
+
+
+def test_pending_exit_survives_404_and_restart_without_duplicate_sell(tmp_path, monkeypatch):
+    exchange = Exchange(quantity='2', bid='.45')
+    svc, entries, clock, events = monitor(tmp_path, exchange)
+    svc.run_once()
+    assert len(exchange.submissions) == 1
+    lookup = exchange.order
+    seen = []
+    def missing(order_id, ticker=None):
+        seen.append(ticker)
+        raise KalshiAPIError(404, 'not found')
+    monkeypatch.setattr(exchange, 'order', missing)
+    svc.run_once()
+    saved = json.loads(svc.path.read_text())['markets']['T']['pending']
+    assert saved['order_id'] and len(exchange.submissions) == 1 and not svc.healthy
+    restarted, _, restart_clock, _ = monitor(tmp_path, exchange)
+    restarted.run_once()
+    assert len(exchange.submissions) == 1
+    monkeypatch.setattr(exchange, 'order', lookup)
+    restart_clock[0] += 60
+    restarted.run_once()
+    assert 'pending' not in json.loads(svc.path.read_text())['markets']['T']
+    assert len(exchange.submissions) == 1 and restarted.healthy
+    assert all(t == 'T' for t in seen)
