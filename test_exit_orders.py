@@ -21,6 +21,10 @@ class DualLimitClient:
         self.resting = []
         self.cancelled = []
 
+    def market(self, ticker):
+        return {"yes_ask_dollars": ".45", "yes_bid_dollars": ".44",
+                "no_ask_dollars": ".45", "no_bid_dollars": ".44"}
+
     def market_cash(self, ticker):
         return {"exchange_index": 2, "cash_dollars": "100"}
 
@@ -42,6 +46,7 @@ class DualLimitClient:
 
 
 def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypatch):
+    monkeypatch.setattr(bot.time, "time", lambda: 1000)
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -50,15 +55,16 @@ def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypat
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
-    assert [entry[1] for entry in fake.entries] == ["YES"] * 5
-    assert [entry[2] for entry in fake.entries] == [Decimal("5")] * 5
-    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.48", "0.51", "0.53", "0.56")]
+    assert [entry[1] for entry in fake.entries] == ["YES"] * 3
+    assert [entry[2] for entry in fake.entries] == [Decimal("5")] * 3
+    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.48", "0.51")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.MARKET_BUDGET
     assert all(entry[4] == 1580 for entry in fake.entries)
-    assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in list(bot.ENTRY_EXIT_PAIRS)[:5]]
+    assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in list(bot.ENTRY_EXIT_PAIRS)[:3]]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
+    monkeypatch.setattr(bot.time, "time", lambda: 1000)
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -83,6 +89,7 @@ def test_historical_strike_reaction_uses_approach_side():
 
 
 def test_historical_strike_touch_posts_remaining_pair_with_eight_minute_expiry(monkeypatch):
+    monkeypatch.setattr(bot.time, "time", lambda: 1000)
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -100,9 +107,9 @@ def test_historical_strike_touch_posts_remaining_pair_with_eight_minute_expiry(m
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
-    assert len(fake.entries) == 5
+    assert len(fake.entries) == 3
     assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1580 for e in fake.entries)
-    assert [e[3] for e in fake.entries] == list(bot.ENTRY_EXIT_PAIRS)[:5]
+    assert [e[3] for e in fake.entries] == list(bot.ENTRY_EXIT_PAIRS)[:3]
     assert all(e[2] == Decimal("5") for e in fake.entries)
     assert sum(e[2] * e[3] for e in fake.entries) <= bot.MARKET_BUDGET
     assert record["historical_triggered_strikes"] == ["100000"]
