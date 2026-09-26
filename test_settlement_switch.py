@@ -222,7 +222,7 @@ def test_market_close_prevents_both_transition_orders(tmp_path, monkeypatch):
 
 def test_exhausted_allowance_does_not_liquidate_for_unfundable_entry(tmp_path, monkeypatch):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
-    record['entry_intents'][0]['reserved_dollars'] = '10'
+    record['entry_intents'][0]['reserved_dollars'] = str(bot.MARKET_BUDGET - bot.SETTLEMENT_BUDGET + 1)
     bot.settlement_entry(record, state, 'T', closed)
     assert 'settlement_switch' not in record and not e.buys and not e.submissions
 

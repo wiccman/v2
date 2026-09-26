@@ -38,7 +38,7 @@ def test_cancel_lower_price_orders_at_six_minutes(monkeypatch, elapsed):
     fake, record, state, clock, closed = setup_current_window(monkeypatch, elapsed)
     record.update(orders=['resting'], dual_limit_attempted=True)
     record['entry_intents'] = [dict(order_id='resting', client_id='resting', side='YES',
-        price='.53', quantity='5', reserved_dollars='2.80', entry_execution_version=4,
+        price='.53', quantity='5', reserved_dollars='2.80', entry_execution_version=bot.ENTRY_EXECUTION_VERSION,
         kind='regular', entry_closed=False, cancel_at=1000000360)]
     monkeypatch.setattr(bot, 'MAX_BUYS', 0)
     monkeypatch.setattr(bot, 'HISTORICAL_STRIKE_ENABLED', False)

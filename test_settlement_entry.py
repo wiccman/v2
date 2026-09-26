@@ -109,14 +109,14 @@ def test_ambiguous_ack_never_rebuys(monkeypatch):
 
 def test_reserve_six_dollars_and_preserve_existing_spend():
     record = {}
-    while policy.reserve(record, 'YES', D('.39'), D('2'), D('15'), 480, 'regular'):
+    while policy.reserve(record, 'YES', D('.39'), D('2'), D('20'), 480, 'regular'):
         pass
     earlier = sum(D(i['reserved_dollars']) for i in record['entry_intents'])
-    assert earlier <= 9
-    intent = policy.reserve(record, 'YES', D('.97'), D('10'), D('15'), 900, policy.SETTLEMENT_KIND)
+    assert 9 < earlier <= 14
+    intent = policy.reserve(record, 'YES', D('.97'), D('10'), D('20'), 900, policy.SETTLEMENT_KIND)
     assert D(intent['quantity']) == 6
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= 15
-    assert policy.reserve(record, 'YES', D('.97'), D('10'), D('15'), 900, policy.SETTLEMENT_KIND) is None
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= 20
+    assert policy.reserve(record, 'YES', D('.97'), D('10'), D('20'), 900, policy.SETTLEMENT_KIND) is None
     legacy = {'entry_intents':[{'reserved_dollars':'16'}]}
     assert policy.reserve(legacy, 'YES', D('.97'), D('10'), D('15'), 900, policy.SETTLEMENT_KIND) is None
 

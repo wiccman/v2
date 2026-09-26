@@ -1,4 +1,4 @@
-"""Offline regressions for the user-requested 35c -> 42c exception."""
+"""New 35c entries are retired; existing fills still have their 42c exits."""
 from decimal import Decimal as D
 
 import pytest
@@ -10,8 +10,8 @@ from test_price_pairs import PairExchange
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('elapsed,expected', [(0, 0), (179.999, 0), (180, 1), (359.999, 1), (360, 0), (480, 0)])
-def test_35_cent_tier_only_runs_from_three_to_six_minutes(monkeypatch, side, elapsed, expected):
+@pytest.mark.parametrize('elapsed', [0, 179.999, 180, 359.999, 360, 480, 719])
+def test_35_cent_tier_never_opens_new_inventory(monkeypatch, side, elapsed):
     e, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     e.held = D('0')
     monkeypatch.setattr(e, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
@@ -21,15 +21,8 @@ def test_35_cent_tier_only_runs_from_three_to_six_minutes(monkeypatch, side, ela
     monkeypatch.setattr(e, 'market', lambda ticker: market)
     bot.funded_entry(record, state, 'TEST', side, D('.35'), closed, 'regular',
                      submit_before=closed.timestamp(), cancel_at=closed.timestamp())
-    assert len(e.entries) == len(record['entry_intents']) == expected
-    if expected:
-        wire, quantity, price, kwargs = e.entries[0]
-        assert quantity == 5 and kwargs['ioc']
-        assert price == (D('.35') if side == 'YES' else D('.65'))
-        intent = record['entry_intents'][0]
-        assert D(intent['exit_target']) == D('.42')
-        assert D(intent['reserved_dollars']) == D('1.90')
-        assert intent['cancel_at'] == closed.timestamp() - 540
+    assert not e.entries and not record['entry_intents']
+    assert D('.35') not in bot.NEW_ENTRY_EXIT_PAIRS
 
 
 @pytest.mark.parametrize('price,ask', [('.35', '.34'), ('.35', '.36'), ('.35', 'NaN'),

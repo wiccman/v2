@@ -22,12 +22,14 @@ if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
 ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "45:50"))
 # Apply the active tiers even when Railway still has an older pair setting.
-ENTRY_EXIT_PAIRS.update(parse_pairs("35:42,45:55,48:53,51:56,53:58,56:61,59:64,62:67,64:69,67:72,70:80"))
-ENTRY_EXIT_PAIRS.update(parse_pairs("70:76"))
+ENTRY_EXIT_PAIRS.update(parse_pairs("45:55,48:53,51:56,53:58,56:61,59:64,62:67,64:69,67:72,70:76,75:83"))
 # A stale Railway pair must not introduce a late tier with a different target.
 ENTRY_EXIT_PAIRS = {price: target for price, target in ENTRY_EXIT_PAIRS.items()
-                    if price < Decimal("0.70") or price == Decimal("0.70")}
+                    if price < Decimal("0.70") or price in (Decimal("0.70"), Decimal("0.75"))}
 # Retired tiers must never be reintroduced by a stale environment variable.
+ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
+# The added 57c entry belongs only to its independent opening route.
+ENTRY_EXIT_PAIRS.pop(Decimal("0.57"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.38"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.39"), None)
 ENTRY_EXIT_PAIRS = dict(sorted(ENTRY_EXIT_PAIRS.items()))
@@ -38,6 +40,8 @@ if not ENTRY_EXIT_PAIRS:
 OPENING_BIAS_ENABLED = os.getenv("OPENING_BIAS_ENABLED", "true").lower() == "true"
 OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
 OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
+OPENING_EXTRA_PAIR = parse_pairs("57:62")
+OPENING_EXTRA_WINDOW = 120
 LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
 LATE_ENTRY_PAIRS.update(parse_pairs("73:79,85:91"))
 LATE_ENTRY_PAIRS = {price: target for price, target in LATE_ENTRY_PAIRS.items()
@@ -47,20 +51,21 @@ LATE_ENTRY_END = seconds_from_minutes(os.getenv("LATE_ENTRY_END_MINUTE", "13"))
 if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
     raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
 # Preserve exits and reconciliation for inventory opened under retired tiers.
-LEGACY_EXIT_PAIRS = parse_pairs("38:43,39:46")
-ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
-NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
+LEGACY_EXIT_PAIRS = parse_pairs("35:42,38:43,39:46")
+NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS, **OPENING_EXTRA_PAIR}.items()))
+NEW_ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
+ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **NEW_ENTRY_EXIT_PAIRS}.items()))
 NEW_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")
 ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inventory bucket.
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MIN_ENTRY_PRICE = Decimal("0.45")
-DISCOUNT_ENTRY_PRICE = Decimal("0.35")
-DISCOUNT_ENTRY_START = 180
 EARLY_ENTRY_PRICE_CEILING = Decimal("0.70")
 HIGH_PRICE_ENTRY_START = 480
+SIX_MINUTE_ENTRY_PRICE = Decimal("0.75")
+SIX_MINUTE_ENTRY_START = 360
 LOW_PRICE_ENTRY_END = 360
-ENTRY_EXECUTION_VERSION = 4
+ENTRY_EXECUTION_VERSION = 5
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces ENTRY_QUANTITY.
@@ -355,7 +360,7 @@ def entry_decision(record, side, price, kind, live_side=None):
         reason = "selected_side_opposes_live_strike"
     else:
         reason = "live_strike_" + kind
-    if Decimal(str(price)) < MIN_ENTRY_PRICE and Decimal(str(price)) != DISCOUNT_ENTRY_PRICE:
+    if Decimal(str(price)) < MIN_ENTRY_PRICE:
         allowed = False
         reason = "entry_limit_below_45c"
     return allowed, {
@@ -376,6 +381,14 @@ def tracked_entry_price_allowed(intent):
 
 
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
+    # Persisted intents are also the opening-tier attempt ledger, so a lost
+    # acknowledgement or restart cannot duplicate the new 57c order.
+    if Decimal(str(price)) in OPENING_EXTRA_PAIR and any(
+        Decimal(str(i.get("price", "-1"))) == Decimal(str(price))
+        and i.get("release_reason") not in {"insufficient_balance", "request_deferred"}
+        for i in record.get("entry_intents", [])
+    ):
+        return {}, Decimal("0")
     switch = record.get("settlement_switch")
     if switch:
         if kind != SETTLEMENT_KIND or switch.get("side") != side or switch.get("phase") != "ready":
@@ -405,6 +418,10 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     policy_cutoff = closed.timestamp() - 900 + (LOW_PRICE_ENTRY_END
         if Decimal(str(price)) < EARLY_ENTRY_PRICE_CEILING else END)
+    if Decimal(str(price)) in OPENING_EXTRA_PAIR:
+        if time.time() < closed.timestamp() - 900:
+            return {}, Decimal("0")
+        policy_cutoff = min(policy_cutoff, closed.timestamp() - 900 + OPENING_EXTRA_WINDOW)
     if kind == SETTLEMENT_KIND:
         if not closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
             return {}, Decimal("0")
@@ -413,16 +430,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     if max(now_timestamp, time.time()) >= cutoff:
         return {}, Decimal("0")
     # Enforce on every route, using the actual clock rather than a caller's
-    # possibly stale timestamp. A lower ask cannot bypass a 70c buy limit.
-    high_price_opens = closed.timestamp() - 900 + HIGH_PRICE_ENTRY_START
+    # possibly stale timestamp. The explicit 75c tier opens at six minutes;
+    # the other high-price limits still wait for eight minutes.
+    high_price_start = SIX_MINUTE_ENTRY_START if Decimal(str(price)) == SIX_MINUTE_ENTRY_PRICE else HIGH_PRICE_ENTRY_START
+    high_price_opens = closed.timestamp() - 900 + high_price_start
     if Decimal(str(price)) >= EARLY_ENTRY_PRICE_CEILING and time.time() < high_price_opens:
         write_log("ENTRY_EARLY_PRICE_WAIT", ticker, prediction=side, price=str(price),
-                  details=json.dumps({"minimum_elapsed_seconds": HIGH_PRICE_ENTRY_START,
+                  details=json.dumps({"minimum_elapsed_seconds": high_price_start,
                                       "ceiling_exclusive": str(EARLY_ENTRY_PRICE_CEILING)}))
-        return {}, Decimal("0")
-    if Decimal(str(price)) == DISCOUNT_ENTRY_PRICE and time.time() < closed.timestamp() - 900 + DISCOUNT_ENTRY_START:
-        write_log("ENTRY_DISCOUNT_WAIT", ticker, price=str(price),
-                  details="35c tier opens after three minutes")
         return {}, Decimal("0")
     if kind != SETTLEMENT_KIND:
         try:
@@ -472,12 +487,16 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
                 write_log("ENTRY_HIGHER_SIDE_WAIT", ticker, prediction=side,
                           details=json.dumps({"selected_ask": str(ask), "other_ask": str(other_ask)}))
                 return {}, Decimal("0")
-        minimum_ask = DISCOUNT_ENTRY_PRICE if Decimal(str(price)) == DISCOUNT_ENTRY_PRICE else MIN_ENTRY_PRICE
+        minimum_ask = MIN_ENTRY_PRICE
         if not ask.is_finite() or not minimum_ask <= ask < Decimal("1"):
             write_log("ENTRY_PRICE_FLOOR_WAIT", ticker, prediction=side,
                       details=json.dumps({"ask": str(ask), "minimum": str(minimum_ask)}))
             return {}, Decimal("0")
         if ask > Decimal(str(price)) or (kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask)):
+            return {}, Decimal("0")
+        # The new opening and minute-six rules trigger on their quoted price,
+        # keeping them distinct from the existing 52c and 70c opportunities.
+        if (Decimal(str(price)) in OPENING_EXTRA_PAIR or Decimal(str(price)) == SIX_MINUTE_ENTRY_PRICE) and ask != Decimal(str(price)):
             return {}, Decimal("0")
     except Exception as error:
         write_log("ENTRY_QUOTE_UNAVAILABLE", ticker, details=repr(error))
@@ -1012,6 +1031,19 @@ def cycle(state):
         write_log("OPENING_BIAS_LIMIT", ticker, prediction=signal["prediction"], price=str(price), quantity=str(quantity),
                   details=json.dumps({"exit_target": str(target), "entry_cutoff": started.timestamp() + OPENING_WINDOW, "order": result}))
         save_state(state)
+    # An independent opening attempt is required: the legacy 52c attempt flag
+    # must not consume the 57c opportunity. A quote/cash wait creates no intent,
+    # so this route can try again while its two-minute window remains open.
+    if 0 <= time.time() - started.timestamp() < OPENING_EXTRA_WINDOW and selected_side in ("YES", "NO"):
+        for price, target in OPENING_EXTRA_PAIR.items():
+            result, quantity = funded_entry(record, state, ticker, selected_side, price, closed, "opening_57",
+                submit_before=started.timestamp() + OPENING_EXTRA_WINDOW,
+                cancel_at=started.timestamp() + OPENING_EXTRA_WINDOW)
+            if result.get("order_id"):
+                record["orders"].append(result["order_id"])
+                write_log("OPENING_57_LIMIT", ticker, prediction=selected_side, price=str(price), quantity=str(quantity),
+                          details=json.dumps({"exit_target": str(target), "entry_cutoff": started.timestamp() + OPENING_EXTRA_WINDOW, "order": result}))
+                save_state(state)
     if update_prediction(record, ticker, current, elapsed, selected_side): save_state(state)
     reconcile_entries(state)
     # Only the independent paired monitor owns exits. Never fall back to a
@@ -1080,11 +1112,12 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entry_side=live_BTC_vs_market_strike", flush=True)
-    print(f"Entry windows: under70c ends360s; 70c+ starts480s, ends{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
+    print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=720s..900s; required_ask=97c; limit=97c; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
-    print("DISCOUNT_ENTRY window=180s..360s; limit=35c; target=42c; quantity=5; shared earlier allowance=$9", flush=True)
-    print("ENTRY_PRICE_FLOOR minimum_ask=45c except the 35c tier; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
+    print("OPENING_57_ENTRY window=0s..120s; limit=57c; target=62c; quantity=5; independent opening attempt", flush=True)
+    print(f"SIX_MINUTE_ENTRY window=360s..{END}s; limit=75c; target=83c; quantity=5; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
+    print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",

@@ -11,9 +11,10 @@ Recheck the live spot/strike immediately before each order. Saved Boruto signals
 confidence and previous side locks do not determine scalp entries. Opposite
 inventory or unresolved opposing buys block a scalp in the new direction until
 they clear; only the final 97¢ route can deliberately close the opposite side at
-a loss. From minute 8 through minute 12, the chosen side must also have the
-higher quoted ask and an ask of at least 70¢. All high-price sell targets are 6¢
-above their respective order limits: 70→76, 73→79 and 85→91.
+a loss. High-price entries require the chosen side to have the higher quoted ask
+and an ask of at least 70¢. The 75¢→83¢ rule starts at minute 6. The minute-8
+70¢ entry keeps its 6¢ take-profit target at 76¢, as do the existing late
+73¢→79¢ and 85¢→91¢ pairs.
 
 The earlier Boruto signal is retained in old records for audit and exit
 reconciliation. New buys do not require four finalized lookbacks or a stored
@@ -24,15 +25,22 @@ New entries follow fixed price-based windows within each 15-minute market:
 
 | Entry | Window (start inclusive, end exclusive) |
 | --- | --- |
+| 52¢→60¢ opening entry | 0:00–2:00 |
+| New 57¢→62¢ opening entry | 0:00–2:00 |
 | 45–67¢ regular tiers | 0:00–6:00 |
-| 35¢→42¢ tier | 3:00–6:00 |
+| New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
 | Exact 97¢ settlement entry | 12:00–15:00 |
 
-The 52¢ opening route keeps its first-two-minute window. Every route rejects
-limits of 70¢ or higher before 8:00, and limits below 70¢ at or after 6:00.
-There are no new buys from 6:00 to 8:00. Slow calls cannot extend a deadline.
+The 35¢ buy is retired. The 57¢ and 75¢ rules require their respective exact
+quoted asks; their limits cannot pay more, although exchange price improvement
+can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
+of the 52¢ opening flag. Quote/cash waits can retry before minute 2; an accepted
+or ambiguous attempt cannot be duplicated after restart.
+The 75¢ tier is the only new entry available from 6:00 to 8:00. Other 70¢+
+limits wait until 8:00, and ordinary limits below 70¢ stop at 6:00. The shared
+gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
 Funds, quote checks and existing batch limits still apply. Exit monitoring
 continues until market close.
 
@@ -43,7 +51,6 @@ All routes use these default outcome-price pairs, configurable through
 
 | Entry limit | Exit target |
 | --- | --- |
-| 35¢ (from minute 3 until minute 6) | 42¢ |
 | 45¢ | 55¢ |
 | 48¢ | 53¢ |
 | 51¢ | 56¢ |
@@ -54,10 +61,15 @@ All routes use these default outcome-price pairs, configurable through
 | 64¢ | 69¢ |
 | 67¢ | 72¢ |
 | 70¢ (from minute 8) | 76¢ |
+| 75¢ (from minute 6) | 83¢ |
 | 73¢ (from minute 11) | 79¢ |
 | 85¢ (from minute 11) | 91¢ |
 
-During the first two minutes, the bot posts one strike-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same five-contract sizing and shared market allowance as every other route.
+During the first two minutes, the bot may submit a strike-selected 52¢ limit
+with a 60¢ target and an independent 57¢ limit with a 62¢ target. Each route
+uses five contracts and the shared allowance. All new entries are IOC; an
+unfilled quantity is canceled immediately, and no new opening submission may
+occur at or after 2:00. Each attempt rechecks direction and opposing inventory.
 
 Regular entries and the optional limit batch follow the live strike side.
 Historical-strike touches may trigger an attempt, but the current market strike
@@ -65,9 +77,9 @@ chooses its side. The optional early spot trigger buys YES when sufficiently
 above the current strike; this route operates before minute 2 by default.
 
 Earlier entry orders request exactly **5 contracts**, on opening, regular,
-limit-batch, historical, spot and late routes. All routes share a fixed **$15
+limit-batch, historical, spot and late routes. All routes share a fixed **$20
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
-reserved for the final-three-minute settlement entry**, leaving **$9 for all
+reserved for the final-three-minute settlement entry**, leaving **$14 for all
 earlier routes combined**. An earlier order is not
 submitted if five contracts plus the fee reserve will not fit the remaining
 allowance; the bot does not shrink it to a fractional order. Exchange partial
@@ -105,9 +117,9 @@ Important defaults:
 | --- | --- | --- |
 | `ENTRY_EXIT_PAIRS_CENTS` | `45:50,47:52,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries request 5 contracts; exact-97¢ settlement requests 6 |
-| `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
+| `OPENING_BIAS_PAIR_CENTS` | `52:60` | Existing opening entry; independent 57:62 rule is fixed in code |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $15 including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $20 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `0` (fixed) | Earliest new entry |
@@ -130,6 +142,8 @@ price change. Existing 32¢ inventory retains its 39¢ target; new regular entri
 Existing 38¢ and 39¢ inventory retains its 43¢ and 46¢ exit target respectively,
 but those two tiers are retired and cannot be reintroduced by an old Railway setting.
 The retired 32¢ regular tier is ignored even if an old environment setting lists it.
+Existing 35¢ inventory retains its 42¢ exit. Stale environment settings cannot
+restore new 35¢ buys, extend 57¢ buys past minute 2, or change the fixed new targets.
 
 Legacy strategy records remain readable only to prevent adopting inventory that
 belongs to an archived strategy. The old execution module and its configuration
@@ -261,13 +275,18 @@ remain subject to the existing protections and one-attempt policy.
 
 ## Entry quote floors
 
-New entry routes require a fresh selected-outcome ask of at least 45 cents and no higher than the route limit, except the explicitly configured 35¢→42¢ tier. That tier requires an ask of exactly 35¢ from 3:00 until 6:00; it does not lower the floor for other orders. New buys use immediate-or-cancel so unfilled quantities cannot wait through a later price drop. Missing/invalid quotes block entry. Settlement requires an ask of exactly 97 cents and uses a fixed 97-cent limit. Reservations and inventory records survive upgrades.
+New entries require a fresh selected-outcome ask of at least 45 cents and no
+higher than the route limit. The retired 35¢ exception is removed. New 57¢ and
+75¢ entries require asks of exactly 57¢ and 75¢ respectively. Settlement requires
+an exact 97¢ ask and uses a fixed 97¢ limit. Missing or invalid quotes block entry.
+High-price scalps require the selected side to have the strictly higher ask and
+a quote of at least 70¢. The explicit 75¢ tier opens at 6:00; other high-price
+limits open from 8:00, with the existing 73¢/85¢ route starting at 11:00.
 
-Before 8:00 of each market, every entry route requires a limit below 70 cents.
-The 70-cent tier becomes eligible at 8:00, subject to the usual quote, side, cash,
-timing and shared-budget checks. This gate does not delay exits for existing inventory.
-
-This is a submission-time quote floor, not an exchange-enforced minimum fill price. Kalshi can still give a lower execution price if quotes move between observation and matching. Five-contract sizing and the $15 shared cap ($9 earlier / $6 settlement) remain unchanged.
+All new buys use immediate-or-cancel. A quote check cannot enforce a minimum
+exchange fill price if the book changes before matching; favorable execution
+below the limit remains possible. New rules share the $20 cap ($14 earlier /
+$6 settlement), and existing inventory keeps its recorded exits.
 
 ## Request and order-status recovery
 
@@ -302,7 +321,7 @@ of exactly 97 cents, checks it again before submission, and submits a fixed
 wait without reserving budget or consuming the attempt. A price move cannot make
 that order buy above its 97-cent limit; a better execution price is still possible.
 The $6 reserve covers six contracts plus the existing 3-cent per-contract fee
-cushion. The overall cap remains $15. One settlement attempt per market and
+cushion. The overall cap is $20. One settlement attempt per market and
 monitor-health gating remain. Existing 98/99-cent settlement lots remain
 recognized, keep their $1 target, and are excluded from scalp exits. No fill or
 profit is guaranteed.
@@ -318,7 +337,7 @@ Partial closes retry only after status reconciliation; missing acknowledgements,
 The entry worker switches its side lock and buys only after the exit worker has
 confirmed no opposite inventory, with exit fills reflected in history. It rereads
 the position and the exact-97¢ quote before submission. Loss-taking exits use FIFO
-inventory accounting and do not reset the $15 spending ledger. Missing liquidity,
+inventory accounting and do not reset the $20 spending ledger. Missing liquidity,
 an unavailable 97¢ quote, insufficient cash/budget, or market close can prevent the
 transition from completing. Logs distinguish `SETTLEMENT_CLOSE_*` from normal
 take-profit events and record the requested/ready side transition.
