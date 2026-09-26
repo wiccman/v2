@@ -341,8 +341,9 @@ def previous_market_bias(state, started):
 def entry_decision(record, side, price, kind, live_side=None):
     allowed = live_side in ("YES", "NO") and side == live_side
     if kind == SETTLEMENT_KIND:
-        allowed = side in ("YES", "NO") and settlement_entry_price_allowed(price)
-        reason = "market_97_cent_side"
+        allowed = (live_side in ("YES", "NO") and side == live_side
+                   and Decimal(str(price)) == SETTLEMENT_PRICE)
+        reason = "live_strike_97_cent_limit"
         switch = record.get("settlement_switch", {})
         if switch.get("side") != side or switch.get("phase") != "ready":
             locked_side = record.get("trade_side")
@@ -384,8 +385,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return {}, Decimal("0")
     try:
         current_market = client.market(ticker)
-        spot = client.btc_reference_price() if kind != SETTLEMENT_KIND else None
-        live_side = strike_side(current_market, spot) if spot is not None else None
+        spot = client.btc_reference_price()
+        live_side = strike_side(current_market, spot)
     except Exception as error:
         write_log("ENTRY_LIVE_SIDE_UNAVAILABLE", ticker, details=type(error).__name__)
         return {}, Decimal("0")
@@ -511,7 +512,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     try:
         result = client.place_entry(ticker, side, quantity, price, intent["cancel_at"],
                                     submit_before=cutoff, client_order_id=intent["client_id"],
-                                    ioc=True)
+                                    ioc=(kind != SETTLEMENT_KIND))
     except RequestDeferred as error:
         # The gate rejected this locally before HTTP dispatch. Keep the audit
         # record, but do not spend allowance on an order that was never sent.
@@ -867,7 +868,7 @@ def settlement_position(ticker):
 
 
 def settlement_entry(record, state, ticker, closed):
-    """One exact-97c entry; serialize any loss-taking side change through exits."""
+    """Rest one 97c max order on the live strike side; serialize side changes."""
     now = time.time()
     if not closed.timestamp() - SETTLEMENT_WINDOW <= now < closed.timestamp():
         return
@@ -886,19 +887,24 @@ def settlement_entry(record, state, ticker, closed):
         report("attempt_already_recorded")
         return  # Persisted intent prevents repeats after partial fills or lost ACKs.
     market = client.market(ticker)
-    asks = {side: quotes(market, side)[0] for side in ("YES", "NO")}
-    observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]))
+    spot = client.btc_reference_price()
+    side = strike_side(market, spot)
+    asks = {outcome: quotes(market, outcome)[0] for outcome in ("YES", "NO")}
+    observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]),
+                    btc_reference=str(spot), strike=str(market["floor_strike"]))
     if time.time() >= closed.timestamp():
         report("window_closed_during_quote_read")
+        return
+    if side is None:
+        report("btc_at_strike")
         return
     locked_side = record.get("trade_side")
     if locked_side not in ("YES", "NO"):
         locked_side = (record.get("signal") or {}).get("prediction")
-    sides = [side for side, ask in asks.items() if settlement_entry_price_allowed(ask)]
-    if len(sides) != 1:
-        report("waiting_for_exact_97_ask")
+    selected_ask = asks[side]
+    if not settlement_entry_price_allowed(selected_ask):
+        report("selected_side_not_at_or_above_97", side=side, selected_ask=str(selected_ask))
         return
-    side = sides[0]
     held = settlement_position(ticker)
     opposite = (side == "YES" and held < 0) or (side == "NO" and held > 0)
     switch = record.get("settlement_switch")
