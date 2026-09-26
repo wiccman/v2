@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.3 Boruto
+# Strike Ruler — 2.0.4 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -8,14 +8,14 @@ Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 The signal build is **2.0.1 Boruto Four-Point Current Bias**. Four finalized
 Kalshi settlements at T−60, T−45, T−30 and T−15 are compared with the official
 strike at opening T. At least three below gives YES; at least three above gives
-NO. Four agreeing votes are HIGH, three are MODERATE; other splits are SKIP.
+NO. Four agreeing votes are HIGH, three are MODERATE. Other splits are LOW and use the latest non-equal lookback; a fully flat window defaults to YES.
 The current YES/NO bias controls entries even when the previous bias disagrees.
 Previous-window data is optional diagnostic context and never blocks the current
 signal. Missing or unfinalized current lookbacks still block signal creation.
 Quotes, gaps and live spot never change the bias.
 
 BASE_SIGNAL logs include build, both raw biases, vote counts, exact lookback
-boundaries and source tickers, final decision and skip reason. The current window
+boundaries and source tickers, final decision and selection reason. The current window
 must be verified before the signal is saved. Older saved market signals and
 spending records are preserved; new entries wait until a new market, while
 the independent exit monitor continues managing existing inventory.
@@ -158,3 +158,7 @@ from a phone in v2's deployment logs. `python bot.py --check` also emits it.
 ## 2.0.3 — Additional regular entry pairs
 
 Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap is now $10; timing, opening and late pairs are unchanged. Rejected-order reservations still consume the market allowance.
+
+## 2.0.4 — Direction on every valid window
+
+Four-point majorities keep their existing direction (3 below → YES, 3 above → NO). Mixed windows use the most recent non-equal lookback: below → YES, above → NO. If all four equal the strike, the explicit fallback is YES. These fallback signals have LOW confidence and are eligible for regular entries. Previous bias does not veto a signal. Valid four-point data always produces YES or NO; missing/invalid data still blocks execution. Timing, $10 allowance, entry pairs and order checks remain in place. A saved older-build window waits until the next market before using this signal revision.

@@ -24,10 +24,12 @@ def fixture(values=(95, 96, 97, 98, 99), strike=101, previous_strike=100):
 @pytest.mark.parametrize('points,strike,side,agreement', [
     ([97,98,99,101],100,'YES','MODERATE'),
     ([101,102,103,104],100,'NO','HIGH'),
-    ([97,98,101,102],100,'SKIP','NONE'),
+    ([97,98,101,102],100,'NO','LOW'),
     ([97,98,99,100],100,'YES','MODERATE'),
     ([101,102,103,100],100,'NO','MODERATE'),
-    ([97,98,100,100],100,'SKIP','NONE'),
+    ([97,98,100,100],100,'YES','LOW'),
+    ([101,102,97,98],100,'YES','LOW'),
+    ([100,100,100,100],100,'YES','LOW'),
 ])
 def test_four_point_votes(points,strike,side,agreement):
     result=vote(points,strike)
@@ -50,17 +52,17 @@ def test_opposing_raw_biases_allow_current_prediction():
     assert signal['prediction']=='YES' and signal['conflict'] is True
 
 
-def test_previous_skip_leaves_current_side_alone():
+def test_previous_tie_leaves_current_side_alone():
     target,history=fixture(values=(95,96,104,105,106),strike=110,previous_strike=100)
     signal=build_signal(target,history,T)
-    assert signal['previous_bias']=='SKIP' and signal['prediction']=='YES'
+    assert signal['previous_bias']=='NO' and signal['prediction']=='YES'
 
 
-def test_current_split_stays_skip_despite_previous_direction():
+def test_current_split_uses_latest_point_despite_previous_direction():
     target,history=fixture(values=(94,95,96,104,105),strike=100,previous_strike=110)
     signal=build_signal(target,history,T)
-    assert signal['previous_bias']=='YES' and signal['prediction']=='SKIP'
-    assert signal['reason']=='no_four_point_majority'
+    assert signal['previous_bias']=='YES' and signal['prediction']=='NO'
+    assert signal['reason']=='latest_non_equal_lookback'
 
 
 @pytest.mark.parametrize('offset',range(1,5))
@@ -121,3 +123,14 @@ def test_missing_previous_only_data_does_not_block_current(offset):
     history=[x for x in history if x['ticker']!=f'PAST-{offset}']
     signal=build_signal(target,history,T)
     assert signal['prediction']=='YES' and signal['previous_bias'] is None
+
+
+def test_low_confidence_tie_reaches_regular_order_gateway(monkeypatch):
+    import bot
+    from decimal import Decimal as D
+    from test_five_minute_exits import cycle_setup
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    record['signal']['base_confidence'] = 'LOW'
+    bot.cycle(state)
+    assert any(i['kind'] == 'regular' for i in record['entry_intents'])
+    assert bot.entry_price_allowed('LOW', D('0.39'))
