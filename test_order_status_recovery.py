@@ -77,6 +77,71 @@ def test_pending_exit_survives_404_and_restart_without_duplicate_sell(tmp_path, 
     assert all(t == 'T' for t in seen)
 
 
+@pytest.mark.parametrize('visibility', ['404', 'missing_ack', 'nonterminal'])
+@pytest.mark.parametrize('sign', [1, -1])
+def test_unresolved_exit_retries_are_persisted_and_never_duplicate(tmp_path, monkeypatch, visibility, sign):
+    exchange = Exchange(quantity=str(sign * 2), bid='.45', liquidity='.75')
+    exchange.lose_ack = visibility == 'missing_ack'
+    svc, entries, clock, events = monitor(tmp_path, exchange)
+    svc.run_once()
+    exchange.lose_ack = False
+    order, history = exchange.order, exchange.all_orders
+    reads = []
+    def unresolved(order_id, ticker=None):
+        reads.append(clock[0])
+        if visibility == '404':
+            raise KalshiAPIError(404, 'not found')
+        return dict(order(order_id, ticker), status='resting')
+    def absent(ticker):
+        reads.append(clock[0])
+        return []
+    monkeypatch.setattr(exchange, 'order', unresolved)
+    if visibility == 'missing_ack':
+        monkeypatch.setattr(exchange, 'all_orders', absent)
+    svc.run_once()
+    saved = json.loads(svc.path.read_text())['markets']['T']['pending']
+    assert saved['next_status_at'] == clock[0] + 2
+    assert saved['client_id'] == exchange.submissions[0]['client_order_id']
+    assert len(reads) == 1 and not svc.healthy
+    restarted, _, restart_clock, restart_events = monitor(tmp_path, exchange)
+    restarted.run_once()
+    restart_clock[0] += 1
+    restarted.run_once()
+    assert len(reads) == 1 and len(exchange.submissions) == 1
+    restart_clock[0] += 1
+    clock[0] = restart_clock[0]
+    restarted.run_once()
+    pending = restarted.state['markets']['T']['pending']
+    assert pending['next_status_at'] == restart_clock[0] + 4
+    assert len(reads) == 2 and len(exchange.submissions) == 1
+    assert any(event == 'TP_STATUS_PENDING' for event, _ in restart_events)
+    assert not any(event == 'TP_ERROR' for event, _ in restart_events)
+    monkeypatch.setattr(exchange, 'order', order)
+    monkeypatch.setattr(exchange, 'all_orders', history)
+    exchange.liquidity = Decimal(100)
+    restart_clock[0] += 4
+    restarted.run_once()
+    restarted.run_once()
+    assert exchange.held == 0 and restarted.healthy
+    assert [body['count'] for body in exchange.submissions] == ['2', '1.25']
+    assert all(body['reduce_only'] for body in exchange.submissions)
+
+
+def test_market_close_does_not_erase_unresolved_exit_or_retry_sell(tmp_path, monkeypatch):
+    exchange = Exchange()
+    svc, _, clock, _ = monitor(tmp_path, exchange)
+    svc.run_once()
+    def missing(*args):
+        raise KalshiAPIError(404, 'not found')
+    monkeypatch.setattr(exchange, 'order', missing)
+    svc.run_once()
+    pending = dict(svc.state['markets']['T']['pending'])
+    clock[0] = 1900
+    svc.run_once()
+    assert svc.state['markets']['T']['pending'] == pending
+    assert len(exchange.submissions) == 1
+
+
 @pytest.mark.parametrize('status', [None, 'resting'])
 def test_order_history_uses_ticker_filter_without_negative_shard(monkeypatch, status):
     """Replay GetOrders validation observed in production on September 26."""

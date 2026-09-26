@@ -265,6 +265,31 @@ All new entry routes require a fresh selected-outcome ask of at least 45 cents a
 
 This is a submission-time quote floor, not an exchange-enforced minimum fill price. Kalshi can still give a lower execution price if quotes move between observation and matching. Five-contract sizing and the $15 shared cap ($9 earlier / $6 settlement) remain unchanged.
 
+## Request and order-status recovery
+
+The entry, exit and balance-diagnostic clients share a thread-safe cooldown after
+any HTTP 429. Without a usable `Retry-After`, repeated limits back off for 2, 4,
+8, 16 and up to 30 seconds; a longer seconds/date header is honored. Exits can
+resume first, entries one second later, diagnostics two seconds later. Requests
+already in flight cannot be recalled. There is no lock held during HTTP and no
+automatic replay of order POSTs. A locally deferred request was never sent;
+only that new reservation may be released, with its audit record retained.
+Accepted or ambiguous orders keep their reservations and recovery IDs.
+
+Adjacent tier/funding checks reuse market snapshots for at most half a second,
+measured from request start. Mutating requests invalidate the cache. Cash is
+still read per attempt, and expiry, quote-floor, side and budget checks apply.
+
+When a submitted exit is absent from both order lookups, has no recoverable
+acknowledgement yet, or remains nonterminal, `TP_STATUS_PENDING` reports a
+persisted retry time. Status reads back off for 2, 4, 8 and up to 15 seconds.
+The pending ID survives restart; new entries remain paused, and no replacement
+exit is submitted until terminal status and remaining inventory are reconciled.
+An unresolved exit is retained for audit at market close. This handles delayed
+visibility conservatively; it does not assume every 404 will eventually resolve.
+
+API reference: [Kalshi rate limits](https://docs.kalshi.com/getting_started/rate_limits).
+
 ## Final-two-minute 97-cent-plus entry
 
 In minutes 13–15, the settlement route accepts the locked outcome at an ask >=97 cents and <100 cents, including fractional prices. It submits IOC at that observed ask and checks the quote again before submission; an upward move beyond the limit waits for the next cycle. The $6 reserve sizes whole contracts using price plus the existing 3-cent per-contract fee cushion: 6 at 97 cents, 5 above 97 cents. The overall cap remains $15. One attempt per market, side/inventory checks and monitor-health gating remain. Settlement lots at every eligible entry price retain a $1 target and are excluded from scalp exits. No fill or profit is guaranteed.

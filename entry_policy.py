@@ -72,7 +72,7 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
 
 def release_unsubmitted(intent, reason):
     """Release only an intent proven not to have created an exchange order."""
-    if reason != 'insufficient_balance':
+    if reason not in {'insufficient_balance', 'request_deferred'}:
         raise ValueError('Unverified release reason')
     if intent.get('order_id'):
         raise ValueError('Cannot release an accepted order reservation')
