@@ -180,6 +180,15 @@ def test_fixed_entry_validation_rejects_old_46_cent_price(monkeypatch):
     assert fake.entries == []
 
 
+@pytest.mark.parametrize("price", ["0.38", "0.39"])
+def test_retired_38_and_39_cent_tiers_cannot_open_new_inventory(monkeypatch, price):
+    from test_five_minute_exits import cycle_setup
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 180)
+    with pytest.raises(ValueError, match="fixed entry limit"):
+        bot.funded_entry(record, state, "TEST", "YES", D(price), closed, "regular")
+    assert fake.entries == []
+
+
 @pytest.mark.parametrize("on_read", [False, True])
 def test_rate_limit_respects_retry_after_for_reads_and_writes(tmp_path, on_read):
     exchange = Exchange()

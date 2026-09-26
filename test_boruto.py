@@ -133,4 +133,4 @@ def test_low_confidence_tie_reaches_regular_order_gateway(monkeypatch):
     record['signal']['base_confidence'] = 'LOW'
     bot.cycle(state)
     assert any(i['kind'] == 'regular' for i in record['entry_intents'])
-    assert bot.entry_price_allowed('LOW', D('0.39'))
+    assert bot.entry_price_allowed('LOW', D('0.45'))

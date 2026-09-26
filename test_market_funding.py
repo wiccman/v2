@@ -52,13 +52,13 @@ def test_missing_or_ambiguous_shard_never_uses_total(rows):
         balance_report({'balance_dollars': '50', 'balance_breakdown': rows}, exchange_index=2)
 
 
-@pytest.mark.parametrize('cash,expected', [('1.8615', 0), ('2.0499', 0), ('2.05', 1)])
+@pytest.mark.parametrize('cash,expected', [('1.8615', 0), ('2.3999', 0), ('2.40', 1)])
 def test_five_contract_order_requires_shard_cash_including_fee_reserve(monkeypatch, cash, expected):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     monkeypatch.setattr(fake, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': cash})
     events = []
     monkeypatch.setattr(bot, 'write_log', lambda event, *a, **k: events.append((event, k)))
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.38'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     assert len(fake.entries) == expected
     assert len(record['entry_intents']) == expected
     if expected:
@@ -76,27 +76,27 @@ def test_low_cash_wait_survives_restart_then_recovers_without_losing_budget(monk
         reads.append(ticker)
         return {'exchange_index': 2, 'cash_dollars': cash[0]}
     monkeypatch.setattr(fake, 'market_cash', funding)
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.38'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     state = copy.deepcopy(state)
     record = state['markets']['TEST']
     cash[0] = '25'
     clock[0] += 29
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.38'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     assert reads == ['TEST'] and not fake.entries and not record['entry_intents']
     clock[0] += 1
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.38'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     assert len(fake.entries) == 1 and fake.entries[0][1] == 5
 
 
 @pytest.mark.parametrize('failure', [TimeoutError('offline'), ValueError('bad cash')])
 def test_failed_cash_read_blocks_new_orders_without_touching_existing_reservations(monkeypatch, failure):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.38'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     saved = copy.deepcopy(record['entry_intents'])
     def fail(ticker):
         raise failure
     monkeypatch.setattr(fake, 'market_cash', fail)
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.39'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     assert record['entry_intents'] == saved and len(fake.entries) == 1
     assert bot.EXIT_MONITOR.healthy  # Funding waits do not suspend sell monitoring.
 
@@ -107,7 +107,7 @@ def test_slow_cash_lookup_cannot_buy_after_cutoff(monkeypatch):
         clock[0] = 1000000300
         return {'exchange_index': 2, 'cash_dollars': '25'}
     monkeypatch.setattr(fake, 'market_cash', slow)
-    bot.funded_entry(record, state, 'TEST', 'YES', D('.38'), closed, 'regular')
+    bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
     assert not fake.entries
 
 
