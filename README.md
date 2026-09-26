@@ -54,9 +54,9 @@ spot is sufficiently above the current strike. This early route operates before
 minute 2 by default; the other three routes start at minute 0.
 
 Earlier entry orders request exactly **5 contracts**, on opening, regular,
-limit-batch, historical, spot and late routes. All routes share a fixed **$25
+limit-batch, historical, spot and late routes. All routes share a fixed **$26
 allowance per 15-minute market**, including entry fee reserves. Of that, **$10 is
-reserved for the final-two-minute settlement entry**, leaving **$15 for all
+reserved for the final-two-minute settlement entry**, leaving **$16 for all
 earlier routes combined**. An earlier order is not
 submitted if five contracts plus the fee reserve will not fit the remaining
 allowance; the bot does not shrink it to a fractional order. Exchange partial
@@ -95,7 +95,7 @@ Important defaults:
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries request 5 contracts; final settlement entry requests 10 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $25 including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $26 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `0` (fixed) | Earliest new entry |

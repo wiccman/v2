@@ -21,7 +21,7 @@ if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
 ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "45:50"))
 # Apply the active tiers even when Railway still has an older pair setting.
-ENTRY_EXIT_PAIRS.update(parse_pairs("45:50,47:52,49:59,55:62,56:61,61:70"))
+ENTRY_EXIT_PAIRS.update(parse_pairs("45:55,48:53,51:56,53:58,56:61,59:64,62:67,64:69,67:72,70:80"))
 # Retired tiers must never be reintroduced by a stale environment variable.
 ENTRY_EXIT_PAIRS.pop(Decimal("0.38"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.39"), None)
@@ -318,6 +318,9 @@ def previous_market_bias(state, started):
 def entry_decision(record, side, price, kind):
     current_bias = (record.get("signal") or {}).get("prediction")
     previous_bias = record.get("previous_bias")
+    locked_side = record.get("trade_side")
+    if locked_side not in ("YES", "NO"):
+        locked_side = current_bias if current_bias in ("YES", "NO") else None
     allowed = current_bias in ("YES", "NO") and side == current_bias
     if kind == SETTLEMENT_KIND:
         allowed = side in ("YES", "NO") and Decimal(str(price)) == SETTLEMENT_PRICE
@@ -328,10 +331,14 @@ def entry_decision(record, side, price, kind):
         reason = "selected_side_opposes_current_bias"
     else:
         reason = kind
+    if allowed and locked_side and side != locked_side:
+        allowed = False
+        reason = "selected_side_opposes_market_lock"
     return allowed, {
         "selected_side": side,
         "current_bias": current_bias,
         "previous_bias": previous_bias,
+        "trade_side": locked_side,
         "entry_price": str(price),
         "entry_reason": reason,
         "decision": "ALLOW" if allowed else "SKIP",
@@ -727,7 +734,7 @@ def update_prediction(record, ticker, current, elapsed):
     return changed
 
 def settlement_entry(record, state, ticker, closed):
-    """One price-protected final-two-minute purchase, independent of bias."""
+    """One price-protected final-two-minute purchase on the market's locked side."""
     now = time.time()
     if not closed.timestamp() - 120 <= now < closed.timestamp():
         return
@@ -751,11 +758,22 @@ def settlement_entry(record, state, ticker, closed):
     if time.time() >= closed.timestamp():
         report("window_closed_during_quote_read")
         return
+    locked_side = record.get("trade_side")
+    if locked_side not in ("YES", "NO"):
+        locked_side = (record.get("signal") or {}).get("prediction")
     sides = [side for side, ask in asks.items() if ask == SETTLEMENT_PRICE]
     if len(sides) != 1:
         report("waiting_for_exact_97_ask")
         return
     side = sides[0]
+    if locked_side in ("YES", "NO") and side != locked_side:
+        report("97_on_opposite_market_lock", side=side, trade_side=locked_side)
+        return
+    # A settlement-only market can establish its side here. Once chosen, no
+    # later route may buy the complementary contract.
+    if locked_side is None:
+        record["trade_side"] = side
+        save_state(state)
     held = position(ticker)
     if (side == "YES" and held < 0) or (side == "NO" and held > 0):
         report("opposite_inventory", side=side, held=str(held))
@@ -819,6 +837,8 @@ def cycle(state):
         # required data has been verified. A failed lookup leaves no partial lock.
         record["signal"] = signal
         record["previous_bias"] = signal["previous_bias"]
+        if signal["prediction"] in ("YES", "NO"):
+            record["trade_side"] = signal["prediction"]
         save_state(state)
         write_log("BASE_SIGNAL", ticker, prediction=signal["prediction"],
                   confidence=signal["base_confidence"], details=json.dumps(signal))
@@ -926,7 +946,7 @@ def main():
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$10 reserved; quantity=10; hold to settlement; earlier allowance=$15", flush=True)
+    print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$10 reserved; quantity=10; hold to settlement; earlier allowance=$16", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
