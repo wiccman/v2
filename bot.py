@@ -7,6 +7,7 @@ from kalshi import KalshiClient, KalshiAPIError
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
+from boruto import BUILD as SIGNAL_BUILD, build_signal
 from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
 
 load_dotenv()
@@ -688,16 +689,25 @@ def cycle(state):
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
         return
     if record["signal"] is None:
-        signal = strike_ruler(prior_three(started) + [Decimal(str(market["floor_strike"]))], ABS_GAP_AVG)
-        record["signal"] = {"prediction": signal.prediction, "base_confidence": signal.confidence, "moves": [str(x) for x in signal.moves], "flipped": signal.flipped}
-        record["previous_bias"] = previous_market_bias(state, started)
-        write_log("BASE_SIGNAL", ticker, prediction=signal.prediction, confidence=signal.confidence, details=json.dumps(record["signal"])); save_state(state)
-    elif "previous_bias" not in record:
-        # Legacy in-flight records predate the official previous-bias field.
-        # Do not make a fresh network dependency partway through their cycle;
-        # every newly-created record above is reconstructed from Kalshi.
-        record["previous_bias"] = None
+        history = client.markets(series_ticker="KXBTC15M", status="settled", limit=100)
+        signal = build_signal(market, history, datetime.now(timezone.utc))
+        # Store both raw biases and the final decision together, only after all
+        # required data has been verified. A failed lookup leaves no partial lock.
+        record["signal"] = signal
+        record["previous_bias"] = signal["previous_bias"]
         save_state(state)
+        write_log("BASE_SIGNAL", ticker, prediction=signal["prediction"],
+                  confidence=signal["base_confidence"], details=json.dumps(signal))
+    elif record["signal"].get("build") != SIGNAL_BUILD:
+        # Existing locks and spending reservations survive the upgrade. The
+        # independent monitor continues exits; new Boruto entries start next market.
+        if not record.get("boruto_upgrade_wait_logged"):
+            record["boruto_upgrade_wait_logged"] = True
+            save_state(state)
+            write_log("STRATEGY_UPGRADE_WAIT", ticker, details="Saved older-build signal; Boruto starts on a new market")
+        return
+    if record["signal"]["prediction"] == "SKIP":
+        return
     if HISTORICAL_STRIKE_ENABLED and "historical_strikes" not in record:
         try:
             record["historical_strikes"] = [str(value) for value in prior_strikes(started)]
@@ -789,7 +799,7 @@ def main():
     global EXIT_MONITOR
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
-    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}", flush=True)
+    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     ignored = ("TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",

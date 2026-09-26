@@ -53,7 +53,7 @@ def cycle_setup(monkeypatch, elapsed):
     closed = datetime.fromtimestamp(1000000900, timezone.utc)
     fake = CycleClient()
     record = {"entry_intents": [], "entry_budget_legacy": False, "entry_cancel_at": 1000000360, "buys": 0, "last_buy": 0, "orders": [],
-              "signal": {"prediction": "YES", "base_confidence": "HIGH"},
+              "signal": {"build": bot.SIGNAL_BUILD, "prediction": "YES", "base_confidence": "HIGH"},
               "predictions": [{"ask": "0.70"}] * 3,
               "historical_strikes": ["100000"],
               "historical_last_spot": "100050",
@@ -95,7 +95,7 @@ def test_restart_cancels_legacy_entries_even_when_signal_lookup_fails(monkeypatc
                   dual_limit_cancel_at=1000000500, signal=None,
                   historical_strike_orders=[{"order_id": "hist-old", "cancel_at": 1000000800}])
     fake.resting = [{"order_id": oid} for oid in ["regular-old", "spot-old", "dual-old", "hist-old"]]
-    monkeypatch.setattr(bot, "prior_three", lambda started: (_ for _ in ()).throw(RuntimeError("offline")))
+    monkeypatch.setattr(fake, "markets", lambda **kw: (_ for _ in ()).throw(RuntimeError("offline")))
     with pytest.raises(RuntimeError, match="offline"):
         bot.cycle(state)
     assert set(fake.cancelled) == {"regular-old", "spot-old", "dual-old", "hist-old"}
