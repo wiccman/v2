@@ -39,12 +39,12 @@ ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **L
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MARKET_BUDGET = market_budget()
-CANCEL_AFTER = 360
+CANCEL_AFTER = 480
 BUDGET = Decimal(os.getenv("ENTRY_BUDGET_DOLLARS", "0.77"))
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
-START = seconds_from_minutes(os.getenv("ENTRY_START_MINUTE", "2"))
-END = min(seconds_from_minutes(os.getenv("ENTRY_END_MINUTE", "5")), 300)
+START = 0
+END = 480  # Fixed eight-minute entry window, including stale Railway overrides.
 PREDICTION_MINUTES = (2, 4, 6)
 PREDICTION_GRACE_SECONDS = 15
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
@@ -820,8 +820,8 @@ def main():
     for name in ignored:
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; paired prices apply and no stop-loss is active", flush=True)
-    if seconds_from_minutes(os.getenv("ENTRY_END_MINUTE", "5")) > END:
-        print("CONFIG_CAPPED: entry cutoff is five minutes", flush=True)
+    if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
+        print("CONFIG_IGNORED: regular entry window is fixed at minutes 0 through 8", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:
