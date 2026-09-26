@@ -66,9 +66,9 @@ spot is sufficiently above the current strike. This early route operates before
 minute 2 by default; the other three routes start at minute 0.
 
 Earlier entry orders request exactly **5 contracts**, on opening, regular,
-limit-batch, historical, spot and late routes. All routes share a fixed **$26
-allowance per 15-minute market**, including entry fee reserves. Of that, **$10 is
-reserved for the final-two-minute settlement entry**, leaving **$16 for all
+limit-batch, historical, spot and late routes. All routes share a fixed **$15
+allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
+reserved for the final-two-minute settlement entry**, leaving **$9 for all
 earlier routes combined**. An earlier order is not
 submitted if five contracts plus the fee reserve will not fit the remaining
 allowance; the bot does not shrink it to a fractional order. Exchange partial
@@ -107,7 +107,7 @@ Important defaults:
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries request 5 contracts; final settlement entry requests 10 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $26 including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $15 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `0` (fixed) | Earliest new entry |
@@ -168,7 +168,7 @@ are performed. Funding the market's shard is a separate account action.
 
 `ENTRY_WAIT_MARKET_CASH` logs the shard, its available cash and the required
 amount. `ENTRY_CASH_UNAVAILABLE` means the read could not be verified, not a zero
-balance. These checks preserve five-contract sizing and the $10 settlement
+balance. These checks preserve five-contract sizing and the $6 settlement
 allowance. They cannot guarantee acceptance if funds change before submission.
 
 Cancellation checks terminal status first. An already executed, canceled or

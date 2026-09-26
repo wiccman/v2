@@ -158,22 +158,22 @@ def test_orders_follows_every_page(monkeypatch):
 
 
 @pytest.mark.parametrize("legacy", [None, "4", "6", "10", "100"])
-def test_fixed_twenty_six_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
+def test_fixed_fifteen_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
     if legacy is None:
         monkeypatch.delenv("MARKET_BUDGET_DOLLARS", raising=False)
     else:
         monkeypatch.setenv("MARKET_BUDGET_DOLLARS", legacy)
-    assert entry_policy.market_budget() == D("26")
+    assert entry_policy.market_budget() == D("15")
 
 
-def test_twenty_six_dollar_allowance_is_shared_and_survives_restart():
+def test_fifteen_dollar_allowance_is_shared_and_survives_restart():
     record = {}
     for price in ("0.45", "0.47", "0.49", "0.52", "0.55", "0.56", "0.61", "0.73", "0.85"):
         entry_policy.reserve(record, "YES", D(price), D("2"), entry_policy.market_budget(), 360, "test")
     while entry_policy.reserve(record, "YES", D("0.45"), D("0.01"), entry_policy.market_budget(), 360, "test"):
         pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("13.90") < spent <= D("16")
+    assert D("6.60") < spent <= D("9")
     assert all(D(i["quantity"]) == 5 for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
@@ -272,9 +272,9 @@ def test_each_entry_route_requests_five_despite_old_dollar_budget(monkeypatch, k
 
 
 def test_cap_boundary_never_shrinks_quantity_or_resets_old_spending():
-    record = {"entry_intents": [{"quantity": "0.87", "reserved_dollars": "12.55"}]}
+    record = {"entry_intents": [{"quantity": "0.87", "reserved_dollars": "6.55"}]}
     assert entry_policy.reserve(record, "YES", D("0.45"), D("0.01"), D("25"), 480, "regular")["quantity"] == "5"
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("14.95")
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("8.95")
     assert entry_policy.reserve(record, "YES", D("0.45"), D("100"), D("25"), 480, "regular") is None
     record = {"entry_intents": [{"reserved_dollars": "13.61"}]}
     assert entry_policy.reserve(record, "YES", D("0.45"), D("100"), D("25"), 480, "regular") is None

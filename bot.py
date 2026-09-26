@@ -946,7 +946,7 @@ def main():
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$10 reserved; quantity=10; hold to settlement; earlier allowance=$16", flush=True)
+    print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$6 reserved; quantity=6; hold to settlement; earlier allowance=$9", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
