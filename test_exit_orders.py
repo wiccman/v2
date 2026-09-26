@@ -8,9 +8,9 @@ from kalshi import KalshiClient
 def test_regular_entry_prices_for_both_confidences():
     for confidence in ("HIGH", "MODERATE"):
         assert not bot.entry_price_allowed(confidence, Decimal("0.32"))
-        for price in ("0.45", "0.47", "0.49", "0.55", "0.56"):
+        for price in ("0.45", "0.48", "0.51", "0.53", "0.56"):
             assert bot.entry_price_allowed(confidence, Decimal(price))
-        for price in ("0.24", "0.26", "0.30", "0.38", "0.70"):
+        for price in ("0.24", "0.26", "0.30", "0.38", "0.71"):
             assert not bot.entry_price_allowed(confidence, Decimal(price))
     assert not bot.entry_price_allowed("NONE", Decimal("0.32"))
 
