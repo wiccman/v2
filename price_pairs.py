@@ -1,5 +1,5 @@
 """Entry limits and their durable take-profit targets (outcome cents)."""
-from decimal import Decimal as D
+from decimal import Decimal as D, ROUND_CEILING
 
 
 def parse_pairs(value="39:46"):
@@ -19,12 +19,12 @@ def parse_pairs(value="39:46"):
     return dict(sorted(pairs.items()))
 
 
-def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
-    """Replay fills into target lots; verify them against exchange net holdings.
+def _remaining_lots(fills, entry_orders, exit_orders, held, ticker):
+    """Replay verified fills, retaining the identity of every unsold entry lot.
 
-    Bot exits consume their assigned target. Other reductions (manual sales and
-    opposite-side buys) consume oldest inventory first. Unknown new inventory
-    remains unmanaged. No average-cost target or inferred fill is used.
+    New exits consume their saved fill allocations; historical paired exits
+    consume their original fixed target. Manual reductions use FIFO. Neither
+    a changed average nor a restart can reassign an already submitted exit.
     """
     from datetime import datetime
 
@@ -71,7 +71,20 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
             raise ValueError("Fill ordering is ambiguous at a shared timestamp")
         events.append((timestamp, key, fill.get("order_id"), sign, quantity))
 
-    lots = []
+    lots, allocated, consumed = [], {}, {}
+    for order_id, order in exit_orders.items():
+        if "allocations" not in order:
+            continue
+        allocation = {}
+        for item in order["allocations"]:
+            key, quantity = item["fill_id"], D(item["quantity"])
+            if key in allocation or not quantity.is_finite() or quantity <= 0:
+                raise ValueError("Invalid saved exit allocation")
+            allocation[key] = quantity
+        if not allocation:
+            raise ValueError("Empty saved exit allocation")
+        allocated[order_id] = allocation
+        consumed[order_id] = {}
     for _, key, order_id, sign, quantity in sorted(events):
         entry = entry_orders.get(order_id)
         exit_order = exit_orders.get(order_id)
@@ -79,31 +92,104 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
             raise ValueError("Entry fill direction does not match its saved intent")
         if exit_order and sign != (-1 if exit_order["side"] == "YES" else 1):
             raise ValueError("Exit fill direction does not match its saved intent")
-        # A known paired exit can reduce only that target's remaining lots.
-        # Retired global-target orders are treated as ordinary FIFO reductions.
         targeted = exit_order and exit_order.get("paired")
         for lot in lots:
             if lot["sign"] == sign or lot["quantity"] == 0:
                 continue
-            if targeted and lot["target"] != D(exit_order["target"]):
+            available = lot["quantity"]
+            if order_id in allocated:
+                remaining = (allocated[order_id].get(lot["fill_id"], D(0))
+                             - consumed[order_id].get(lot["fill_id"], D(0)))
+                available = min(available, remaining)
+            elif targeted and lot["target"] != D(exit_order["target"]):
                 continue
-            reduced = min(quantity, lot["quantity"])
+            reduced = min(quantity, available)
             lot["quantity"] -= reduced
             quantity -= reduced
+            if order_id in allocated:
+                used = consumed[order_id]
+                used[lot["fill_id"]] = used.get(lot["fill_id"], D(0)) + reduced
             if not quantity:
                 break
         if quantity:
             if exit_order:
                 raise ValueError("Exit fill exceeds its attributable inventory")
             target = D(entry["target"]) if entry else None
-            lots.append(dict(fill_id=key, sign=sign, quantity=quantity, target=target))
+            lots.append(dict(fill_id=key, sign=sign, quantity=quantity, target=target,
+                             entry=entry, fill=seen[key]))
     lots = [lot for lot in lots if lot["quantity"]]
     reconstructed = sum((lot["quantity"] * lot["sign"] for lot in lots), D(0))
     if reconstructed != D(held):
         raise ValueError("Fills and position disagree; waiting for consistent exchange data")
     if any(lot["target"] is None for lot in lots):
         raise ValueError("Untracked inventory has no verified paired exit target")
+    return lots
+
+
+def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
+    """Original fixed-pair accounting, also used to verify legacy receipts."""
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker)
     buckets = {}
     for lot in lots:
         buckets[lot["target"]] = buckets.get(lot["target"], D(0)) + lot["quantity"] * lot["sign"]
     return dict(sorted(buckets.items()))
+
+
+def _outcome_cost(fill, sign):
+    """Read trade prices, excluding fees, from the exchange fill payload."""
+    prices = {}
+    modern = any(fill.get(side + "_price_dollars") is not None for side in ("yes", "no"))
+    for side in ("yes", "no"):
+        if fill.get(side + "_price_dollars") is not None:
+            price = D(str(fill[side + "_price_dollars"]))
+        elif not modern and fill.get(side + "_price") is not None:
+            price = D(str(fill[side + "_price"])) / 100
+        else:
+            continue
+        if not price.is_finite() or not 0 < price < 1:
+            raise ValueError("Invalid entry fill price")
+        prices[side] = price
+    if not prices:
+        raise ValueError("Entry fill price unavailable; cannot calculate take profit")
+    if len(prices) == 2 and prices["yes"] + prices["no"] != 1:
+        raise ValueError("Conflicting YES/NO entry fill prices")
+    side, other = ("yes", "no") if sign > 0 else ("no", "yes")
+    return prices[side] if side in prices else 1 - prices[other]
+
+
+def fill_cost_inventory(fills, entry_orders, exit_orders, held, ticker):
+    """Return quantities and durable exit plans from remaining actual fill costs.
+
+    Share a weighted average only among lots with the same profit increment.
+    Sales consume the allocated lots FIFO, and sold cost is excluded on the next
+    pass. Whole-cent ceilings preserve the gross increment without requiring a
+    quote/market lookup; whole cents are valid on Kalshi's current price grids.
+    """
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker)
+    groups, buckets, plans = {}, {}, {}
+    for lot in lots:
+        if lot["target"] == 1:
+            buckets[D(1)] = buckets.get(D(1), D(0)) + lot["sign"] * lot["quantity"]
+            continue
+        price = D(lot["entry"]["price"])
+        margin = lot["target"] - price
+        if not price.is_finite() or not 0 < price < lot["target"] < 1:
+            raise ValueError("Invalid saved entry profit increment")
+        cost = _outcome_cost(lot["fill"], lot["sign"])
+        if cost > price:
+            raise ValueError("Entry fill price exceeds its saved limit")
+        lot["cost"] = cost
+        groups.setdefault((lot["sign"], margin), []).append(lot)
+    for (sign, margin), members in sorted(groups.items()):
+        quantity = sum((lot["quantity"] for lot in members), D(0))
+        cost = sum((lot["quantity"] * lot["cost"] for lot in members), D(0)) / quantity
+        target = (cost + margin).quantize(D("0.01"), rounding=ROUND_CEILING)
+        if not 0 < target < 1:
+            raise ValueError("Calculated take-profit target is outside tradable prices")
+        buckets[target] = buckets.get(target, D(0)) + sign * quantity
+        plan = plans.setdefault(target, {"allocations": [], "cost_groups": []})
+        plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
+                                   for lot in members)
+        plan["cost_groups"].append({"average_fill_cost": str(cost), "quantity": str(quantity),
+                                    "profit_increment": str(margin)})
+    return dict(sorted(buckets.items())), plans

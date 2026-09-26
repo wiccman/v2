@@ -48,7 +48,7 @@ def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed,
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('price,kind', [('.52', 'opening_bias'), ('.67', 'regular')])
+@pytest.mark.parametrize('price,kind', [('.52', 'opening_bias'), ('.59', 'regular')])
 def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     fake.held = D('0')

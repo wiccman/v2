@@ -219,7 +219,7 @@ def test_adjacent_tier_checks_reuse_quote_but_cash_remains_fresh(monkeypatch):
     monkeypatch.setattr(bot, 'client', clients['entry'])
     list(bot.paired_entries(record, state, 'TEST', 'YES', closed, 'regular'))
     assert sum('/markets/' in url for url in calls) == 1
-    assert sum('/portfolio/balance' in url for url in calls) == sum(p < D('.70') for p in bot.ENTRY_EXIT_PAIRS)
+    assert sum('/portfolio/balance' in url for url in calls) == sum(p < D('.60') for p in bot.ENTRY_EXIT_PAIRS)
     assert not record['entry_intents']
 
 

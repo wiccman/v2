@@ -27,7 +27,8 @@ New entries follow fixed price-based windows within each 15-minute market:
 | --- | --- |
 | 52¢→60¢ opening entry | 0:00–2:00 |
 | New 57¢→62¢ opening entry | 0:00–2:00 |
-| 45–67¢ regular tiers | 0:00–6:00 |
+| 45–59¢ regular tiers | 0:00–6:00 |
+| 60–69¢ regular tiers (currently 62¢/64¢/67¢) | 5:00–6:00 |
 | New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
@@ -41,15 +42,22 @@ or ambiguous attempt cannot be duplicated after restart.
 The 75¢ tier is the only new entry available from 6:00 to 8:00. Other 70¢+
 limits wait until 8:00, and ordinary limits below 70¢ stop at 6:00. The shared
 gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
+Every route also blocks buy limits of 60¢ or higher before 5:00, even when the
+current ask is cheaper. The later 75¢, 70¢, 73¢/85¢ and settlement windows still
+apply. Buy logs identify each order's tier and batch separately; the batch number
+is not an order count. Regular batches can repeat after the configured interval
+while allowance remains. The earlier allowance is not replenished by sales.
 Funds, quote checks and existing batch limits still apply. Exit monitoring
 continues until market close.
 
 ## Entries, exits and budgets
 
 All routes use these default outcome-price pairs, configurable through
-`ENTRY_EXIT_PAIRS_CENTS`:
+`ENTRY_EXIT_PAIRS_CENTS`. Each pair defines an entry limit and a **gross profit
+increment** (second price minus first). The exit column below assumes a fill
+at the entry limit; cheaper fills now produce lower exit targets.
 
-| Entry limit | Exit target |
+| Entry limit | Exit if filled at the limit |
 | --- | --- |
 | 45¢ | 55¢ |
 | 48¢ | 53¢ |
@@ -96,13 +104,44 @@ can leave part of the allowance unused. Exit fees are separate.
 additional money or count each tier as a separate purchase.
 
 An independent worker reconciles fills and net inventory and submits reduce-only
-immediate-or-cancel exits at the paired target or better. It retries remaining
+immediate-or-cancel exits at the calculated target or better. It retries remaining
 holdings after partial fills. These are **bot-managed exits**, not resting exchange
 brackets. They require the process, API and executable liquidity to be available.
 There is no general stop-loss. The explicit 97¢ settlement transition may close
 opposite inventory at a loss, as described below. Opposite-side fills net against existing holdings;
 the monitor does not assume independent YES and NO positions. Inconsistent or
 ambiguous fill accounting pauses new entries until reconciliation succeeds.
+
+### Take profit follows actual fills
+
+The live worker groups remaining shares by their saved profit increment, then
+sets the target to their quantity-weighted **actual fill cost plus that increment**.
+It rounds up to a whole cent, so a 57.3¢ average with a 5¢ increment targets 63¢.
+A 57¢ fill still targets 62¢; a 75¢ fill targets 83¢; a minute-8 70¢ fill targets
+76¢. Entry and exit fees are excluded from this gross price increment.
+
+Each consistent fill/position snapshot recalculates both target and full remaining
+quantity. For example, five shares at 57¢ plus five at 47¢, both using the 5¢
+rule, produce ten shares averaging 52¢ and a 57¢ target. Different increments
+retain separate averages. The settlement position remains held to settlement.
+
+Before submitting an exit, the worker saves the exact entry fill IDs and quantities
+it covers. Partial exits consume those allocations FIFO; sold shares are removed
+from the next average. Manual reductions also consume FIFO. Pending submissions
+must reconcile before another exit can use that inventory. This survives partial
+fills, lost acknowledgements and restarts without selling a share twice.
+
+On upgrade, existing recorded exit orders replay against their original fixed
+targets. Remaining verified scalp inventory then adopts fill-based pricing using
+its saved pair's profit increment, including older entry intents. Missing,
+inconsistent or over-limit fill prices pause the worker instead of substituting
+a quote, buy limit or displayed account average. `TP_ARMED` logs include the
+average fill cost, profit increment, quantity and rounded target.
+
+Price inputs follow Kalshi's [fill payload](https://docs.kalshi.com/api-reference/portfolio/get-fills).
+Whole-cent rounding uses prices valid across the documented
+[price grids](https://docs.kalshi.com/getting_started/fixed_point_migration),
+without introducing a quote lookup into exit monitoring.
 
 ## Configuration and operation
 
@@ -137,13 +176,13 @@ block. For a genuinely new installation with no previous orders or positions,
 explicitly create `state.json` containing `{"markets": {}}` on the mounted volume
 before enabling trading. Preserve the adjacent take-profit receipt file too.
 
-Existing 25¢-tier inventory retains its recorded 31¢ exit target after this
-price change. Existing 32¢ inventory retains its 39¢ target; new regular entries use the pairs listed above.
-Existing 38¢ and 39¢ inventory retains its 43¢ and 46¢ exit target respectively,
-but those two tiers are retired and cannot be reintroduced by an old Railway setting.
+Existing 25¢, 32¢, 38¢ and 39¢ inventory retains its original pair for historical
+exit attribution and profit-increment calculation. These tiers are retired and
+cannot be reintroduced by an old Railway setting.
 The retired 32¢ regular tier is ignored even if an old environment setting lists it.
-Existing 35¢ inventory retains its 42¢ exit. Stale environment settings cannot
-restore new 35¢ buys, extend 57¢ buys past minute 2, or change the fixed new targets.
+Existing 35¢ inventory retains the 7¢ increment from its recorded 35¢→42¢ pair.
+Stale environment settings cannot restore new 35¢ buys, extend 57¢ buys past
+minute 2, or change the new rules' profit increments.
 
 Legacy strategy records remain readable only to prevent adopting inventory that
 belongs to an archived strategy. The old execution module and its configuration

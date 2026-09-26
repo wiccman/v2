@@ -18,17 +18,18 @@ from pathlib import Path
 
 from kalshi import KalshiAPIError
 from request_coordinator import RequestDeferred, retry_delay
-from price_pairs import paired_inventory
+from price_pairs import paired_inventory, fill_cost_inventory
 
 TERMINAL = {"executed", "canceled", "expired"}
 
 
 class TakeProfitMonitor:
     def __init__(self, client, read_entries, path, target=Decimal("0.45"),
-                 poll=1.0, clock=time.time, emit=None, pairs=None):
+                 poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False):
         self.client, self.read_entries = client, read_entries
         self.path, self.target = Path(path), Decimal(target)
         self.pairs = pairs
+        self.fill_cost_targets = fill_cost_targets
         self.poll, self.clock = max(1.0, float(poll)), clock
         self.emit = emit or (lambda event, **data: print(json.dumps({
             "event": event, "time_utc": datetime.now(timezone.utc).isoformat(), **data
@@ -159,6 +160,8 @@ class TakeProfitMonitor:
                 "side": intent["side"], "target": intent["target"],
                 "paired": intent.get("paired", False), "filled": str(filled),
                 "purpose": intent.get("purpose", "take_profit")}
+            if "allocations" in intent:
+                ledger["exit_orders"][order["order_id"]]["allocations"] = intent["allocations"]
         ledger.pop("pending")
         self.save()
         return True
@@ -197,7 +200,8 @@ class TakeProfitMonitor:
                 if saved_target != target and not (previous_target == saved_target and
                     item.get("entry_execution_version", 3) < 4):
                     raise ValueError("Saved entry target conflicts with configured pair")
-                entries[order_id] = {"side": item["side"], "target": str(saved_target)}
+                entries[order_id] = {"side": item["side"], "target": str(saved_target),
+                                     "price": str(price)}
         fills = self.client.all_fills(ticker)
         exits = ledger.get("exit_orders", {})
         # An order status can update before its fills endpoint. Do not reuse the
@@ -208,7 +212,9 @@ class TakeProfitMonitor:
                             for f in unique.values() if f.get("order_id") == order_id), Decimal(0))
             if observed != Decimal(order["filled"]):
                 raise ValueError("Confirmed exit is not yet consistent with fill history")
-        return paired_inventory(fills, entries, exits, held, ticker)
+        if self.fill_cost_targets:
+            return fill_cost_inventory(fills, entries, exits, held, ticker)
+        return paired_inventory(fills, entries, exits, held, ticker), {}
 
     def _market(self, ticker, record, ledger):
         close = record.get("close_timestamp")
@@ -267,7 +273,8 @@ class TakeProfitMonitor:
                 # attribution allows this close to span all old entry tiers.
                 return self._submit(ticker, ledger, close, held, bid,
                                     paired=False, purpose="settlement_switch")
-        buckets = self._paired_buckets(ticker, record, ledger, held) if self.pairs is not None else {self.target: held}
+        buckets, plans = (self._paired_buckets(ticker, record, ledger, held)
+                          if self.pairs is not None else ({self.target: held}, {}))
         if switching:
             ledger["settlement_ready"] = {"side": switch["side"], "checked_at": self.clock(),
                                            "close_timestamp": float(close)}
@@ -278,7 +285,7 @@ class TakeProfitMonitor:
                 self.emit("TP_POSITION_FLAT", ticker=ticker)
             return True
         # Rotate across occupied targets: an unfilled low-price IOC cannot
-        # starve the other tier. Quantities come from fills, never average cost.
+        # starve the other tier. Quantities always come from verified fills.
         # A target of $1 is reserved for held settlement inventory, never an IOC exit.
         targets = [target for target in buckets if target < Decimal("1")]
         if not targets:
@@ -288,14 +295,20 @@ class TakeProfitMonitor:
         previous = Decimal(ledger.get("last_target", "-1"))
         target = next((t for t in targets if t > previous), targets[0])
         quantity = buckets[target]
-        return self._submit(ticker, ledger, close, quantity, target, paired=self.pairs is not None)
+        return self._submit(ticker, ledger, close, quantity, target,
+                            paired=self.pairs is not None, plan=plans.get(target))
 
-    def _submit(self, ticker, ledger, close, quantity, target, *, paired, purpose="take_profit"):
+    def _submit(self, ticker, ledger, close, quantity, target, *, paired, purpose="take_profit", plan=None):
         if self.clock() >= float(close):
             return False
         side = "YES" if quantity > 0 else "NO"
         prefix = "SETTLEMENT_CLOSE" if purpose == "settlement_switch" else "TP"
         armed = {"side": side, "quantity": str(abs(quantity)), "target": str(target)}
+        if plan is not None:
+            allocated = sum((Decimal(item["quantity"]) for item in plan["allocations"]), Decimal(0))
+            if allocated != abs(quantity):
+                raise ValueError("Exit allocation does not cover its requested quantity")
+            armed["cost_groups"] = plan["cost_groups"]
         if ledger.get("armed") != armed:
             ledger["armed"] = armed
             self.save()
@@ -304,6 +317,8 @@ class TakeProfitMonitor:
         # One net-position exit covers all entry routes without double allocation.
         intent = {**armed, "client_id": str(uuid.uuid4()), "created_at": self.clock(),
                   "paired": paired, "purpose": purpose}
+        if plan is not None:
+            intent["allocations"] = plan["allocations"]
         ledger["pending"] = intent
         ledger["last_target"] = str(target)
         self.save()  # No submission unless its recovery ID is durable.
