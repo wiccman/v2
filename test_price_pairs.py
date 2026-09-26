@@ -29,7 +29,7 @@ class PairExchange(Exchange):
         order_id = f"entry-{len(self.intents)}"
         self.intents.append(dict(order_id=order_id, client_id=order_id + "-client",
             side="YES" if sign > 0 else "NO", price=str(price),
-            exit_target=str(parse_pairs()[D(price)])))
+            exit_target=str(parse_pairs("32:39,39:46")[D(price)])))
         self.remote[order_id] = dict(order_id=order_id, client_order_id=order_id + "-client",
                                     status="executed", fill_count_fp=str(quantity))
         self.held += sign * D(quantity)
@@ -58,7 +58,7 @@ def paired_monitor(tmp_path, exchange, path=None):
     entries = {"markets": {"T": {"close_timestamp": 1900, "entry_intents": exchange.intents}}}
     events = []
     svc = TakeProfitMonitor(exchange, lambda: entries, path or tmp_path / "pairs.json",
-        pairs=parse_pairs(), clock=lambda: 1000, emit=lambda event, **d: events.append((event, d)))
+        pairs=parse_pairs("32:39,39:46"), clock=lambda: 1000, emit=lambda event, **d: events.append((event, d)))
     return svc, entries, events
 
 
@@ -216,11 +216,11 @@ def test_pair_target_is_saved_before_entry_post_and_cash_is_split(monkeypatch):
     def checked(ticker, side, quantity, price, *args, **kwargs):
         intent = saved[-1]["markets"]["TEST"]["entry_intents"][-1]
         assert D(intent["exit_target"]) == {D("0.32"): D("0.39"), D("0.39"): D("0.46")}[price]
-        assert price * quantity <= bot.BUDGET / 2
+        assert price * quantity <= bot.BUDGET
         return place(ticker, side, quantity, price, *args, **kwargs)
     monkeypatch.setattr(e, "place_entry", checked)
     result = list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
-    assert [p for p, _, _ in result] == [D("0.32"), D("0.39")]
+    assert [p for p, _, _ in result] == [D("0.39")]
     assert sum(p * q for p, _, q in result) <= bot.BUDGET
     bot.reconcile_entries(state)
     assert not e.cancelled  # A 39-cent order is a supported price, not a legacy mismatch.
@@ -330,3 +330,21 @@ def test_no_entry_fill_uses_book_side_when_action_is_sell():
             "book_side": "ask", "outcome_side": "no", "action": "sell", "order_id": "entry"}
     entries = {"entry": {"side": "NO", "target": "0.39"}}
     assert paired_inventory([fill], entries, {}, D("-1"), "T") == {D("0.39"): D("-1")}
+
+
+def test_removed_32_cent_inventory_keeps_original_exit(tmp_path):
+    e = PairExchange(bid='0.39')
+    e.buy('0.32', '2')
+    entries = {'markets': {'T': {'close_timestamp': 1900, 'entry_intents': e.intents}}}
+    m = TakeProfitMonitor(e, lambda: entries, tmp_path / 'retired.json',
+        pairs=bot.ALL_ENTRY_EXIT_PAIRS, clock=lambda: 1000, emit=lambda *a, **k: None)
+    m.run_once()
+    assert m.healthy and e.held == 0
+    assert e.submissions[0]['price'] == '0.3900'
+
+
+def test_retired_entry_is_rejected_before_submission(monkeypatch):
+    e, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    with pytest.raises(ValueError, match='configured fixed entry limit'):
+        bot.funded_entry(record, state, 'TEST', 'YES', D('0.32'), closed, 'regular')
+    assert not e.entries and not record['entry_intents']

@@ -156,9 +156,9 @@ def test_signal_entries_have_priority_and_dual_batch_shares_one_budget(monkeypat
     monkeypatch.setattr(bot, 'BUDGET', D('2'))
     bot.cycle(state)
     intents = record['entry_intents']
-    assert [i['kind'] for i in intents[:2]] == ['regular', 'regular']
+    assert [i['kind'] for i in intents[:1]] == ['regular']
     dual = [i for i in intents if i['kind'] == 'dual']
-    assert len(dual) == 2
+    assert len(dual) == 1
     assert sum(D(i['quantity']) * D(i['price']) for i in dual) <= D('2')
     assert sum(D(i['reserved_dollars']) for i in intents) <= D('5')
 
@@ -212,3 +212,16 @@ def test_opening_bias_posts_one_side_at_52_and_cancels_at_two_minutes(monkeypatc
     bot.reconcile_entries(state, now_timestamp=1000000120)
     assert fake.cancelled == [order_id]
     assert intent["entry_closed"] is True
+
+
+def test_new_prediction_does_not_fetch_previous_bias(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    record['signal'] = None
+    monkeypatch.setattr(bot, 'prior_three', lambda started: [D('99997'), D('99998'), D('99999')])
+    def unavailable(*args):
+        raise AssertionError('Previous bias must not be required')
+    monkeypatch.setattr(bot, 'previous_market_bias', unavailable)
+    bot.cycle(state)
+    assert record['signal']['prediction'] == 'YES'
+    assert fake.entries
+    assert all(i['price'] == '0.39' for i in record['entry_intents'])
