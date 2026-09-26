@@ -5,10 +5,11 @@ import bot
 from kalshi import KalshiClient
 
 
-def test_entry_limit_is_39_cents_for_both_confidences():
+def test_regular_entry_prices_for_both_confidences():
     for confidence in ("HIGH", "MODERATE"):
         assert not bot.entry_price_allowed(confidence, Decimal("0.32"))
-        assert bot.entry_price_allowed(confidence, Decimal("0.39"))
+        for price in ("0.38", "0.39", "0.49", "0.55", "0.56", "0.61"):
+            assert bot.entry_price_allowed(confidence, Decimal(price))
         for price in ("0.24", "0.26", "0.30", "0.47", "0.70"):
             assert not bot.entry_price_allowed(confidence, Decimal(price))
     assert not bot.entry_price_allowed("NONE", Decimal("0.32"))
@@ -43,12 +44,12 @@ def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
-    assert [entry[1] for entry in fake.entries] == ["YES"]
-    assert [entry[2] for entry in fake.entries] == [Decimal("1.97")]
-    assert [entry[3] for entry in fake.entries] == [Decimal("0.39")]
+    assert [entry[1] for entry in fake.entries] == ["YES"] * 6
+    assert [entry[2] for entry in fake.entries] == [Decimal(q) for q in ("0.33", "0.32", "0.26", "0.23", "0.22", "0.21")]
+    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.38", "0.39", "0.49", "0.55", "0.56", "0.61")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.BUDGET
     assert all(entry[4] == 1460 for entry in fake.entries)
-    assert record["dual_limit_orders"] == ["dual-yes-0.39"]
+    assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in bot.ENTRY_EXIT_PAIRS]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
@@ -93,7 +94,10 @@ def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(mon
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
-    assert fake.entries == [("MARKET", "NO", Decimal("1.97"), Decimal("0.39"), 1460)]
+    assert len(fake.entries) == 6
+    assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1460 for e in fake.entries)
+    assert [e[3] for e in fake.entries] == list(bot.ENTRY_EXIT_PAIRS)
+    assert sum(e[2] * e[3] for e in fake.entries) <= bot.BUDGET
     assert record["historical_triggered_strikes"] == ["100000"]
     assert record["historical_strike_orders"][0]["strike"] == "100000"
 

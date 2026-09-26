@@ -34,7 +34,7 @@ def test_all_entry_routes_share_six_dollars_and_restart_does_not_refund(monkeypa
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
     assert D("5.99") < spent <= D("6")
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("6")
-    assert len(fake.entries) == 3
+    assert len(fake.entries) == 12
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:

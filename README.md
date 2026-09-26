@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.2 Boruto
+# Strike Ruler — 2.0.3 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -38,21 +38,26 @@ All routes use these default outcome-price pairs, configurable through
 
 | Entry limit | Exit target |
 | --- | --- |
+| 38¢ | 43¢ |
 | 39¢ | 46¢ |
+| 49¢ | 59¢ |
+| 55¢ | 62¢ |
+| 56¢ | 61¢ |
+| 61¢ | 70¢ |
 
 During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same per-trigger budget and market allowance as every other route.
 
 Regular bias-based entries run first when a valid prediction snapshot is available.
-An optional dual batch submits both tiers on both YES and NO. Historical-strike
+An optional limit batch submits the regular tiers only on the current bias side. Historical-strike
 touches use the side of approach; the optional early spot trigger buys YES when
 spot is sufficiently above the current strike. This early route operates before
 minute 2 by default; `ENTRY_START_MINUTE` applies to the other three routes.
 
 `ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular, historical
-and spot triggers use the remaining 39¢ tier. A dual batch splits the same amount
+and spot triggers split their trigger budget across all six regular tiers. A dual batch splits the same amount
 across its configured attempts, rather than receiving a separate allowance
-per side. All routes share `MARKET_BUDGET_DOLLARS`, hard-capped at $5 per market.
-The current Railway override is $2 per trigger; the source default is $0.77.
+per side. All routes share `MARKET_BUDGET_DOLLARS`, hard-capped at $6 per market.
+The source default is $0.77 per trigger; Railway can override it.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
 saved before submission. Rejections, cancellations, partial fills, sales and
@@ -80,7 +85,7 @@ Important defaults:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ENTRY_EXIT_PAIRS_CENTS` | `39:46` | Entry limits and corresponding exits |
+| `ENTRY_EXIT_PAIRS_CENTS` | `38:43,39:46,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
 | `ENTRY_BUDGET_DOLLARS` | `0.77` | Principal per trigger or entire dual batch |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
@@ -103,7 +108,7 @@ explicitly create `state.json` containing `{"markets": {}}` on the mounted volum
 before enabling trading. Preserve the adjacent take-profit receipt file too.
 
 Existing 25¢-tier inventory retains its recorded 31¢ exit target after this
-price change. Existing 32¢ inventory retains its 39¢ target; new regular entries use 39¢→46¢.
+price change. Existing 32¢ inventory retains its 39¢ target; new regular entries use the six pairs listed above.
 The retired 32¢ regular tier is ignored even if an old environment setting lists it.
 
 Legacy strategy records remain readable only to prevent adopting inventory that
@@ -148,3 +153,7 @@ and aggregate cash alone does not establish that a specific order is fundable.
 The 2.0.1 signal identifier remains unchanged so this diagnostic-only release does
 not invalidate existing signals. After deployment, the balance line is visible
 from a phone in v2's deployment logs. `python bot.py --check` also emits it.
+
+## 2.0.3 — Additional regular entry pairs
+
+Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap, timing, opening and late pairs are unchanged. Rejected-order reservations still consume the market allowance.
