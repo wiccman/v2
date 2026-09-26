@@ -12,10 +12,10 @@ import time
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from kalshi import KalshiAPIError
+from request_coordinator import RequestDeferred, retry_delay
 from price_pairs import paired_inventory
 
 TERMINAL = {"executed", "canceled", "expired"}
@@ -73,13 +73,7 @@ class TakeProfitMonitor:
             self._errors[ticker] = (message, self.clock())
 
     def defer(self, ledger, error):
-        delay = 5.0
-        retry_after = getattr(error, "retry_after", None)
-        if retry_after:
-            try:
-                delay = max(delay, float(retry_after))
-            except ValueError:
-                delay = max(delay, parsedate_to_datetime(retry_after).timestamp() - self.clock())
+        delay = max(self.poll, retry_delay(getattr(error, "retry_after", None), 5.0, self.clock()))
         ledger["retry_after"] = self.clock() + delay
         self.save()
 
@@ -107,17 +101,36 @@ class TakeProfitMonitor:
             self.save()
             self.emit("TP_LEGACY_RECONCILED", ticker=ticker, order_id=order_id)
 
+    def _pending_status(self, ticker, intent, reason):
+        attempts = min(int(intent.get("status_attempts", 0)) + 1, 4)
+        delay = min(15.0, 2.0 ** attempts)
+        intent.update(status_attempts=attempts, next_status_at=self.clock() + delay)
+        self.save()
+        self.emit("TP_STATUS_PENDING", ticker=ticker, order_id=intent.get("order_id"),
+                  client_id=intent["client_id"], reason=reason, retry_seconds=delay,
+                  new_entries="paused")
+        return False
+
     def _reconcile(self, ticker, ledger):
         intent = ledger.get("pending")
         if not intent:
-            return
+            return True
+        if self.clock() < intent.get("next_status_at", 0):
+            return False
         if intent.get("order_id"):
-            order = self.client.order(intent["order_id"], ticker)
+            try:
+                order = self.client.order(intent["order_id"], ticker)
+            except KalshiAPIError as error:
+                if error.status_code != 404:
+                    raise
+                # The single-order AND aggregate lookup have not resolved the
+                # ID. Preserve it across restarts; absence is not cancellation.
+                return self._pending_status(ticker, intent, "order_not_visible")
         else:
             order = next((o for o in self.client.all_orders(ticker)
                           if o.get("client_order_id") == intent["client_id"]), None)
             if not order:
-                raise RuntimeError(f"Exit acknowledgement unresolved: {intent['client_id']}")
+                return self._pending_status(ticker, intent, "acknowledgement_unresolved")
             intent["order_id"] = order["order_id"]
             self.save()
         filled = Decimal(str(order.get("fill_count_fp", order.get("fill_count", "0"))))
@@ -127,13 +140,14 @@ class TakeProfitMonitor:
             intent["reported_fill"] = str(filled)
             self.save()
         if order.get("status") not in TERMINAL:
-            raise RuntimeError(f"Exit still awaiting terminal status: {order['order_id']}")
+            return self._pending_status(ticker, intent, "awaiting_terminal_status")
         if filled:
             ledger.setdefault("exit_orders", {})[order["order_id"]] = {
                 "side": intent["side"], "target": intent["target"],
                 "paired": intent.get("paired", False), "filled": str(filled)}
         ledger.pop("pending")
         self.save()
+        return True
 
     def _paired_buckets(self, ticker, record, ledger, held):
         by_client = ledger.setdefault("entry_order_ids", {})
@@ -200,7 +214,8 @@ class TakeProfitMonitor:
         if self.clock() < ledger.get("retry_after", 0):
             return False
         self._clear_legacy(ticker, record, ledger)
-        self._reconcile(ticker, ledger)
+        if not self._reconcile(ticker, ledger):
+            return False
         positions = self.client.positions(ticker)
         matches = [p for p in positions if p.get("ticker") == ticker]
         if len(matches) > 1:
@@ -241,6 +256,10 @@ class TakeProfitMonitor:
         try:
             result = self.client.place_take_profit(ticker, quantity, target, close,
                                                   client_order_id=intent["client_id"])
+        except RequestDeferred as error:
+            ledger.pop("pending")  # Local rejection: no HTTP request was sent.
+            self.defer(ledger, error)
+            raise
         except KalshiAPIError as error:
             # These responses definitively rejected the order. Timeouts, 409,
             # and server errors retain the intent for read-only recovery.
@@ -271,10 +290,9 @@ class TakeProfitMonitor:
             except Exception as error:
                 ok = False
                 # Includes rate limits on GET/order reconciliation, not just POST.
-                if isinstance(error, KalshiAPIError):
+                if isinstance(error, (KalshiAPIError, RequestDeferred)):
                     self.defer(ledger, error)
                 self.error(ticker, error)
         self._healthy = ok
         if ok:
             self._last_success = self.clock()
-

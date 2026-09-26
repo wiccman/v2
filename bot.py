@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
+from request_coordinator import RequestCoordinator, RequestDeferred
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, settlement_price_allowed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
@@ -69,7 +70,8 @@ HISTORICAL_STRIKE_TOUCH_DOLLARS = Decimal(os.getenv("HISTORICAL_STRIKE_TOUCH_DOL
 ABS_GAP_AVG = Decimal(os.getenv("ABSOLUTE_GAP_AVERAGE", "59.58"))
 STATE = Path(os.getenv("STATE_PATH", "/data/state.json"))
 LOG = Path(os.getenv("LOG_PATH", "/data/trades.csv"))
-client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""), os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""))
+REQUEST_COORDINATOR = RequestCoordinator()
+client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""), os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), coordinator=REQUEST_COORDINATOR)
 EXIT_MONITOR = None
 
 def parse_time(value): return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -432,6 +434,15 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         result = client.place_entry(ticker, side, quantity, price, intent["cancel_at"],
                                     submit_before=cutoff, client_order_id=intent["client_id"],
                                     ioc=True)
+    except RequestDeferred as error:
+        # The gate rejected this locally before HTTP dispatch. Keep the audit
+        # record, but do not spend allowance on an order that was never sent.
+        release_unsubmitted(intent, "request_deferred")
+        save_state(state)
+        write_log("ENTRY_REQUEST_DEFERRED", ticker, details=json.dumps({
+            "client_id": intent["client_id"], "retry_seconds": error.retry_after,
+        }))
+        return {}, Decimal("0")
     except KalshiAPIError as error:
         if error.status_code == 400 and error.code == "insufficient_balance":
             release_unsubmitted(intent, "insufficient_balance")
@@ -1014,14 +1025,16 @@ def main():
         # Separate client and receipt file: signal/CF timeouts cannot block
         # exits, and this worker never writes the entry budget/strategy state.
         exit_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
-            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
+            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
+            coordinator=REQUEST_COORDINATOR, role="exit")
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
         EXIT_MONITOR.start()
         print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ALL_ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
         diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
-            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5)
+            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
+            coordinator=REQUEST_COORDINATOR, role="diagnostics")
         balance_monitor = BalanceMonitor(diagnostics_client)
         balance_monitor.start()
         def stop(signum, frame):

@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 
 import requests
 from balance_diagnostics import balance_report
+from request_coordinator import RequestCoordinator
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -40,10 +41,18 @@ def _latest_index_value(payload):
     raise ValueError("Kalshi CF Benchmarks response did not contain a BRTI value")
 
 class KalshiClient:
-    def __init__(self, key_id="", private_key_path="", private_key_b64="", timeout=20):
+    def __init__(self, key_id="", private_key_path="", private_key_b64="", timeout=20,
+                 *, coordinator=None, role="entry", quote_ttl=0.5, clock=None):
         self.base = BASE_URL
         self.timeout = timeout
         self.key_id = key_id
+        if role not in RequestCoordinator.PRIORITY_DELAY:
+            raise ValueError("Unknown API worker role")
+        self.coordinator = coordinator or RequestCoordinator()
+        self.role = role
+        self.quote_ttl = quote_ttl
+        self.clock = clock or time.monotonic
+        self._market_cache = {}
         pem = b""
         if private_key_b64:
             pem = base64.b64decode(private_key_b64)
@@ -71,12 +80,21 @@ class KalshiClient:
         }
 
     def request(self, method, path, params=None, body=None, auth=False):
+        # Do not wait here: an entry's deadline/quote must not age in a queue.
+        # This exception proves no HTTP dispatch occurred, including for POST.
+        self.coordinator.check(self.role)
+        if method.upper() not in {"GET", "HEAD"}:
+            self._market_cache.clear()
         response = requests.request(method, self.base + path, params=params, json=body,
             headers=self._headers(method, path) if auth else {}, timeout=self.timeout)
         try:
             response.raise_for_status()
         except requests.HTTPError as error:
+            self._market_cache.clear()
             details = response.text.strip() or "<empty response>"
+            retry_after = response.headers.get("Retry-After")
+            if response.status_code == 429:
+                retry_after = self.coordinator.limited(retry_after)
             code = None
             try:
                 payload = response.json()
@@ -88,7 +106,7 @@ class KalshiClient:
                 pass
             raise KalshiAPIError(
                 response.status_code, f"Kalshi API {response.status_code} {method.upper()} {path}: {details}",
-                retry_after=response.headers.get("Retry-After"), code=code,
+                retry_after=retry_after, code=code,
             ) from error
         return response.json() if response.content else {}
 
@@ -96,7 +114,16 @@ class KalshiClient:
         return self.request("GET", "/markets", params=params).get("markets", [])
 
     def market(self, ticker):
-        return self.request("GET", "/markets/" + ticker)["market"]
+        self.coordinator.check(self.role)
+        now = self.clock()
+        cached = self._market_cache.get(ticker)
+        if cached and 0 <= now - cached[0] < self.quote_ttl:
+            return dict(cached[1])
+        self._market_cache.pop(ticker, None)
+        market = self.request("GET", "/markets/" + ticker)["market"]
+        # Age from request START: slow responses cannot extend quote freshness.
+        self._market_cache[ticker] = (now, dict(market))
+        return market
 
     def orderbook(self, ticker):
         return self.request("GET", "/markets/" + ticker + "/orderbook", auth=True)["orderbook_fp"]
