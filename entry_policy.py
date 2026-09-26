@@ -1,5 +1,4 @@
 """Durable, conservative spending reservations shared by every entry route."""
-import os
 import uuid
 from decimal import Decimal as D, ROUND_DOWN
 
@@ -8,10 +7,9 @@ ZERO = D("0")
 
 
 def market_budget():
-    value = D(os.getenv("MARKET_BUDGET_DOLLARS", "5"))
-    if not value.is_finite() or value <= ZERO:
-        raise ValueError("MARKET_BUDGET_DOLLARS must be positive and finite")
-    return min(value, D("6"))
+    # Fixed requested allowance; stale Railway budget settings must not keep
+    # this release at the previous $6 cap.
+    return D("10")
 
 
 def initialize(record):

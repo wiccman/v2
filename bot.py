@@ -20,6 +20,9 @@ EXECUTION_STRATEGY = os.getenv("EXECUTION_STRATEGY", "strike_ruler").lower()
 if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
 ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "39:46"))
+# Add requested tiers even when Railway still has the older pair setting.
+ENTRY_EXIT_PAIRS.update(parse_pairs("55:62,49:59,38:43,56:61,61:70"))
+ENTRY_EXIT_PAIRS = dict(sorted(ENTRY_EXIT_PAIRS.items()))
 # Retire the old entry even when an existing environment still lists it.
 ENTRY_EXIT_PAIRS.pop(Decimal("0.32"), None)
 if not ENTRY_EXIT_PAIRS:

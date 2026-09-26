@@ -158,9 +158,9 @@ def test_signal_entries_have_priority_and_dual_batch_shares_one_budget(monkeypat
     intents = record['entry_intents']
     assert [i['kind'] for i in intents[:1]] == ['regular']
     dual = [i for i in intents if i['kind'] == 'dual']
-    assert len(dual) == 1
+    assert len(dual) == 6
     assert sum(D(i['quantity']) * D(i['price']) for i in dual) <= D('2')
-    assert sum(D(i['reserved_dollars']) for i in intents) <= D('5')
+    assert sum(D(i['reserved_dollars']) for i in intents) <= D('10')
 
 
 def test_slow_quote_is_not_backdated_to_scheduled_snapshot(monkeypatch):
@@ -229,4 +229,4 @@ def test_new_prediction_does_not_fetch_previous_bias(monkeypatch):
     bot.cycle(state)
     assert record['signal']['prediction'] == 'YES'
     assert fake.entries
-    assert all(i['price'] == '0.39' for i in record['entry_intents'])
+    assert all(D(i['price']) in bot.ENTRY_EXIT_PAIRS for i in record['entry_intents'])
