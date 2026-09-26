@@ -478,7 +478,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             write_log("ENTRY_PRICE_FLOOR_WAIT", ticker, prediction=side,
                       details=json.dumps({"ask": str(ask), "minimum": str(minimum_ask)}))
             return {}, Decimal("0")
-        if ask > Decimal(str(price)) or (kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask)):
+        if ((kind != SETTLEMENT_KIND and ask > Decimal(str(price)))
+                or (kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask))):
             return {}, Decimal("0")
     except Exception as error:
         write_log("ENTRY_QUOTE_UNAVAILABLE", ticker, details=repr(error))
