@@ -52,7 +52,7 @@ def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypat
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1000, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES"] * 5
     assert [entry[2] for entry in fake.entries] == [Decimal("5")] * 5
-    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.47", "0.49", "0.55", "0.56")]
+    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.48", "0.51", "0.53", "0.56")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.MARKET_BUDGET
     assert all(entry[4] == 1580 for entry in fake.entries)
     assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in list(bot.ENTRY_EXIT_PAIRS)[:5]]

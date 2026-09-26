@@ -1,8 +1,8 @@
-"""Opening-time 2.0 Boruto signals from finalized Kalshi market records."""
+"""Opening-time 2.1 Boruto scalp signals from finalized Kalshi market records."""
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-BUILD = "2.0.4 Boruto Direction Every Window"
+BUILD = "2.1.1 Boruto Scalp No Skip"
 PERIOD = timedelta(minutes=15)
 
 
@@ -27,17 +27,24 @@ def vote(points, strike):
     strike = price(strike)
     below = sum(value < strike for value in values)
     above = sum(value > strike for value in values)
-    side = "YES" if below >= 3 else "NO" if above >= 3 else None
-    reason = "four_point_agreement"
+    # Stored points are chronological: L4, L3, L2, L1. L2 is context only.
+    l4, l3, _, l1 = values
+    sign = lambda value: (value > 0) - (value < 0)
+    votes = [sign(l1 - strike), sign(strike - l3), sign(strike - l4)]
+    yes, no = votes.count(1), votes.count(-1)
+    side = "YES" if yes >= 2 else "NO" if no >= 2 else None
+    reason = "l1_reverse_l3_l4_majority"
     if side is None:
-        # Input points are chronological. Use the newest non-equal point for
-        # mixed windows; a fully flat window has a deterministic YES fallback.
-        newest = next((value for value in reversed(values) if value != strike), None)
-        side = "YES" if newest is None or newest < strike else "NO"
-        reason = "flat_yes_fallback" if newest is None else "latest_non_equal_lookback"
-    return {"bias": side, "agreement": "HIGH" if max(below, above) == 4 else
-            "MODERATE" if max(below, above) == 3 else "LOW", "reason": reason,
+        # No research skip: newest active nonzero vote wins an unresolved split.
+        selected = next((value for value in votes if value), 1)
+        side = "YES" if selected > 0 else "NO"
+        reason = "active_vote_fallback" if any(votes) else "flat_yes_fallback"
+    return {"bias": side, "agreement": "HIGH" if max(yes, no) == 3 else
+            "MODERATE" if max(yes, no) == 2 else "LOW", "reason": reason,
+            "votes": dict(zip(("L1_reversed", "L3", "L4"), votes)),
+            "yes_votes": yes, "no_votes": no, "neutral_votes": votes.count(0),
             "below": below, "above": above, "equal": 4 - below - above}
+
 
 
 def build_signal(target, history, now=None):

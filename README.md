@@ -1,18 +1,26 @@
-# Strike Ruler — 2.1.0 Boruto
+# Strike Ruler — 2.1.1 Boruto Scalp No Skip
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-The signal build is **2.0.1 Boruto Four-Point Current Bias**. Four finalized
-Kalshi settlements at T−60, T−45, T−30 and T−15 are compared with the official
-strike at opening T. At least three below gives YES; at least three above gives
-NO. Four agreeing votes are HIGH, three are MODERATE. Other splits are LOW and use the latest non-equal lookback; a fully flat window defaults to YES.
-The current YES/NO bias controls entries even when the previous bias disagrees.
-Previous-window data is optional diagnostic context and never blocks the current
-signal. Missing or unfinalized current lookbacks still block signal creation.
-Quotes, gaps and live spot never change the bias.
+The signal build is **2.1.1 Boruto Scalp No Skip**. This adapts the selected
+2.1 research model for directional scalp entries. With newest-first lookbacks
+L1=T−15, L2=T−30, L3=T−45 and L4=T−60, L1 votes YES above the opening strike
+and NO below it; L3 and L4 vote YES below the strike and NO above it. Equality
+is neutral. L2 is retained as validated context and does not vote. Two matching
+votes select the side. Three matching votes are HIGH confidence; two are MODERATE.
+Unresolved votes are LOW confidence and use the first nonzero vote in L1, L3,
+L4 order; all-neutral defaults to YES.
+
+Both YES and NO can trade. There is no $32.85 distance filter, YES-only filter,
+or previous-bias conflict filter. Previous-window data is optional diagnostic
+context. Every valid current input set produces a direction; missing or unfinalized
+current lookbacks still prevent signal creation. Quotes and live spot do not
+change the locked bias. Existing entry tiers, take-profit targets, budget limits,
+and one-side-per-market protection continue to apply. This no-skip variant does
+not inherit the filtered research model's historical return result.
 
 BASE_SIGNAL logs include build, both raw biases, vote counts, exact lookback
 boundaries and source tickers, final decision and selection reason. The current window
@@ -38,12 +46,16 @@ All routes use these default outcome-price pairs, configurable through
 
 | Entry limit | Exit target |
 | --- | --- |
-| 45¢ | 50¢ |
-| 47¢ | 52¢ |
-| 49¢ | 59¢ |
-| 55¢ | 62¢ |
+| 45¢ | 55¢ |
+| 48¢ | 53¢ |
+| 51¢ | 56¢ |
+| 53¢ | 58¢ |
 | 56¢ | 61¢ |
-| 61¢ | 70¢ |
+| 59¢ | 64¢ |
+| 62¢ | 67¢ |
+| 64¢ | 69¢ |
+| 67¢ | 72¢ |
+| 70¢ | 80¢ |
 
 During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same five-contract sizing and shared market allowance as every other route.
 
