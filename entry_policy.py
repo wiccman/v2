@@ -11,8 +11,15 @@ SETTLEMENT_KIND = "settlement_97"
 
 
 def settlement_price_allowed(price):
+    """Recognize existing settlement lots, including pre-upgrade 98/99c buys."""
     price = D(str(price))
     return price.is_finite() and SETTLEMENT_PRICE <= price < D("1")
+
+
+def settlement_entry_price_allowed(price):
+    """New settlement entries require exactly 97c, including fractional quotes."""
+    price = D(str(price))
+    return price.is_finite() and price == SETTLEMENT_PRICE
 
 
 def market_budget():
@@ -52,7 +59,7 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
         return None
     spent = sum((D(item["reserved_dollars"]) for item in record["entry_intents"]), ZERO)
     if kind == SETTLEMENT_KIND:
-        if not settlement_price_allowed(price) or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
+        if not settlement_entry_price_allowed(price) or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
             return None
     else:
         # Earlier trades cannot consume the settlement budget reserved for settlement.

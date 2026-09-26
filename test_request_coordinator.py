@@ -204,7 +204,7 @@ def test_slow_or_failed_quote_read_cannot_extend_cached_freshness(monkeypatch):
 
 
 def test_adjacent_tier_checks_reuse_quote_but_cash_remains_fresh(monkeypatch):
-    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 180)
     gate, clients = workers(monkeypatch, clock)
     calls = []
     def transport(method, url, **kwargs):

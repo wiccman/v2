@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
 from request_coordinator import RequestCoordinator, RequestDeferred
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, settlement_price_allowed
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, settlement_price_allowed, settlement_entry_price_allowed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from balance_diagnostics import log_api_cash, BalanceMonitor
@@ -48,6 +48,8 @@ ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inve
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MIN_ENTRY_PRICE = Decimal("0.45")
+EARLY_ENTRY_PRICE_CEILING = Decimal("0.70")
+HIGH_PRICE_ENTRY_START = 180
 ENTRY_EXECUTION_VERSION = 3
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 480
@@ -327,7 +329,7 @@ def entry_decision(record, side, price, kind):
         locked_side = current_bias if current_bias in ("YES", "NO") else None
     allowed = current_bias in ("YES", "NO") and side == current_bias
     if kind == SETTLEMENT_KIND:
-        allowed = side in ("YES", "NO") and settlement_price_allowed(price)
+        allowed = side in ("YES", "NO") and settlement_entry_price_allowed(price)
         reason = "market_97_cent_side"
     elif current_bias not in ("YES", "NO"):
         reason = "current_bias_unavailable"
@@ -382,6 +384,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         cutoff = min(cutoff, closed.timestamp())
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
+    # Enforce on every route, using the actual clock rather than a caller's
+    # possibly stale timestamp. A lower ask cannot bypass a 70c buy limit.
+    high_price_opens = closed.timestamp() - 900 + HIGH_PRICE_ENTRY_START
+    if Decimal(str(price)) >= EARLY_ENTRY_PRICE_CEILING and time.time() < high_price_opens:
+        write_log("ENTRY_EARLY_PRICE_WAIT", ticker, prediction=side, price=str(price),
+                  details=json.dumps({"minimum_elapsed_seconds": HIGH_PRICE_ENTRY_START,
+                                      "ceiling_exclusive": str(EARLY_ENTRY_PRICE_CEILING)}))
+        return {}, Decimal("0")
     if time.time() < record.get("cash_retry_at", 0):
         return {}, Decimal("0")
     try:
@@ -412,7 +422,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             write_log("ENTRY_PRICE_FLOOR_WAIT", ticker, prediction=side,
                       details=json.dumps({"ask": str(ask), "minimum": str(MIN_ENTRY_PRICE)}))
             return {}, Decimal("0")
-        if ask > Decimal(str(price)) or (kind == SETTLEMENT_KIND and not settlement_price_allowed(ask)):
+        if ask > Decimal(str(price)) or (kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask)):
             return {}, Decimal("0")
     except Exception as error:
         write_log("ENTRY_QUOTE_UNAVAILABLE", ticker, details=repr(error))
@@ -782,7 +792,7 @@ def settlement_entry(record, state, ticker, closed):
         return
     observed = {
         "seconds_remaining": round(closed.timestamp() - now, 3),
-        "minimum_ask": str(SETTLEMENT_PRICE), "maximum_ask_exclusive": "1", "budget_dollars": str(SETTLEMENT_BUDGET),
+        "required_ask": str(SETTLEMENT_PRICE), "entry_limit": str(SETTLEMENT_PRICE), "budget_dollars": str(SETTLEMENT_BUDGET),
         "market_reserved_dollars": str(sum((Decimal(i["reserved_dollars"])
             for i in record.get("entry_intents", [])), Decimal("0"))),
         "entry_budget_legacy": bool(record.get("entry_budget_legacy")),
@@ -803,9 +813,9 @@ def settlement_entry(record, state, ticker, closed):
     locked_side = record.get("trade_side")
     if locked_side not in ("YES", "NO"):
         locked_side = (record.get("signal") or {}).get("prediction")
-    sides = [side for side, ask in asks.items() if settlement_price_allowed(ask)]
+    sides = [side for side, ask in asks.items() if settlement_entry_price_allowed(ask)]
     if len(sides) != 1:
-        report("waiting_for_97_to_below_100_ask")
+        report("waiting_for_exact_97_ask")
         return
     side = sides[0]
     if locked_side in ("YES", "NO") and side != locked_side:
@@ -828,10 +838,10 @@ def settlement_entry(record, state, ticker, closed):
         report("unresolved_opposite_entry", side=side)
         return
     report("eligible_for_funding_check", side=side)
-    result, quantity = funded_entry(record, state, ticker, side, asks[side], closed,
+    result, quantity = funded_entry(record, state, ticker, side, SETTLEMENT_PRICE, closed,
         SETTLEMENT_KIND, submit_before=closed.timestamp(), cancel_at=closed.timestamp())
     if result.get("order_id"):
-        write_log("SETTLEMENT_97_ENTRY", ticker, prediction=side, price=str(asks[side]), quantity=str(quantity),
+        write_log("SETTLEMENT_97_ENTRY", ticker, prediction=side, price=str(SETTLEMENT_PRICE), quantity=str(quantity),
                   details=json.dumps({"budget": str(SETTLEMENT_BUDGET), "hold_to_settlement": True,
                                       "order": result}))
     else:
@@ -988,7 +998,8 @@ def main():
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print("SETTLEMENT_ENTRY window=780s..900s; price=97c..<100c; budget=$6 reserved; quantity=floor(6/(price+0.03)); hold to settlement; earlier allowance=$9", flush=True)
+    print("SETTLEMENT_ENTRY window=780s..900s; required_ask=97c; limit=97c; budget=$6 reserved; quantity=6; hold to settlement; earlier allowance=$9", flush=True)
+    print("EARLY_ENTRY_PRICE_LIMIT first_180s: entry limits must be below 70c; 70c tier eligible from 3:00", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)

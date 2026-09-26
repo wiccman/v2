@@ -55,7 +55,7 @@ All routes use these default outcome-price pairs, configurable through
 | 62¢ | 67¢ |
 | 64¢ | 69¢ |
 | 67¢ | 72¢ |
-| 70¢ | 80¢ |
+| 70¢ (from minute 3) | 80¢ |
 
 During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same five-contract sizing and shared market allowance as every other route.
 
@@ -261,7 +261,12 @@ remain subject to the existing protections and one-attempt policy.
 
 ## 45-cent entry quote floor
 
-All new entry routes require a fresh selected-outcome ask of at least 45 cents and no higher than the route limit. New buys use immediate-or-cancel so unfilled quantities cannot wait through a later price drop. Missing/invalid quotes block entry. Settlement requires an ask from 97 cents up to, but excluding, $1. Existing tracked pre-upgrade buy orders are canceled before more entries in that market; reservations, inventory, side locks and exit targets remain intact.
+All new entry routes require a fresh selected-outcome ask of at least 45 cents and no higher than the route limit. New buys use immediate-or-cancel so unfilled quantities cannot wait through a later price drop. Missing/invalid quotes block entry. Settlement requires an ask of exactly 97 cents and uses a fixed 97-cent limit. Existing tracked pre-upgrade buy orders are canceled before more entries in that market; reservations, inventory, side locks and exit targets remain intact.
+
+Before 3:00 of each market, every entry route also requires a limit below 70 cents.
+The 70-cent tier becomes eligible at 3:00, subject to the usual quote, side, cash,
+timing and shared-budget checks. Lower early tiers and the 70→80-cent exit target
+are unchanged. This gate does not alter exits for previously bought inventory.
 
 This is a submission-time quote floor, not an exchange-enforced minimum fill price. Kalshi can still give a lower execution price if quotes move between observation and matching. Five-contract sizing and the $15 shared cap ($9 earlier / $6 settlement) remain unchanged.
 
@@ -290,6 +295,15 @@ visibility conservatively; it does not assume every 404 will eventually resolve.
 
 API reference: [Kalshi rate limits](https://docs.kalshi.com/getting_started/rate_limits).
 
-## Final-two-minute 97-cent-plus entry
+## Final-two-minute exact-97-cent entry
 
-In minutes 13–15, the settlement route accepts the locked outcome at an ask >=97 cents and <100 cents, including fractional prices. It submits IOC at that observed ask and checks the quote again before submission; an upward move beyond the limit waits for the next cycle. The $6 reserve sizes whole contracts using price plus the existing 3-cent per-contract fee cushion: 6 at 97 cents, 5 above 97 cents. The overall cap remains $15. One attempt per market, side/inventory checks and monitor-health gating remain. Settlement lots at every eligible entry price retain a $1 target and are excluded from scalp exits. No fill or profit is guaranteed.
+In minutes 13–15, the settlement route accepts the locked outcome only at an ask
+of exactly 97 cents, checks it again before submission, and submits a fixed
+97-cent limit IOC. Quotes of 98 or 99 cents, or fractional prices above 97 cents,
+wait without reserving budget or consuming the attempt. A price move cannot make
+that order buy above its 97-cent limit; a better execution price is still possible.
+The $6 reserve covers six contracts plus the existing 3-cent per-contract fee
+cushion. The overall cap remains $15. One attempt per market, side/inventory checks
+and monitor-health gating remain. Existing 98/99-cent settlement lots remain
+recognized, keep their $1 target, and are excluded from scalp exits. No fill or
+profit is guaranteed.

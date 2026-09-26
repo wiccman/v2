@@ -1,0 +1,77 @@
+"""Offline tests for the first-three-minute entry ceiling."""
+from decimal import Decimal as D
+
+import pytest
+
+import bot
+from take_profit import TakeProfitMonitor
+from test_five_minute_exits import cycle_setup
+from test_price_pairs import PairExchange
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('kind', ['opening_bias', 'regular', 'dual', 'historical', 'spot', 'late_bias'])
+@pytest.mark.parametrize('price', ['.70', '.73', '.85'])
+def test_every_route_blocks_70_or_higher_before_three_minutes(monkeypatch, side, kind, price):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    record['signal']['prediction'] = side
+    # A cheaper current ask cannot bypass the ceiling on the submitted limit.
+    market = dict(fake.market('TEST'))
+    market[side.lower() + '_ask_dollars'] = '.45'
+    monkeypatch.setattr(fake, 'market', lambda ticker: market)
+    monkeypatch.setattr(fake, 'market_cash', lambda ticker: pytest.fail('Blocked tier reached funding'))
+    result = bot.funded_entry(record, state, 'TEST', side, D(price), closed, kind)
+    assert result == ({}, 0) and not fake.entries and not record['entry_intents']
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('elapsed,expected', [(0, 0), (179.999, 0), (180, 1), (181, 1)])
+def test_70_cent_tier_opens_at_exactly_three_minutes(monkeypatch, side, elapsed, expected):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
+    record['signal']['prediction'] = side
+    market = dict(fake.market('TEST'))
+    market[side.lower() + '_ask_dollars'] = '.70'
+    monkeypatch.setattr(fake, 'market', lambda ticker: market)
+    bot.funded_entry(record, state, 'TEST', side, D('.70'), closed, 'regular')
+    assert len(fake.entries) == len(record['entry_intents']) == expected
+    if expected:
+        wire, quantity, price, kwargs = fake.entries[0]
+        assert quantity == 5 and kwargs['ioc'] is True
+        assert price == (D('.70') if side == 'YES' else D('.30'))
+        assert D(record['entry_intents'][0]['exit_target']) == D('.80')
+        assert D(record['entry_intents'][0]['reserved_dollars']) == D('3.65')
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('price,kind', [('.52', 'opening_bias'), ('.67', 'regular')])
+def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    record['signal']['prediction'] = side
+    market = dict(fake.market('TEST'))
+    market[side.lower() + '_ask_dollars'] = price
+    monkeypatch.setattr(fake, 'market', lambda ticker: market)
+    result, quantity = bot.funded_entry(record, state, 'TEST', side, D(price), closed, kind)
+    assert result['order_id'] and quantity == 5 and len(fake.entries) == 1
+
+
+def test_future_caller_timestamp_cannot_bypass_early_ceiling(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    result = bot.funded_entry(record, state, 'TEST', 'YES', D('.70'), closed,
+                              'regular', now_timestamp=clock[0] + 120)
+    assert result == ({}, 0) and not fake.entries and not record['entry_intents']
+
+
+@pytest.mark.parametrize('sign', [1, -1])
+def test_early_entry_ceiling_does_not_block_existing_70_cent_exits(tmp_path, sign):
+    exchange = PairExchange(bid='.80')
+    exchange.buy('.39', '2', sign)
+    exchange.intents[0].update(price='.70', exit_target='.80')
+    state = {'markets': {'T': {'close_timestamp': 1900, 'entry_intents': exchange.intents}}}
+    monitor = TakeProfitMonitor(exchange, lambda: state, tmp_path / 'early-exit.json',
+        pairs={D('.70'): D('.80')}, clock=lambda: 1060, emit=lambda *a, **k: None)
+    monitor.run_once()
+    monitor.run_once()
+    assert exchange.held == 0 and monitor.healthy
+    assert len(exchange.submissions) == 1
+    assert exchange.submissions[0]['reduce_only'] is True
+    assert exchange.submissions[0]['price'] == ('0.8000' if sign == 1 else '0.2000')
