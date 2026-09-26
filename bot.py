@@ -1088,9 +1088,9 @@ def main():
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entry_side=live_BTC_vs_market_strike", flush=True)
     print(f"Entry windows: under70c ends360s; 70c+ starts480s, ends{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print("SETTLEMENT_ENTRY window=720s..900s; required_ask=97c; limit=97c; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
+    print("SETTLEMENT_ENTRY window=720s..900s; live BTC-vs-strike side; resting limit=97c max when selected ask>=97c; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; expires at close; hold to settlement", flush=True)
     print("DISCOUNT_ENTRY window=180s..360s; limit=35c; target=42c; quantity=5; shared earlier allowance=$9", flush=True)
-    print("ENTRY_PRICE_FLOOR minimum_ask=45c except the 35c tier; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
+    print("ENTRY_PRICE_FLOOR minimum_ask=45c except the 35c tier; fresh quote required; regular buys immediate-or-cancel; final-window settlement limit rests at 97c max through close", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
