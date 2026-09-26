@@ -13,7 +13,7 @@ SETTLEMENT_KIND = "settlement_97"
 def market_budget():
     # Fixed requested allowance; stale Railway budget settings must not keep
     # this release at an older cap.
-    return D("25")
+    return D("26")
 
 
 def initialize(record):
