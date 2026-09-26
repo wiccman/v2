@@ -190,7 +190,7 @@ def test_entry_gateway_enforces_current_bias_and_logs_reason(monkeypatch):
     decision = json.loads(events[-1][1]["details"])
     assert decision == {
         "selected_side": "NO", "current_bias": "YES", "previous_bias": "YES",
-        "entry_price": "0.45", "entry_reason": "selected_side_opposes_current_bias", "decision": "SKIP",
+        "trade_side": "YES", "entry_price": "0.45", "entry_reason": "selected_side_opposes_current_bias", "decision": "SKIP",
     }
     assert not fake.entries
 
@@ -216,8 +216,8 @@ def test_balance_rejection_releases_only_failed_intent_and_survives_restart(monk
     monkeypatch.setattr(fake, 'place_entry', rejected)
     for _ in range(3):
         with pytest.raises(KalshiAPIError):
-            bot.funded_entry(record, state, 'TEST', 'YES', D('0.55'), closed, 'regular')
-        assert bot.funded_entry(record, state, 'TEST', 'YES', D('0.55'), closed, 'regular') == ({}, 0)
+            bot.funded_entry(record, state, 'TEST', 'YES', D('0.53'), closed, 'regular')
+        assert bot.funded_entry(record, state, 'TEST', 'YES', D('0.53'), closed, 'regular') == ({}, 0)
         clock[0] += 30
     restored = json.loads(json.dumps(state))
     record = restored['markets']['TEST']
@@ -225,7 +225,7 @@ def test_balance_rejection_releases_only_failed_intent_and_survives_restart(monk
     assert all(i['reserved_dollars'] == '0' and i['entry_closed'] and D(i['released_dollars']) > 0
                for i in record['entry_intents'][1:])
     monkeypatch.setattr(fake, 'place_entry', accepted)
-    result, quantity = bot.funded_entry(record, restored, 'TEST', 'YES', D('0.55'), closed, 'regular')
+    result, quantity = bot.funded_entry(record, restored, 'TEST', 'YES', D('0.53'), closed, 'regular')
     assert result['order_id'] and quantity > 0
     assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= D('10')
 
