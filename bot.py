@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, ENTRY_QUANTITY
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from balance_diagnostics import log_api_cash, BalanceMonitor
@@ -36,6 +36,7 @@ LATE_ENTRY_END = seconds_from_minutes(os.getenv("LATE_ENTRY_END_MINUTE", "13"))
 if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
     raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
 ALL_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS}.items()))
+ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inventory bucket.
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MARKET_BUDGET = market_budget()
@@ -297,7 +298,10 @@ def entry_decision(record, side, price, kind):
     current_bias = (record.get("signal") or {}).get("prediction")
     previous_bias = record.get("previous_bias")
     allowed = current_bias in ("YES", "NO") and side == current_bias
-    if current_bias not in ("YES", "NO"):
+    if kind == SETTLEMENT_KIND:
+        allowed = side in ("YES", "NO") and Decimal(str(price)) == SETTLEMENT_PRICE
+        reason = "market_97_cent_side"
+    elif current_bias not in ("YES", "NO"):
         reason = "current_bias_unavailable"
     elif side != current_bias:
         reason = "selected_side_opposes_current_bias"
@@ -328,6 +332,10 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     cutoff = entry_deadline(closed) if submit_before is None else float(submit_before)
+    if kind == SETTLEMENT_KIND:
+        if not closed.timestamp() - 120 <= time.time() < closed.timestamp():
+            return {}, Decimal("0")
+        cutoff = min(cutoff, closed.timestamp())
     if now_timestamp >= cutoff:
         return {}, Decimal("0")
     cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
@@ -336,11 +344,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     if intent is None:
         return {}, Decimal("0")
     intent["exit_target"] = str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
+    if kind == SETTLEMENT_KIND:
+        intent["hold_to_settlement"] = True
     save_state(state)  # Persist allowance and client ID before any exchange request.
     quantity = Decimal(intent["quantity"])
     try:
         result = client.place_entry(ticker, side, quantity, price, intent["cancel_at"],
-                                    submit_before=cutoff, client_order_id=intent["client_id"])
+                                    submit_before=cutoff, client_order_id=intent["client_id"],
+                                    **({"ioc": True} if kind == SETTLEMENT_KIND else {}))
     except KalshiAPIError as error:
         if error.status_code == 400 and error.code == "insufficient_balance":
             release_unsubmitted(intent, "insufficient_balance")
@@ -671,6 +682,35 @@ def update_prediction(record, ticker, current, elapsed):
         write_log("PREDICTION_FINAL", ticker, confidence=record["final_confidence"] or "INCOMPLETE")
     return changed
 
+def settlement_entry(record, state, ticker, closed):
+    """One price-protected final-two-minute purchase, independent of bias."""
+    now = time.time()
+    if not closed.timestamp() - 120 <= now < closed.timestamp():
+        return
+    if any(i.get("kind") == SETTLEMENT_KIND for i in record.get("entry_intents", [])):
+        return  # Persisted intent prevents repeats after partial fills or lost ACKs.
+    market = client.market(ticker)
+    sides = [side for side in ("YES", "NO") if quotes(market, side)[0] == SETTLEMENT_PRICE]
+    if len(sides) != 1:
+        return
+    side = sides[0]
+    held = position(ticker)
+    if (side == "YES" and held < 0) or (side == "NO" and held > 0):
+        write_log("SETTLEMENT_WAIT_OPPOSITE_INVENTORY", ticker, prediction=side,
+                  details="Wait for opposite inventory to exit; avoid netting away the settlement purchase")
+        return
+    # Reconciliation must cancel earlier entry orders before switching sides.
+    pending = [i for i in record.get("entry_intents", []) if not i.get("entry_closed")]
+    if any(i.get("side") != side for i in pending):
+        return
+    result, quantity = funded_entry(record, state, ticker, side, SETTLEMENT_PRICE, closed,
+        SETTLEMENT_KIND, submit_before=closed.timestamp(), cancel_at=closed.timestamp())
+    if quantity:
+        write_log("SETTLEMENT_97_ENTRY", ticker, prediction=side, price="0.97", quantity=str(quantity),
+                  details=json.dumps({"budget": str(SETTLEMENT_BUDGET), "hold_to_settlement": True,
+                                      "order": result}))
+
+
 def cycle(state):
     reconcile_entries(state)
     if EXIT_MONITOR is None:
@@ -700,6 +740,9 @@ def cycle(state):
     reconcile_entries(state)
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
+        return
+    if closed.timestamp() - 120 <= time.time() < closed.timestamp():
+        settlement_entry(record, state, ticker, closed)
         return
     if record["signal"] is None:
         history = client.markets(series_ticker="KXBTC15M", status="settled", limit=100)
@@ -815,7 +858,8 @@ def main():
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
     print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print(f"ENTRY_SIZING quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
+    print("SETTLEMENT_ENTRY window=780s..900s; price=97c; budget=$10 reserved; quantity=10; hold to settlement; earlier allowance=$15", flush=True)
+    print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
                "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")

@@ -221,7 +221,7 @@ def test_pair_target_is_saved_before_five_contract_entry_post(monkeypatch):
     monkeypatch.setattr(e, "place_entry", checked)
     result = list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert [p for p, _, _ in result] == [D(p) for p in ("0.38", "0.39", "0.49", "0.55", "0.56", "0.61")]
-    assert sum(p * q for p, _, q in result) == D("14.90")
+    assert sum(p * q for p, _, q in result) == D("11.85")
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= bot.MARKET_BUDGET
     bot.reconcile_entries(state)
     assert not e.cancelled  # A 39-cent order is a supported price, not a legacy mismatch.

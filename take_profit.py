@@ -212,7 +212,12 @@ class TakeProfitMonitor:
         side = "YES" if held > 0 else "NO"
         # Rotate across occupied targets: an unfilled low-price IOC cannot
         # starve the other tier. Quantities come from fills, never average cost.
-        targets = list(buckets)
+        # A target of $1 is reserved for held settlement inventory, never an IOC exit.
+        targets = [target for target in buckets if target < Decimal("1")]
+        if not targets:
+            if ledger.pop("armed", None):
+                self.save()
+            return True
         previous = Decimal(ledger.get("last_target", "-1"))
         target = next((t for t in targets if t > previous), targets[0])
         quantity = buckets[target]

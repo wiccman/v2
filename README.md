@@ -53,9 +53,11 @@ touches use the side of approach; the optional early spot trigger buys YES when
 spot is sufficiently above the current strike. This early route operates before
 minute 2 by default; the other three routes start at minute 0.
 
-Every new entry order requests exactly **5 contracts**, on opening, regular,
+Earlier entry orders request exactly **5 contracts**, on opening, regular,
 limit-batch, historical, spot and late routes. All routes share a fixed **$25
-allowance per 15-minute market**, including entry fee reserves. An order is not
+allowance per 15-minute market**, including entry fee reserves. Of that, **$10 is
+reserved for the final-two-minute settlement entry**, leaving **$15 for all
+earlier routes combined**. An earlier order is not
 submitted if five contracts plus the fee reserve will not fit the remaining
 allowance; the bot does not shrink it to a fractional order. Exchange partial
 fills remain possible, and exits sell only verified filled inventory.
@@ -90,7 +92,7 @@ Important defaults:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `ENTRY_EXIT_PAIRS_CENTS` | `38:43,39:46,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
-| `ENTRY_BUDGET_DOLLARS` | Ignored | Every new entry requests 5 contracts |
+| `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries request 5 contracts; final settlement entry requests 10 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
 | `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $25 including entry fee reserves |
@@ -181,3 +183,20 @@ Regular, bias-limit and historical-strike entries are eligible from 0:00 through
 ## 2.0.7 — Five-contract orders and $25 shared allowance
 
 All entry routes request five contracts per order. The shared market allowance is $25 including entry fee reserves. Prior reservations are preserved; insufficient remaining allowance prevents a new order rather than reducing its quantity. Existing exits and price targets are unchanged. Five contracts do not guarantee 25¢ net profit at every price pair.
+
+## 2.0.8 — Reserved $10 final-two-minute settlement entry
+
+Between 13:00 inclusive and 15:00 exclusive, buy whichever single side has an
+ask of exactly 97¢, independent of Strike Ruler bias. Reserve $10 of the existing
+$25 cap; earlier routes share $15. Request 10 whole contracts ($9.70 principal
+plus fee room) in one 97¢ limit IOC order. Partial or zero fills are possible;
+the bot does not repeatedly buy after an acknowledged or ambiguous attempt.
+The intent is persisted before submission and survives restarts. Slow calls
+cannot submit past close. Existing reservations are preserved on upgrade.
+
+These lots are held until settlement; the exit worker reconciles them but never
+sends a take-profit order for them. Earlier scalp inventory keeps its existing
+exit targets. If opposite-side inventory or unresolved opposing entry orders
+remain, wait for them to clear so the new purchase does not merely net them out.
+The strategy checks on the regular polling cadence and needs available prediction
+account funds; the budget reservation does not transfer cash between accounts.
