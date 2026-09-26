@@ -199,3 +199,59 @@ def test_entry_gateway_buys_current_bias_despite_previous_conflict(monkeypatch, 
     result, quantity = bot.funded_entry(record, state, "TEST", current, D("0.39"), closed, "regular")
     assert result.get("order_id") and quantity > 0
     assert len(fake.entries) == 1
+
+
+def test_balance_rejection_releases_only_failed_intent_and_survives_restart(monkeypatch):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    monkeypatch.setattr(bot, 'BUDGET', D('2'))
+    accepted = fake.place_entry
+    bot.funded_entry(record, state, 'TEST', 'YES', D('0.39'), closed, 'regular')
+    original_reserved = record['entry_intents'][0]['reserved_dollars']
+    def rejected(*args, **kwargs):
+        raise KalshiAPIError(400, 'insufficient balance', code='insufficient_balance')
+    monkeypatch.setattr(fake, 'place_entry', rejected)
+    for _ in range(10):
+        with pytest.raises(KalshiAPIError):
+            bot.funded_entry(record, state, 'TEST', 'YES', D('0.55'), closed, 'regular')
+    restored = json.loads(json.dumps(state))
+    record = restored['markets']['TEST']
+    assert record['entry_intents'][0]['reserved_dollars'] == original_reserved
+    assert all(i['reserved_dollars'] == '0' and i['entry_closed'] and D(i['released_dollars']) > 0
+               for i in record['entry_intents'][1:])
+    monkeypatch.setattr(fake, 'place_entry', accepted)
+    result, quantity = bot.funded_entry(record, restored, 'TEST', 'YES', D('0.55'), closed, 'regular')
+    assert result['order_id'] and quantity > 0
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= D('10')
+
+
+@pytest.mark.parametrize('status,code', [(400, None), (400, 'unknown_error'),
+    (409, 'insufficient_balance'), (500, 'insufficient_balance'), (429, None)])
+def test_unproven_rejection_never_refunds(monkeypatch, status, code):
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    def rejected(*args, **kwargs):
+        raise KalshiAPIError(status, 'possibly ambiguous', code=code)
+    monkeypatch.setattr(fake, 'place_entry', rejected)
+    with pytest.raises(KalshiAPIError):
+        bot.funded_entry(record, state, 'TEST', 'YES', D('0.39'), closed, 'regular')
+    intent = record['entry_intents'][0]
+    assert D(intent['reserved_dollars']) > 0
+    assert 'released_dollars' not in intent
+
+
+def test_cannot_refund_order_with_exchange_id():
+    intent = {'order_id': 'accepted', 'reserved_dollars': '2'}
+    with pytest.raises(ValueError):
+        entry_policy.release_unsubmitted(intent, 'insufficient_balance')
+    assert intent['reserved_dollars'] == '2'
+
+
+def test_api_error_preserves_structured_rejection_code(monkeypatch):
+    import requests
+    import kalshi
+    response = requests.Response()
+    response.status_code = 400
+    response._content = b'{"error":{"code":"insufficient_balance","message":"insufficient balance"}}'
+    monkeypatch.setattr(kalshi.requests, 'request', lambda *a, **k: response)
+    with pytest.raises(KalshiAPIError) as raised:
+        KalshiClient().request('GET', '/test')
+    assert raised.value.code == 'insufficient_balance'

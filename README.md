@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.4 Boruto
+# Strike Ruler — 2.0.5 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -61,8 +61,9 @@ The legacy `MARKET_BUDGET_DOLLARS` setting is ignored, so an older Railway value
 The source default is $0.77 per trigger; Railway can override it.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
-saved before submission. Rejections, cancellations, partial fills, sales and
-restarts do not replenish the allowance. This intentionally limits retries and
+saved before submission. Explicit HTTP 400 `insufficient_balance` rejections
+release their reservation because no order was accepted. Cancellations, partial fills, sales,
+ambiguous failures and restarts do not replenish the allowance. This intentionally limits retries and
 can leave part of the allowance unused. Exit fees are separate.
 `MAX_PURCHASES_PER_MARKET` limits regular trigger batches; it does not allocate
 additional money or count each tier as a separate purchase.
@@ -157,8 +158,16 @@ from a phone in v2's deployment logs. `python bot.py --check` also emits it.
 
 ## 2.0.3 — Additional regular entry pairs
 
-Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap is now $10; timing, opening and late pairs are unchanged. Rejected-order reservations still consume the market allowance.
+Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap is now $10; timing, opening and late pairs are unchanged. See 2.0.5 for explicit balance-rejection reservation recovery.
 
 ## 2.0.4 — Direction on every valid window
 
 Four-point majorities keep their existing direction (3 below → YES, 3 above → NO). Mixed windows use the most recent non-equal lookback: below → YES, above → NO. If all four equal the strike, the explicit fallback is YES. These fallback signals have LOW confidence and are eligible for regular entries. Previous bias does not veto a signal. Valid four-point data always produces YES or NO; missing/invalid data still blocks execution. Timing, $10 allowance, entry pairs and order checks remain in place. A saved older-build window waits until the next market before using this signal revision.
+
+## 2.0.5 — Fresh account-scope diagnostics
+
+Every 60 seconds a separate GET-only worker logs available cash from the default API account and balances returned by `/portfolio/subaccounts/balances`, preserving each subaccount number, exchange index and update timestamp. Default-account scope is explicit: the report is not the entire website portfolio. Failed/restricted lookups log only error type and status, never a fabricated zero or credentials. The diagnostic client has a five-second timeout and does not block the entry or exit workers. Order routing, account selection, trading rules and signal build are unchanged.
+
+### Entry reservation recovery
+
+A structured HTTP 400 `insufficient_balance` rejection releases only that new intent's reservation, preserves the rejected attempt and released amount for audit, and logs `ENTRY_RESERVATION_RELEASED`. Timeouts, 409/5xx responses, unrecognized errors and accepted orders retain their budget; filled, canceled and sold orders do not recycle allowance. Old closed intents are not retroactively refunded because the earlier state did not record proof of rejection. The $10 cap, prices, account routing and take-profit checks remain unchanged. This fixes false exhaustion of the bot allowance; it cannot make funds in another account available to this API account.

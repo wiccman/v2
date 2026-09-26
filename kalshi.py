@@ -13,10 +13,11 @@ from cryptography.hazmat.primitives.asymmetric import padding
 BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 
 class KalshiAPIError(RuntimeError):
-    def __init__(self, status_code, message, retry_after=None):
+    def __init__(self, status_code, message, retry_after=None, code=None):
         super().__init__(message)
         self.status_code = status_code
         self.retry_after = retry_after
+        self.code = code
 
 def _latest_index_value(payload):
     """Extract the newest numeric index value from a CF Benchmarks response."""
@@ -75,9 +76,18 @@ class KalshiClient:
             response.raise_for_status()
         except requests.HTTPError as error:
             details = response.text.strip() or "<empty response>"
+            code = None
+            try:
+                payload = response.json()
+                error_body = payload.get("error", payload)
+                candidate = error_body.get("code")
+                if isinstance(candidate, str):
+                    code = candidate
+            except (ValueError, TypeError, AttributeError):
+                pass
             raise KalshiAPIError(
                 response.status_code, f"Kalshi API {response.status_code} {method.upper()} {path}: {details}",
-                retry_after=response.headers.get("Retry-After"),
+                retry_after=response.headers.get("Retry-After"), code=code,
             ) from error
         return response.json() if response.content else {}
 
@@ -117,6 +127,9 @@ class KalshiClient:
 
     def balance(self):
         return self.request("GET", "/portfolio/balance", auth=True)
+
+    def subaccount_balances(self):
+        return self.request("GET", "/portfolio/subaccounts/balances", auth=True)
 
     def positions(self, ticker=None):
         params = {"ticker": ticker} if ticker else None

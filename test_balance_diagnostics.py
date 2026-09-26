@@ -36,3 +36,52 @@ def test_read_only_and_error_redaction(capsys):
     r=log_api_cash(SimpleNamespace(balance=read))
     assert calls==['balance'] and r['http_status']==401
     assert 'PRIVATE KEY' not in capsys.readouterr().out
+
+
+def test_subaccount_cash_is_dollars_and_scopes_stay_separate():
+    from balance_diagnostics import subaccount_report
+    payload = {'subaccount_balances': [
+        {'subaccount_number': 0, 'exchange_index': 2, 'balance': '0.0028', 'updated_ts': 1},
+        {'subaccount_number': 1, 'exchange_index': 2, 'balance': '50.4700', 'secret': 'HIDDEN'},
+        {'subaccount_number': 1, 'exchange_index': 0, 'balance': '0.0000'}]}
+    rows = subaccount_report(payload)['subaccount_balances']
+    assert [r['cash_dollars'] for r in rows] == ['0.0028', '50.4700', '0.0000']
+    assert [r['subaccount_number'] for r in rows] == [0, 1, 1]
+    assert [r['exchange_index'] for r in rows] == [2, 2, 0]
+    assert 'HIDDEN' not in json.dumps(rows)
+
+
+def test_monitor_reads_both_scopes_after_default_error(capsys):
+    from balance_diagnostics import BalanceMonitor
+    calls = []
+    def default():
+        calls.append('default')
+        raise KalshiAPIError(403, 'SECRET')
+    def all_accounts():
+        calls.append('all')
+        return {'subaccount_balances': []}
+    BalanceMonitor(SimpleNamespace(balance=default, subaccount_balances=all_accounts)).run_once()
+    lines = [json.loads(x) for x in capsys.readouterr().out.splitlines()]
+    assert calls == ['default', 'all']
+    assert lines[0]['event'] == 'API_CASH_BALANCE_ERROR'
+    assert lines[1]['event'] == 'API_SUBACCOUNT_BALANCES'
+    assert 'SECRET' not in json.dumps(lines)
+
+
+def test_subaccount_restricted_error_is_not_reported_as_zero(capsys):
+    from balance_diagnostics import log_subaccount_cash
+    def denied():
+        raise KalshiAPIError(403, 'SECRET')
+    report = log_subaccount_cash(SimpleNamespace(subaccount_balances=denied))
+    assert report['http_status'] == 403
+    assert 'subaccount_balances' not in report
+    assert 'SECRET' not in capsys.readouterr().out
+
+
+def test_subaccount_endpoint_only_performs_get():
+    from kalshi import KalshiClient
+    client = KalshiClient()
+    calls = []
+    client.request = lambda *args, **kwargs: calls.append((args, kwargs)) or {'subaccount_balances': []}
+    assert client.subaccount_balances() == {'subaccount_balances': []}
+    assert calls == [(('GET', '/portfolio/subaccounts/balances'), {'auth': True})]
