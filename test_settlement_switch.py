@@ -41,10 +41,16 @@ class SwitchExchange(PairExchange):
         sign = 1 if body['side'] == 'bid' else -1
         quantity = D(body['count'])
         oid = f'settlement-{len(self.buys)}'
-        self.held += sign * quantity
-        self.remote[oid] = {'order_id': oid, 'client_order_id': body['client_order_id'],
-                            'status': 'executed', 'fill_count_fp': str(quantity)}
-        self.fill(oid, sign, quantity, body['price'])
+        selected_ask = D(self.quotes[self.desired.lower() + '_ask_dollars'])
+        filled = selected_ask <= D('.97')
+        if filled:
+            self.held += sign * quantity
+            self.remote[oid] = {'order_id': oid, 'client_order_id': body['client_order_id'],
+                                'status': 'executed', 'fill_count_fp': str(quantity)}
+            self.fill(oid, sign, quantity, body['price'])
+        else:
+            self.remote[oid] = {'order_id': oid, 'client_order_id': body['client_order_id'],
+                                'status': 'resting', 'fill_count_fp': '0'}
         if self.entry_failure:
             raise self.entry_failure
         return {'order_id': oid}
@@ -202,16 +208,17 @@ def test_failed_close_never_allows_netting_buy(tmp_path, monkeypatch, failure):
     assert len(e.submissions) == 1
 
 
-def test_missing_liquidity_or_changed_97_quote_does_not_force_a_sale(tmp_path, monkeypatch):
+def test_resting_97_limit_does_not_overpay_after_loss_close(tmp_path, monkeypatch):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
     bot.settlement_entry(record, state, 'T', closed)
     e.quotes['yes_ask_dollars'] = '.98'
     monitor.run_once()
-    assert not e.submissions
-    e.quotes['yes_ask_dollars'] = '.97'
-    e.quotes['no_bid_dollars'] = '0'
+    assert len(e.submissions) == 1 and e.held == 0
     monitor.run_once()
-    assert not e.submissions and not e.buys
+    assert monitor.settlement_ready('T', 'YES')
+    bot.settlement_entry(record, state, 'T', closed)
+    assert len(e.buys) == 1 and e.buys[0]['time_in_force'] == 'good_till_canceled'
+    assert e.buys[0]['price'] == '0.9700' and e.held == 0
 
 
 def test_market_close_prevents_both_transition_orders(tmp_path, monkeypatch):
