@@ -184,8 +184,7 @@ def test_fixed_entry_validation_rejects_old_46_cent_price(monkeypatch):
 def test_retired_38_and_39_cent_tiers_cannot_open_new_inventory(monkeypatch, price):
     from test_five_minute_exits import cycle_setup
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 180)
-    with pytest.raises(ValueError, match="fixed entry limit"):
-        bot.funded_entry(record, state, "TEST", "YES", D(price), closed, "regular")
+    assert bot.funded_entry(record, state, "TEST", "YES", D(price), closed, "regular") == ({}, 0)
     assert fake.entries == []
 
 
