@@ -341,8 +341,7 @@ def previous_market_bias(state, started):
 def entry_decision(record, side, price, kind, live_side=None):
     allowed = live_side in ("YES", "NO") and side == live_side
     if kind == SETTLEMENT_KIND:
-        allowed = (live_side in ("YES", "NO") and side == live_side
-                   and Decimal(str(price)) == SETTLEMENT_PRICE)
+        allowed = side in ("YES", "NO") and Decimal(str(price)) == SETTLEMENT_PRICE
         reason = "live_strike_97_cent_limit"
         switch = record.get("settlement_switch", {})
         if switch.get("side") != side or switch.get("phase") != "ready":
@@ -385,8 +384,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return {}, Decimal("0")
     try:
         current_market = client.market(ticker)
-        spot = client.btc_reference_price()
-        live_side = strike_side(current_market, spot)
+        spot = client.btc_reference_price() if kind != SETTLEMENT_KIND else None
+        live_side = strike_side(current_market, spot) if spot is not None else None
     except Exception as error:
         write_log("ENTRY_LIVE_SIDE_UNAVAILABLE", ticker, details=type(error).__name__)
         return {}, Decimal("0")
