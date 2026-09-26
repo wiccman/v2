@@ -5,7 +5,7 @@ from decimal import Decimal as D
 FEE_RESERVE = D("0.03")  # per contract, including fractional-fill rounding cushion
 ZERO = D("0")
 ENTRY_QUANTITY = D("5")
-SETTLEMENT_BUDGET = D("10")
+SETTLEMENT_BUDGET = D("6")
 SETTLEMENT_PRICE = D("0.97")
 SETTLEMENT_KIND = "settlement_97"
 
@@ -13,7 +13,7 @@ SETTLEMENT_KIND = "settlement_97"
 def market_budget():
     # Fixed requested allowance; stale Railway budget settings must not keep
     # this release at an older cap.
-    return D("26")
+    return D("15")
 
 
 def initialize(record):
@@ -50,7 +50,7 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
         if price != SETTLEMENT_PRICE or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
             return None
     else:
-        # Earlier trades cannot consume the ten dollars reserved for settlement.
+        # Earlier trades cannot consume the settlement budget reserved for settlement.
         cap = min(cap, market_budget() - SETTLEMENT_BUDGET)
     quantity = entry_quantity(price, kind)
     # Never shrink the requested five contracts to fit leftover allowance.
