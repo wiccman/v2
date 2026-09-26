@@ -35,7 +35,7 @@ class DualLimitClient:
         return {"order_id": order_id, "reduced_by": "1.00"}
 
 
-def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch):
+def test_dual_limit_buys_post_remaining_level_with_eight_minute_expiry(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -48,7 +48,7 @@ def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch
     assert [entry[2] for entry in fake.entries] == [Decimal(q) for q in ("0.33", "0.32", "0.26", "0.23", "0.22", "0.21")]
     assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.38", "0.39", "0.49", "0.55", "0.56", "0.61")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.BUDGET
-    assert all(entry[4] == 1460 for entry in fake.entries)
+    assert all(entry[4] == 1580 for entry in fake.entries)
     assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in bot.ENTRY_EXIT_PAIRS]
 
 
@@ -76,7 +76,7 @@ def test_historical_strike_reaction_uses_approach_side():
     assert bot.strike_reaction_side(Decimal("100000"), Decimal("100000")) is None
 
 
-def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(monkeypatch):
+def test_historical_strike_touch_posts_remaining_pair_with_eight_minute_expiry(monkeypatch):
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -95,7 +95,7 @@ def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(mon
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1000, state={"markets": {"MARKET": record}},
     ) is True
     assert len(fake.entries) == 6
-    assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1460 for e in fake.entries)
+    assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1580 for e in fake.entries)
     assert [e[3] for e in fake.entries] == list(bot.ENTRY_EXIT_PAIRS)
     assert sum(e[2] * e[3] for e in fake.entries) <= bot.BUDGET
     assert record["historical_triggered_strikes"] == ["100000"]

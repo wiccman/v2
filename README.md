@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.5 Boruto
+# Strike Ruler — 2.0.6 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -26,9 +26,9 @@ marks overdue slots missed instead of inventing earlier prices. The final averag
 is available only when all three captures exist. These quoted prices are market
 implied values, not calibrated probabilities of success.
 
-New regular, dual and historical entries run from minute 2 until strictly before
-minute 5. No route may submit after 5:00, including after a slow API call. Entry
-orders expire at the absolute 6:00 market boundary; cancellation sweeps retry
+New regular, bias-limit and historical entries run from minute 0 until strictly before
+minute 8. These routes cannot submit at or after 8:00, including after a slow API call. Their
+orders expire at the absolute 8:00 market boundary; cancellation sweeps retry
 failed requests. Exit monitoring continues after both cutoffs.
 
 ## Entries, exits and budgets
@@ -51,7 +51,7 @@ Regular bias-based entries run first when a valid prediction snapshot is availab
 An optional limit batch submits the regular tiers only on the current bias side. Historical-strike
 touches use the side of approach; the optional early spot trigger buys YES when
 spot is sufficiently above the current strike. This early route operates before
-minute 2 by default; `ENTRY_START_MINUTE` applies to the other three routes.
+minute 2 by default; the other three routes start at minute 0.
 
 `ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular, historical
 and spot triggers split their trigger budget across all six regular tiers. A dual batch splits the same amount
@@ -94,8 +94,8 @@ Important defaults:
 | `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $10 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
-| `ENTRY_START_MINUTE` | `2` | Earliest new entry |
-| `ENTRY_END_MINUTE` | `5` | Entry cutoff, capped at five minutes |
+| `ENTRY_START_MINUTE` | `0` (fixed) | Earliest new entry |
+| `ENTRY_END_MINUTE` | `8` (fixed) | Older environment overrides are ignored |
 | `POLL_SECONDS` | `5` | Entry-loop delay |
 | `EXIT_POLL_SECONDS` | `1` | Independent exit-loop delay |
 | `STATE_PATH` | `/data/state.json` | Durable entry ledger |
@@ -171,3 +171,7 @@ Every 60 seconds a separate GET-only worker logs available cash from the default
 ### Entry reservation recovery
 
 A structured HTTP 400 `insufficient_balance` rejection releases only that new intent's reservation, preserves the rejected attempt and released amount for audit, and logs `ENTRY_RESERVATION_RELEASED`. Timeouts, 409/5xx responses, unrecognized errors and accepted orders retain their budget; filled, canceled and sold orders do not recycle allowance. Old closed intents are not retroactively refunded because the earlier state did not record proof of rejection. The $10 cap, prices, account routing and take-profit checks remain unchanged. This fixes false exhaustion of the bot allowance; it cannot make funds in another account available to this API account.
+
+## 2.0.6 — Eight-minute regular entry window
+
+Regular, bias-limit and historical-strike entries are eligible from 0:00 through 7:59 of each 15-minute market. Unfilled regular orders expire at 8:00, and no regular POST may occur at or after that boundary. Previous Railway start/end values cannot shorten this window. The 52¢ opening rule remains limited to the first two minutes; the separate late rules remain at minutes 11–13. Exit monitoring continues throughout the market. The $10 shared cap, purchase-count limit and entry interval still apply, so eligibility for eight minutes does not guarantee continuous purchases. Existing saved order expirations are respected; new regular orders use the eight-minute deadline.
