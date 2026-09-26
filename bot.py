@@ -60,12 +60,14 @@ ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inve
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MIN_ENTRY_PRICE = Decimal("0.45")
+MID_PRICE_ENTRY_FLOOR = Decimal("0.60")
+MID_PRICE_ENTRY_START = 300
 EARLY_ENTRY_PRICE_CEILING = Decimal("0.70")
 HIGH_PRICE_ENTRY_START = 480
 SIX_MINUTE_ENTRY_PRICE = Decimal("0.75")
 SIX_MINUTE_ENTRY_START = 360
 LOW_PRICE_ENTRY_END = 360
-ENTRY_EXECUTION_VERSION = 5
+ENTRY_EXECUTION_VERSION = 6
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces ENTRY_QUANTITY.
@@ -381,6 +383,12 @@ def tracked_entry_price_allowed(intent):
 
 
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
+    # Gate the submitted limit on every route. A 62c/67c limit can otherwise
+    # execute at a 60c ask even when a lower tier would have waited.
+    if Decimal(str(price)) >= MID_PRICE_ENTRY_FLOOR and time.time() < closed.timestamp() - 900 + MID_PRICE_ENTRY_START:
+        write_log("ENTRY_FIVE_MINUTE_WAIT", ticker, prediction=side, price=str(price),
+                  details="Buy limits of 60c or more open no earlier than 5:00")
+        return {}, Decimal("0")
     # Persisted intents are also the opening-tier attempt ledger, so a lost
     # acknowledgement or restart cannot duplicate the new 57c order.
     if Decimal(str(price)) in OPENING_EXTRA_PAIR and any(
@@ -1058,7 +1066,7 @@ def cycle(state):
                     record["buys"] += 1; record["last_buy"] = time.time()
                     counted = True
                 record["orders"].append(result["order_id"])
-                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"paired purchase {record['buys']} of {MAX_BUYS}")
+                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"batch {record['buys']} of {MAX_BUYS}; tier {price}; order {result['order_id']}")
                 save_state(state)
     late_start = started.timestamp() + LATE_ENTRY_START
     late_end = started.timestamp() + LATE_ENTRY_END
@@ -1112,6 +1120,7 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entry_side=live_BTC_vs_market_strike", flush=True)
+    print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=720s..900s; required_ask=97c; limit=97c; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
@@ -1127,7 +1136,7 @@ def main():
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
-        print("CONFIG_IGNORED: fixed price-based windows: under70c before6m, 35c from3m, 70c+ from8m, settlement from12m", flush=True)
+        print("CONFIG_IGNORED: fixed windows: under60c before6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c before2m; settlement from12m; 35c retired", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:

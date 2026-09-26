@@ -27,7 +27,8 @@ New entries follow fixed price-based windows within each 15-minute market:
 | --- | --- |
 | 52¢→60¢ opening entry | 0:00–2:00 |
 | New 57¢→62¢ opening entry | 0:00–2:00 |
-| 45–67¢ regular tiers | 0:00–6:00 |
+| 45–59¢ regular tiers | 0:00–6:00 |
+| 60–69¢ regular tiers (currently 62¢/64¢/67¢) | 5:00–6:00 |
 | New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
@@ -41,6 +42,11 @@ or ambiguous attempt cannot be duplicated after restart.
 The 75¢ tier is the only new entry available from 6:00 to 8:00. Other 70¢+
 limits wait until 8:00, and ordinary limits below 70¢ stop at 6:00. The shared
 gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
+Every route also blocks buy limits of 60¢ or higher before 5:00, even when the
+current ask is cheaper. The later 75¢, 70¢, 73¢/85¢ and settlement windows still
+apply. Buy logs identify each order's tier and batch separately; the batch number
+is not an order count. Regular batches can repeat after the configured interval
+while allowance remains. The earlier allowance is not replenished by sales.
 Funds, quote checks and existing batch limits still apply. Exit monitoring
 continues until market close.
 
