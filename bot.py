@@ -4,7 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from balance_diagnostics import log_api_cash, BalanceMonitor
@@ -341,14 +341,21 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         result = client.place_entry(ticker, side, quantity, price, intent["cancel_at"],
                                     submit_before=cutoff, client_order_id=intent["client_id"])
     except KalshiAPIError as error:
-        if error.status_code in {400, 401, 403, 404, 422, 429}:
+        if error.status_code == 400 and error.code == "insufficient_balance":
+            release_unsubmitted(intent, "insufficient_balance")
+            save_state(state)
+            write_log("ENTRY_RESERVATION_RELEASED", ticker, price=str(price), details=json.dumps({
+                "reason": intent["release_reason"], "released_dollars": intent["released_dollars"],
+                "client_id": intent["client_id"], "kind": kind,
+            }))
+        elif error.status_code in {400, 401, 403, 404, 422, 429}:
             intent["entry_closed"] = True
         save_state(state)
         raise
     if result.get("order_id"):
         intent["order_id"] = result["order_id"]
     elif not result:
-        intent["entry_closed"] = True  # Locally refused at the submit deadline.
+        intent["entry_closed"] = True  # Keep allowance without explicit rejection proof.
     save_state(state)
     if EXIT_MONITOR is not None:
         EXIT_MONITOR.wake()

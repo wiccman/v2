@@ -42,6 +42,19 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
                   quantity=str(quantity), reserved_dollars=str(quantity * (price + FEE_RESERVE)),
                   cancel_at=cancel_at, kind=kind, entry_closed=False)
     record["entry_intents"].append(intent)
-    # Reservations remain spent even after cancel/reject/exit: never recycle the
-    # same allowance or overspend after an ambiguous POST or process restart.
+    # Accepted/ambiguous orders retain allowance after cancel, exit or restart.
+    # Only a proven no-order outcome can explicitly release its reservation.
     return intent
+
+
+def release_unsubmitted(intent, reason):
+    """Release only an intent proven not to have created an exchange order."""
+    if reason != 'insufficient_balance':
+        raise ValueError('Unverified release reason')
+    if intent.get('order_id'):
+        raise ValueError('Cannot release an accepted order reservation')
+    if 'released_dollars' not in intent:
+        intent['released_dollars'] = intent['reserved_dollars']
+    intent['reserved_dollars'] = '0'
+    intent['entry_closed'] = True
+    intent['release_reason'] = reason
