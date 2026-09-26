@@ -50,7 +50,7 @@ class Exchange(RecordingClient):
             raise TimeoutError("Acknowledgement lost after exchange execution")
         return {"order_id": oid, "fill_count": str(fill)}
 
-    def order(self, order_id):
+    def order(self, order_id, ticker=None):
         return self.remote[order_id]
 
     def all_orders(self, ticker):
