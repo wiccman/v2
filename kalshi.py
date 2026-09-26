@@ -124,7 +124,11 @@ class KalshiClient:
     def all_orders(self, ticker, status=None):
         params = {"limit": 100}
         if ticker:
-            params.update(ticker=ticker, market_ticker=ticker, exchange_index=-1)
+            # GetOrders is an aggregate read, not an API2 matching-engine
+            # operation: it rejects negative exchange_index values. Omitting
+            # that filter searches all shards while ticker scopes the market.
+            # Keep API2 auto-routing on single-order/cancel calls separate.
+            params["ticker"] = ticker
         if status is not None:
             params["status"] = status
         found, cursors = [], set()

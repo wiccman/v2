@@ -1,5 +1,6 @@
 """Read-only status recovery; never place live orders."""
 import json
+from decimal import Decimal
 import pytest
 from kalshi import KalshiClient, KalshiAPIError
 from test_take_profit_monitor import Exchange, monitor
@@ -20,10 +21,11 @@ def test_404_recovers_exact_order_on_later_page(monkeypatch):
     client = KalshiClient()
     def request(method, path, params=None, **kw):
         assert method == 'GET'
-        assert params['market_ticker'] == 'T' and params['exchange_index'] == -1
         if path.endswith('/O'):
+            assert params == {'market_ticker': 'T', 'exchange_index': -1}
             raise KalshiAPIError(404, 'not found')
         assert params['ticker'] == 'T'
+        assert 'exchange_index' not in params and 'market_ticker' not in params
         if not params.get('cursor'):
             return {'orders': [{'order_id': 'other', 'ticker': 'T'}], 'cursor': 'next'}
         return {'orders': [{'order_id': 'O', 'ticker': 'T', 'status': 'canceled', 'fill_count_fp': '2'}]}
@@ -73,3 +75,76 @@ def test_pending_exit_survives_404_and_restart_without_duplicate_sell(tmp_path, 
     assert 'pending' not in json.loads(svc.path.read_text())['markets']['T']
     assert len(exchange.submissions) == 1 and restarted.healthy
     assert all(t == 'T' for t in seen)
+
+
+@pytest.mark.parametrize('status', [None, 'resting'])
+def test_order_history_uses_ticker_filter_without_negative_shard(monkeypatch, status):
+    """Replay GetOrders validation observed in production on September 26."""
+    client = KalshiClient()
+    calls = []
+    def request(method, path, params=None, **kwargs):
+        assert (method, path) == ('GET', '/portfolio/orders')
+        calls.append(dict(params))
+        if params.get('exchange_index', 0) < 0:
+            raise KalshiAPIError(400, 'GetOrdersParams.ExchangeIndex failed on gte')
+        return {'orders': [{'order_id': 'O', 'ticker': 'T', 'exchange_index': 2}]}
+    monkeypatch.setattr(client, 'request', request)
+    assert client.all_orders('T', status)[0]['order_id'] == 'O'
+    expected = {'limit': 100, 'ticker': 'T'}
+    if status is not None:
+        expected['status'] = status
+    assert calls == [expected]
+
+
+def test_unfiltered_order_history_keeps_all_shards(monkeypatch):
+    client = KalshiClient()
+    def request(method, path, params=None, **kwargs):
+        assert (method, path, params) == ('GET', '/portfolio/orders', {'limit': 100})
+        return {'orders': []}
+    monkeypatch.setattr(client, 'request', request)
+    assert client.all_orders(None) == []
+
+
+@pytest.mark.parametrize('sign', [1, -1])
+@pytest.mark.parametrize('lost_ack', [False, True])
+def test_exit_recovery_uses_valid_history_query_after_restart(tmp_path, monkeypatch, sign, lost_ack):
+    exchange = Exchange(quantity=str(sign * 2), bid='.45', liquidity='.75')
+    exchange.lose_ack = lost_ack
+    svc, _, _, _ = monitor(tmp_path, exchange)
+    svc.run_once()
+    assert len(exchange.submissions) == 1
+    assert exchange.held == sign * Decimal('1.25')
+    exchange.lose_ack = False
+
+    # Exercise the real client lookup/fallback, including an order-status 404
+    # and the production list endpoint's nonnegative exchange-index constraint.
+    post = exchange.request
+    reads = []
+    def request(method, path, params=None, body=None, auth=False):
+        if method == 'POST':
+            return post(method, path, params, body, auth)
+        assert method == 'GET'
+        reads.append((path, dict(params)))
+        if path.startswith('/portfolio/orders/'):
+            raise KalshiAPIError(404, 'Read model has not exposed single order yet')
+        assert path == '/portfolio/orders'
+        if params.get('exchange_index', 0) < 0:
+            raise KalshiAPIError(400, 'GetOrdersParams.ExchangeIndex failed on gte')
+        assert params['ticker'] == 'T'
+        return {'orders': [dict(order, ticker='T', exchange_index=2)
+                           for order in exchange.remote.values()]}
+    monkeypatch.setattr(exchange, 'request', request)
+    monkeypatch.setattr(exchange, 'order', KalshiClient.order.__get__(exchange))
+    monkeypatch.setattr(exchange, 'all_orders', KalshiClient.all_orders.__get__(exchange))
+    exchange.liquidity = 100
+    restarted, _, clock, _ = monitor(tmp_path, exchange)
+    clock[0] += 60
+    restarted.run_once()
+    restarted.run_once()
+    assert restarted.healthy
+    assert exchange.held == 0
+    assert [body['count'] for body in exchange.submissions] == ['2', '1.25']
+    assert all(body['reduce_only'] and body['time_in_force'] == 'immediate_or_cancel'
+               for body in exchange.submissions)
+    assert any(path == '/portfolio/orders' for path, _ in reads)
+    assert 'pending' not in json.loads(svc.path.read_text())['markets']['T']

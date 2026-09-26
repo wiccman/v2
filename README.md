@@ -144,6 +144,18 @@ cutoff, and remove obsolete variables rather than using them to configure exits.
 
 ## Validation and deployment
 
+Order-history recovery uses the `ticker` filter on `GET /portfolio/orders`.
+This aggregate endpoint rejects `exchange_index=-1`; omitting `exchange_index`
+returns matching orders across shards without requiring another market lookup.
+The API2 auto-routing parameters used for individual order and cancellation
+requests must not be copied into this aggregate query. Exact order ID/ticker
+matching, pagination, and unresolved-exit protection still apply.
+
+The V2 order endpoint quotes the YES leg: an intentional NO entry is sent as a
+YES ask at `1 - NO price`, so an account-history label of "Sold Yes" alone does
+not identify a take-profit exit or an accidental position reversal. Exit orders
+remain reduce-only immediate-or-cancel orders.
+
 Install `requirements.txt` and pytest, then run `python -m pytest -q`.
 The tests use fake exchange clients and do not place live trades.
 
