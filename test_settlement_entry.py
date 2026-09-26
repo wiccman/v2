@@ -18,7 +18,7 @@ def setup(monkeypatch, elapsed=780, side='YES'):
     return fake, record, state, clock, closed
 
 
-@pytest.mark.parametrize('elapsed,expected', [(779,0),(780,1),(899,1),(900,0)])
+@pytest.mark.parametrize('elapsed,expected', [(719,0),(720,1),(779,1),(780,1),(899,1),(900,0)])
 @pytest.mark.parametrize('side', ['YES','NO'])
 def test_boundary_side_and_six_contract_ioc(monkeypatch, elapsed, expected, side):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, side)

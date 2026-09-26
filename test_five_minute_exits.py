@@ -66,7 +66,8 @@ def cycle_setup(monkeypatch, elapsed):
               "historical_strike_orders": [{"order_id": "historical", "side": "YES", "entry_closed": True}]}
     state = {"markets": {"TEST": record}}
     monkeypatch.setattr(bot, "client", fake)
-    monkeypatch.setattr(bot, "EXIT_MONITOR", SimpleNamespace(healthy=True, wake=lambda: None))
+    monkeypatch.setattr(bot, "EXIT_MONITOR", SimpleNamespace(healthy=True, wake=lambda: None,
+                        settlement_ready=lambda ticker, side: False))
     # Preserve explicit legacy timing scenarios for migration regression tests.
     monkeypatch.setattr(bot, "START", 120)
     monkeypatch.setattr(bot, "END", 300)
@@ -83,10 +84,7 @@ def cycle_setup(monkeypatch, elapsed):
 def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeypatch, elapsed):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     bot.cycle(state)
-    if elapsed == 720:
-        assert len(fake.entries) == 2  # The configured 11-13 minute late-bias pair.
-    else:
-        assert fake.entries == []
+    assert fake.entries == []  # At 12:00 only an exact-97c settlement entry can run.
     assert fake.exits == []  # Independent worker owns exits; no single-target fallback.
     assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
 

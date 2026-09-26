@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError
 from request_coordinator import RequestCoordinator, RequestDeferred
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, settlement_price_allowed, settlement_entry_price_allowed
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from balance_diagnostics import log_api_cash, BalanceMonitor
@@ -22,7 +22,7 @@ if EXECUTION_STRATEGY != "strike_ruler":
     raise SystemExit("Only EXECUTION_STRATEGY=strike_ruler is supported")
 ENTRY_EXIT_PAIRS = parse_pairs(os.getenv("ENTRY_EXIT_PAIRS_CENTS", "45:50"))
 # Apply the active tiers even when Railway still has an older pair setting.
-ENTRY_EXIT_PAIRS.update(parse_pairs("45:55,48:53,51:56,53:58,56:61,59:64,62:67,64:69,67:72,70:80"))
+ENTRY_EXIT_PAIRS.update(parse_pairs("35:42,45:55,48:53,51:56,53:58,56:61,59:64,62:67,64:69,67:72,70:80"))
 # Retired tiers must never be reintroduced by a stale environment variable.
 ENTRY_EXIT_PAIRS.pop(Decimal("0.38"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.39"), None)
@@ -48,17 +48,20 @@ ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inve
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MIN_ENTRY_PRICE = Decimal("0.45")
+DISCOUNT_ENTRY_PRICE = Decimal("0.35")
+DISCOUNT_ENTRY_START = 180
 EARLY_ENTRY_PRICE_CEILING = Decimal("0.70")
-HIGH_PRICE_ENTRY_START = 180
+HIGH_PRICE_ENTRY_START = 480
+LOW_PRICE_ENTRY_END = 360
 ENTRY_EXECUTION_VERSION = 3
 MARKET_BUDGET = market_budget()
-CANCEL_AFTER = 480
+CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces ENTRY_QUANTITY.
 BUDGET = Decimal("0.77")
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 START = 0
-END = 480  # Fixed eight-minute entry window, including stale Railway overrides.
+END = 900 - SETTLEMENT_WINDOW  # Final three minutes belong to the settlement route.
 PREDICTION_MINUTES = (2, 4, 6)
 PREDICTION_GRACE_SECONDS = 15
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
@@ -331,13 +334,16 @@ def entry_decision(record, side, price, kind):
     if kind == SETTLEMENT_KIND:
         allowed = side in ("YES", "NO") and settlement_entry_price_allowed(price)
         reason = "market_97_cent_side"
+        switch = record.get("settlement_switch", {})
+        if switch.get("side") == side and switch.get("phase") == "ready":
+            locked_side = side  # Exit monitor confirmed the requested transition.
     elif current_bias not in ("YES", "NO"):
         reason = "current_bias_unavailable"
     elif side != current_bias:
         reason = "selected_side_opposes_current_bias"
     else:
         reason = kind
-    if Decimal(str(price)) < MIN_ENTRY_PRICE:
+    if Decimal(str(price)) < MIN_ENTRY_PRICE and Decimal(str(price)) != DISCOUNT_ENTRY_PRICE:
         allowed = False
         reason = "entry_limit_below_45c"
     if allowed and locked_side and side != locked_side:
@@ -363,6 +369,12 @@ def tracked_entry_price_allowed(intent):
 
 
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
+    switch = record.get("settlement_switch")
+    if switch:
+        if kind != SETTLEMENT_KIND or switch.get("side") != side or switch.get("phase") != "ready":
+            return {}, Decimal("0")
+        if EXIT_MONITOR is None or not EXIT_MONITOR.settlement_ready(ticker, side):
+            return {}, Decimal("0")
     allowed, decision = entry_decision(record, side, price, kind)
     write_log("ENTRY_DECISION", ticker, prediction=side, price=str(price), details=json.dumps(decision))
     if not allowed:
@@ -377,12 +389,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
            for i in record.get("entry_intents", [])):
         return {}, Decimal("0")  # Reconcile old-price orders before adding exposure.
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
-    cutoff = entry_deadline(closed) if submit_before is None else float(submit_before)
+    policy_cutoff = closed.timestamp() - 900 + (LOW_PRICE_ENTRY_END
+        if Decimal(str(price)) < EARLY_ENTRY_PRICE_CEILING else END)
     if kind == SETTLEMENT_KIND:
-        if not closed.timestamp() - 120 <= time.time() < closed.timestamp():
+        if not closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
             return {}, Decimal("0")
-        cutoff = min(cutoff, closed.timestamp())
-    if now_timestamp >= cutoff:
+        policy_cutoff = closed.timestamp()
+    cutoff = min(policy_cutoff, float(submit_before) if submit_before is not None else policy_cutoff)
+    if max(now_timestamp, time.time()) >= cutoff:
         return {}, Decimal("0")
     # Enforce on every route, using the actual clock rather than a caller's
     # possibly stale timestamp. A lower ask cannot bypass a 70c buy limit.
@@ -391,6 +405,10 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         write_log("ENTRY_EARLY_PRICE_WAIT", ticker, prediction=side, price=str(price),
                   details=json.dumps({"minimum_elapsed_seconds": HIGH_PRICE_ENTRY_START,
                                       "ceiling_exclusive": str(EARLY_ENTRY_PRICE_CEILING)}))
+        return {}, Decimal("0")
+    if Decimal(str(price)) == DISCOUNT_ENTRY_PRICE and time.time() < closed.timestamp() - 900 + DISCOUNT_ENTRY_START:
+        write_log("ENTRY_DISCOUNT_WAIT", ticker, price=str(price),
+                  details="35c tier opens after three minutes")
         return {}, Decimal("0")
     if time.time() < record.get("cash_retry_at", 0):
         return {}, Decimal("0")
@@ -418,9 +436,10 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     # closed on unavailable quotes; never leave a buy resting through a drop.
     try:
         ask, _ = quotes(client.market(ticker), side)
-        if not ask.is_finite() or not MIN_ENTRY_PRICE <= ask < Decimal("1"):
+        minimum_ask = DISCOUNT_ENTRY_PRICE if Decimal(str(price)) == DISCOUNT_ENTRY_PRICE else MIN_ENTRY_PRICE
+        if not ask.is_finite() or not minimum_ask <= ask < Decimal("1"):
             write_log("ENTRY_PRICE_FLOOR_WAIT", ticker, prediction=side,
-                      details=json.dumps({"ask": str(ask), "minimum": str(MIN_ENTRY_PRICE)}))
+                      details=json.dumps({"ask": str(ask), "minimum": str(minimum_ask)}))
             return {}, Decimal("0")
         if ask > Decimal(str(price)) or (kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask)):
             return {}, Decimal("0")
@@ -429,7 +448,13 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         return {}, Decimal("0")
     if time.time() >= cutoff:
         return {}, Decimal("0")
-    cancel_at = cancellation_deadline(closed) if cancel_at is None else cancel_at
+    if switch:
+        held = settlement_position(ticker)
+        if (side == "YES" and held < 0) or (side == "NO" and held > 0):
+            return {}, Decimal("0")
+        if time.time() >= cutoff or not EXIT_MONITOR.settlement_ready(ticker, side):
+            return {}, Decimal("0")
+    cancel_at = min(cutoff, cancellation_deadline(closed) if cancel_at is None else cancel_at)
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
                            MARKET_BUDGET, cancel_at, kind)
     if intent is None:
@@ -534,7 +559,7 @@ def reconcile_entries(state, now_timestamp=None):
                     save_state(state)
             # Old budgets cannot be reconstructed reliably. Cancel their unfilled
             # remainder on upgrade and resume entries only in a clean market.
-            if now_timestamp < record["entry_cancel_at"] and not record.get("entry_budget_legacy"):
+            if now_timestamp < record["entry_cancel_at"] and not record.get("entry_budget_legacy") and not record.get("settlement_switch"):
                 # On a price-policy upgrade, cancel tracked incompatible buys
                 # immediately; keep their spending reservations across restarts.
                 ids = {i["order_id"] for i in pending if i.get("order_id")
@@ -785,10 +810,20 @@ def update_prediction(record, ticker, current, elapsed):
         write_log("PREDICTION_FINAL", ticker, confidence=record["final_confidence"] or "INCOMPLETE")
     return changed
 
+def settlement_position(ticker):
+    rows = [row for row in client.positions(ticker) if row.get("ticker") == ticker]
+    if len(rows) > 1:
+        raise ValueError("Ambiguous settlement position")
+    held = Decimal(str(rows[0]["position_fp"])) if rows else Decimal("0")
+    if not held.is_finite():
+        raise ValueError("Invalid settlement position")
+    return held
+
+
 def settlement_entry(record, state, ticker, closed):
-    """One price-protected final-two-minute purchase on the market's locked side."""
+    """One exact-97c entry; serialize any loss-taking side change through exits."""
     now = time.time()
-    if not closed.timestamp() - 120 <= now < closed.timestamp():
+    if not closed.timestamp() - SETTLEMENT_WINDOW <= now < closed.timestamp():
         return
     observed = {
         "seconds_remaining": round(closed.timestamp() - now, 3),
@@ -818,20 +853,40 @@ def settlement_entry(record, state, ticker, closed):
         report("waiting_for_exact_97_ask")
         return
     side = sides[0]
-    if locked_side in ("YES", "NO") and side != locked_side:
-        report("97_on_opposite_market_lock", side=side, trade_side=locked_side)
-        return
-    # A settlement-only market can establish its side here. Once chosen, no
-    # later route may buy the complementary contract.
-    if locked_side is None:
+    held = settlement_position(ticker)
+    opposite = (side == "YES" and held < 0) or (side == "NO" and held > 0)
+    switch = record.get("settlement_switch")
+    if switch or opposite or (locked_side and side != locked_side):
+        if switch and switch.get("side") != side:
+            report("switch_direction_already_selected", side=switch.get("side"))
+            return
+        if not switch:
+            # Do not liquidate just to discover that the entry allowance is
+            # already exhausted. Sales never replenish this spending ledger.
+            required = entry_quantity(SETTLEMENT_PRICE, SETTLEMENT_KIND) * (SETTLEMENT_PRICE + FEE_RESERVE)
+            if record.get("entry_budget_legacy") or Decimal(observed["market_reserved_dollars"]) + required > MARKET_BUDGET:
+                report("switch_entry_budget_unavailable")
+                return
+            switch = {"side": side, "previous_side": locked_side, "phase": "requested",
+                      "requested_at": time.time(), "allow_loss": True}
+            record["settlement_switch"] = switch
+            save_state(state)
+            write_log("SETTLEMENT_SWITCH_REQUESTED", ticker, prediction=side,
+                      details=json.dumps(switch))
+        reconcile_entries(state)  # Confirm all prior buys are terminal first.
+        if EXIT_MONITOR is not None:
+            EXIT_MONITOR.wake()
+        if EXIT_MONITOR is None or not EXIT_MONITOR.settlement_ready(ticker, side) or opposite:
+            report("waiting_for_opposite_close_confirmation", side=side, held=str(held))
+            return
+        if switch.get("phase") != "ready":
+            switch["phase"] = "ready"
+            record["trade_side"] = side
+            save_state(state)
+            write_log("SETTLEMENT_SWITCH_READY", ticker, prediction=side)
+    elif locked_side is None:
         record["trade_side"] = side
         save_state(state)
-    held = position(ticker)
-    if (side == "YES" and held < 0) or (side == "NO" and held > 0):
-        report("opposite_inventory", side=side, held=str(held))
-        write_log("SETTLEMENT_WAIT_OPPOSITE_INVENTORY", ticker, prediction=side,
-                  details="Wait for opposite inventory to exit; avoid netting away the settlement purchase")
-        return
     # Reconciliation must cancel earlier entry orders before switching sides.
     pending = [i for i in record.get("entry_intents", []) if not i.get("entry_closed")]
     if any(i.get("side") != side for i in pending):
@@ -876,11 +931,11 @@ def cycle(state):
     record["close_timestamp"] = closed.timestamp()
     save_state(state)
     reconcile_entries(state)
+    if closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
+        settlement_entry(record, state, ticker, closed)
+        return
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
-        return
-    if closed.timestamp() - 120 <= time.time() < closed.timestamp():
-        settlement_entry(record, state, ticker, closed)
         return
     if record["signal"] is None:
         history = client.markets(series_ticker="KXBTC15M", status="settled", limit=100)
@@ -996,11 +1051,11 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; signal_build={SIGNAL_BUILD}", flush=True)
-    print(f"Entry cutoff={END}s; cancel cutoff={CANCEL_AFTER}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
-    print(f"Late entry window={LATE_ENTRY_START}s..{LATE_ENTRY_END}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print("SETTLEMENT_ENTRY window=780s..900s; required_ask=97c; limit=97c; budget=$6 reserved; quantity=6; hold to settlement; earlier allowance=$9", flush=True)
-    print("EARLY_ENTRY_PRICE_LIMIT first_180s: entry limits must be below 70c; 70c tier eligible from 3:00", flush=True)
-    print("ENTRY_PRICE_FLOOR minimum_ask=45c; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
+    print(f"Entry windows: under70c ends360s; 70c+ starts480s, ends{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
+    print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
+    print("SETTLEMENT_ENTRY window=720s..900s; required_ask=97c; limit=97c; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
+    print("DISCOUNT_ENTRY window=180s..360s; limit=35c; target=42c; quantity=5; shared earlier allowance=$9", flush=True)
+    print("ENTRY_PRICE_FLOOR minimum_ask=45c except the 35c tier; fresh quote required; all new buys immediate-or-cancel; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity={ENTRY_QUANTITY} contracts per order; shared market cap=${MARKET_BUDGET}; fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
@@ -1010,7 +1065,7 @@ def main():
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
-        print("CONFIG_IGNORED: regular entry window is fixed at minutes 0 through 8", flush=True)
+        print("CONFIG_IGNORED: fixed price-based windows: under70c before6m, 35c from3m, 70c+ from8m, settlement from12m", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:
