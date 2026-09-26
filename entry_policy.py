@@ -10,6 +10,11 @@ SETTLEMENT_PRICE = D("0.97")
 SETTLEMENT_KIND = "settlement_97"
 
 
+def settlement_price_allowed(price):
+    price = D(str(price))
+    return price.is_finite() and SETTLEMENT_PRICE <= price < D("1")
+
+
 def market_budget():
     # Fixed requested allowance; stale Railway budget settings must not keep
     # this release at an older cap.
@@ -47,7 +52,7 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
         return None
     spent = sum((D(item["reserved_dollars"]) for item in record["entry_intents"]), ZERO)
     if kind == SETTLEMENT_KIND:
-        if price != SETTLEMENT_PRICE or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
+        if not settlement_price_allowed(price) or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
             return None
     else:
         # Earlier trades cannot consume the settlement budget reserved for settlement.
