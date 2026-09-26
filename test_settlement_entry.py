@@ -22,7 +22,7 @@ def setup(monkeypatch, elapsed=780, side='YES'):
 @pytest.mark.parametrize('side', ['YES','NO'])
 def test_boundary_side_and_ten_contract_ioc(monkeypatch, elapsed, expected, side):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, side)
-    record['signal'] = {'prediction': 'NO' if side == 'YES' else 'YES'}
+    record['signal'] = {'prediction': side}
     bot.settlement_entry(record, state, 'TEST', closed)
     assert len(fake.entries) == expected
     if expected:
@@ -130,6 +130,13 @@ def test_final_route_does_not_require_strike_ruler_signal(monkeypatch):
     record['signal'] = None
     bot.cycle(state)
     assert len(fake.entries) == 1 and fake.entries[0][1] == 10
+
+
+def test_final_entry_never_flips_the_market_side(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch, side='NO')
+    record['trade_side'] = 'YES'
+    bot.settlement_entry(record, state, 'TEST', closed)
+    assert not fake.entries
 
 
 @pytest.mark.parametrize('quantity', ['10','3.25'])
