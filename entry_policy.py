@@ -30,6 +30,12 @@ def initialize(record):
     record["entry_intents"] = []
 
 
+def entry_quantity(price, kind):
+    if kind == SETTLEMENT_KIND:
+        return (SETTLEMENT_BUDGET / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
+    return ENTRY_QUANTITY
+
+
 def reserve(record, side, price, order_budget, cap, cancel_at, kind):
     initialize(record)
     if record.get("entry_budget_legacy"):
@@ -43,11 +49,10 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
     if kind == SETTLEMENT_KIND:
         if price != SETTLEMENT_PRICE or any(i.get("kind") == SETTLEMENT_KIND for i in record["entry_intents"]):
             return None
-        quantity = (SETTLEMENT_BUDGET / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
     else:
         # Earlier trades cannot consume the ten dollars reserved for settlement.
         cap = min(cap, market_budget() - SETTLEMENT_BUDGET)
-        quantity = ENTRY_QUANTITY
+    quantity = entry_quantity(price, kind)
     # Never shrink the requested five contracts to fit leftover allowance.
     if quantity * (price + FEE_RESERVE) > cap - spent:
         return None

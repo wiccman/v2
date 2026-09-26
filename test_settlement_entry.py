@@ -44,6 +44,44 @@ def test_requires_97_cent_quote(monkeypatch, ask):
     assert not fake.entries
 
 
+def test_final_window_reports_actual_quotes_when_no_97_cent_side(monkeypatch):
+    import json
+    fake, record, state, clock, closed = setup(monkeypatch)
+    fake.market('TEST')['yes_ask_dollars'] = '0.98'
+    events = []
+    monkeypatch.setattr(bot, 'write_log', lambda event, *a, **k: events.append((event, k)))
+    bot.settlement_entry(record, state, 'TEST', closed)
+    checks = [json.loads(data['details']) for event, data in events if event == 'SETTLEMENT_97_CHECK']
+    assert checks[-1]['reason'] == 'waiting_for_exact_97_ask'
+    assert checks[-1]['yes_ask'] == '0.98' and checks[-1]['no_ask'] == '0.04'
+    assert checks[-1]['seconds_remaining'] == 120
+    assert not fake.entries
+
+
+def test_final_window_reports_funding_wait_without_claiming_an_entry(monkeypatch):
+    import json
+    fake, record, state, clock, closed = setup(monkeypatch)
+    monkeypatch.setattr(fake, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': '1.9818'})
+    events = []
+    monkeypatch.setattr(bot, 'write_log', lambda event, *a, **k: events.append((event, k)))
+    bot.settlement_entry(record, state, 'TEST', closed)
+    names = [event for event, _ in events]
+    assert 'ENTRY_WAIT_MARKET_CASH' in names and 'SETTLEMENT_97_ENTRY' not in names
+    checks = [json.loads(data['details']) for event, data in events if event == 'SETTLEMENT_97_CHECK']
+    assert checks[-1]['reason'] == 'not_submitted_or_unacknowledged'
+    assert not fake.entries and not record['entry_intents']
+
+
+def test_final_window_requires_order_ack_before_logging_entry(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch)
+    monkeypatch.setattr(fake, 'place_entry', lambda *a, **k: {})
+    events = []
+    monkeypatch.setattr(bot, 'write_log', lambda event, *a, **k: events.append(event))
+    bot.settlement_entry(record, state, 'TEST', closed)
+    assert 'SETTLEMENT_97_ENTRY' not in events
+    assert len(record['entry_intents']) == 1  # Keep the reservation until resolved.
+
+
 def test_late_quote_cannot_submit_after_close(monkeypatch):
     fake, record, state, clock, closed = setup(monkeypatch, 899)
     market = fake.market('TEST')

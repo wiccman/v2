@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.6 Boruto
+# Strike Ruler — 2.0.9 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -145,6 +145,30 @@ or add a buy at the minute-6 snapshot after the regular minute-5 cutoff.
 
 ## API cash in Railway logs
 
+Before each new entry, the bot reads the market's authoritative `exchange_index`
+and checks cash on that shard, including its entry fee reserve. Cash elsewhere
+does not fund that order. Missing or malformed funding data blocks new entries;
+low cash and explicit balance rejections wait 30 seconds before retrying. The
+independent exit worker keeps running. No transfers or automatic rebalancing
+are performed. Funding the market's shard is a separate account action.
+
+`ENTRY_WAIT_MARKET_CASH` logs the shard, its available cash and the required
+amount. `ENTRY_CASH_UNAVAILABLE` means the read could not be verified, not a zero
+balance. These checks preserve five-contract sizing and the $10 settlement
+allowance. They cannot guarantee acceptance if funds change before submission.
+
+Cancellation checks terminal status first. An already executed, canceled or
+expired order is reconciled without another DELETE. A cancellation 404 by
+itself is never treated as proof that an order is finished.
+
+Reduce-only exits remain IOC: Kalshi V2 rejects reduce-only GTC orders. Keeping
+this protection prevents a stale exit from opening an opposite position after
+a manual close or other fill. A `TP_SUBMITTED` message alone does not prove a sale;
+`TP_FILL` reports a reconciled fill, and `TP_POSITION_FLAT` only reports inventory.
+
+API references: [exchange sharding](https://docs.kalshi.com/getting_started/exchange_sharding),
+[order constraints](https://docs.kalshi.com/api-reference/orders/create-order-v2).
+
 At startup, search deployment logs for `API_CASH_BALANCE`. `cash_dollars` is
 cash returned by the connected API account, separate from `portfolio_value_dollars`.
 The read uses the primary account and includes all exchange indexes; returned
@@ -200,3 +224,11 @@ exit targets. If opposite-side inventory or unresolved opposing entry orders
 remain, wait for them to clear so the new purchase does not merely net them out.
 The strategy checks on the regular polling cadence and needs available prediction
 account funds; the budget reservation does not transfer cash between accounts.
+
+During the final two minutes, `SETTLEMENT_97_CHECK` records both observed asks,
+time remaining, reserved allowance and why the route waits or proceeds. An ask
+of 96¢, 98¢ or 99¢ does not meet the existing exact-97¢ rule. The bot checks on
+its polling cadence, so a brief 97¢ quote can be missed between polls. An
+acknowledged order ID is required for `SETTLEMENT_97_ENTRY`; it does not prove
+that the IOC filled. Funding waits, conflicting inventory and prior attempts
+remain subject to the existing protections and one-attempt policy.
