@@ -1,4 +1,4 @@
-# Strike Ruler — 2.0.1 Boruto
+# Strike Ruler — 2.0.2 Boruto
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
@@ -131,3 +131,20 @@ With `TRADING_ENABLED=true`, deploying starts live operation immediately.
 Removed the 32¢ regular buy tier and the previous/current bias conflict gate.
 Opening 52¢→60¢ and late entries are unchanged. This does not guarantee a fill
 or add a buy at the minute-6 snapshot after the regular minute-5 cutoff.
+
+## API cash in Railway logs
+
+At startup, search deployment logs for `API_CASH_BALANCE`. `cash_dollars` is
+cash returned by the connected API account, separate from `portfolio_value_dollars`.
+The read uses the primary account and includes all exchange indexes; returned
+`exchange_balances` show the breakdown when available. Dollar-format balances
+are preferred; legacy integer cents are divided by 100. Missing or malformed
+balances produce `API_CASH_BALANCE_ERROR`, not a fabricated zero.
+
+This makes one authenticated GET and prints only selected numeric balance fields.
+It does not place a test trade, change sizing, or fix rejected-order reservations.
+It does not prove that the API account matches an account displayed on a phone,
+and aggregate cash alone does not establish that a specific order is fundable.
+The 2.0.1 signal identifier remains unchanged so this diagnostic-only release does
+not invalidate existing signals. After deployment, the balance line is visible
+from a phone in v2's deployment logs. `python bot.py --check` also emits it.

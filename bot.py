@@ -7,6 +7,7 @@ from kalshi import KalshiClient, KalshiAPIError
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
+from balance_diagnostics import log_api_cash
 from boruto import BUILD as SIGNAL_BUILD, build_signal
 from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
 
@@ -813,8 +814,12 @@ def main():
         print("CONFIG_CAPPED: entry cutoff is five minutes", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
-    if args.check: check(); return
+    if args.check:
+        log_api_cash(client)
+        check()
+        return
     if not ENABLED:
+        log_api_cash(client)
         print("Checking Kalshi production credentials (read-only)...", flush=True)
         check()
         print("LOCKED: production service is online; live order routing is disabled", flush=True)
@@ -838,6 +843,8 @@ def main():
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")))
         EXIT_MONITOR.start()
         print(f"TP_MONITOR_STARTED pairs={[(str(p * 100), str(t * 100)) for p, t in ALL_ENTRY_EXIT_PAIRS.items()]}; independent reduce-only IOC exits; resting bracket unavailable", flush=True)
+        # Exit monitoring is already active during this bounded read-only request.
+        log_api_cash(client)
         def stop(signum, frame):
             raise KeyboardInterrupt
         signal.signal(signal.SIGTERM, stop)
