@@ -98,15 +98,14 @@ def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
-def test_restart_cancels_legacy_entries_even_when_signal_lookup_fails(monkeypatch):
+def test_restart_cancels_legacy_entries_even_without_saved_signal(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 360)
     record.update(orders=["regular-old", "spot-old"], dual_limit_orders=["dual-old"],
                   dual_limit_cancel_at=1000000500, signal=None,
                   historical_strike_orders=[{"order_id": "hist-old", "cancel_at": 1000000800}])
     fake.resting = [{"order_id": oid} for oid in ["regular-old", "spot-old", "dual-old", "hist-old"]]
     monkeypatch.setattr(fake, "markets", lambda **kw: (_ for _ in ()).throw(RuntimeError("offline")))
-    with pytest.raises(RuntimeError, match="offline"):
-        bot.cycle(state)
+    bot.cycle(state)
     assert set(fake.cancelled) == {"regular-old", "spot-old", "dual-old", "hist-old"}
     assert fake.entries == []
 

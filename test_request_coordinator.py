@@ -206,11 +206,13 @@ def test_slow_or_failed_quote_read_cannot_extend_cached_freshness(monkeypatch):
 def test_adjacent_tier_checks_reuse_quote_but_cash_remains_fresh(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 180)
     gate, clients = workers(monkeypatch, clock)
+    monkeypatch.setattr(clients['entry'], 'btc_reference_price', lambda: D('100010'))
+    monkeypatch.setattr(clients['entry'], 'positions', lambda ticker: [])
     calls = []
     def transport(method, url, **kwargs):
         calls.append(url)
         if '/markets/' in url:
-            return response(payload={'market': {'exchange_index': 2, 'yes_ask_dollars': '.72', 'yes_bid_dollars': '.71'}})
+            return response(payload={'market': {'exchange_index': 2, 'floor_strike': '100000', 'yes_ask_dollars': '.72', 'yes_bid_dollars': '.71'}})
         assert url.endswith('/portfolio/balance') and kwargs['params'] == {'exchange_index': 2}
         return response(payload={'balance_dollars': '100'})
     monkeypatch.setattr(kalshi.requests, 'request', transport)
@@ -228,6 +230,8 @@ def test_only_proven_local_no_send_releases_new_entry_reservation(monkeypatch, o
                 'reserved_dollars': '2.40', 'side': 'YES'}
     record['entry_intents'].append(dict(accepted))
     gate, clients = workers(monkeypatch, clock)
+    monkeypatch.setattr(clients['entry'], 'btc_reference_price', lambda: D('100010'))
+    monkeypatch.setattr(clients['entry'], 'positions', lambda ticker: [])
     posts = []
     def transport(method, url, **kwargs):
         if method == 'POST':
@@ -236,7 +240,7 @@ def test_only_proven_local_no_send_releases_new_entry_reservation(monkeypatch, o
                 raise requests.Timeout('possibly accepted')
             return response(429)
         if '/markets/' in url:
-            return response(payload={'market': {'exchange_index': 2, 'yes_ask_dollars': '.45', 'yes_bid_dollars': '.44'}})
+            return response(payload={'market': {'exchange_index': 2, 'floor_strike': '100000', 'yes_ask_dollars': '.45', 'yes_bid_dollars': '.44'}})
         return response(payload={'balance_dollars': '100'})
     def saved(state):
         if outcome == 'deferred' and len(record['entry_intents']) > 1:
@@ -263,13 +267,15 @@ def test_slow_funding_refreshes_quote_and_blocks_buy_after_drop(monkeypatch, sid
     _, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     record['signal']['prediction'] = side
     _, clients = workers(monkeypatch, clock)
+    monkeypatch.setattr(clients['entry'], 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
+    monkeypatch.setattr(clients['entry'], 'positions', lambda ticker: [])
     quote_reads = []
     def transport(method, url, **kwargs):
         assert method == 'GET'
         if '/markets/' in url:
             quote_reads.append(clock[0])
             ask = '.45' if len(quote_reads) == 1 else '.44'
-            return response(payload={'market': {'exchange_index': 2,
+            return response(payload={'market': {'exchange_index': 2, 'floor_strike': '100000',
                 'yes_ask_dollars': ask, 'yes_bid_dollars': '.43',
                 'no_ask_dollars': ask, 'no_bid_dollars': '.43'}})
         clock[0] += .6

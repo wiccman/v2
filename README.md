@@ -1,38 +1,24 @@
-# Strike Ruler — 2.1.1 Boruto Scalp No Skip
+# Strike Ruler — Live Strike Scalp
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-The signal build is **2.1.1 Boruto Scalp No Skip**. This adapts the selected
-2.1 research model for directional scalp entries. With newest-first lookbacks
-L1=T−15, L2=T−30, L3=T−45 and L4=T−60, L1 votes YES above the opening strike
-and NO below it; L3 and L4 vote YES below the strike and NO above it. Equality
-is neutral. L2 is retained as validated context and does not vote. Two matching
-votes select the side. Three matching votes are HIGH confidence; two are MODERATE.
-Unresolved votes are LOW confidence and use the first nonzero vote in L1, L3,
-L4 order; all-neutral defaults to YES.
+**Current scalp direction:** buy YES when the current Bitcoin reference price is
+above this market's strike, buy NO when below, and wait when equal or unavailable.
+Recheck the live spot/strike immediately before each order. Saved Boruto signals,
+confidence and previous side locks do not determine scalp entries. Opposite
+inventory or unresolved opposing buys block a scalp in the new direction until
+they clear; only the final 97¢ route can deliberately close the opposite side at
+a loss. From minute 8 through minute 12, the chosen side must also have the
+higher quoted ask and an ask of at least 70¢. All high-price sell targets are 6¢
+above their respective order limits: 70→76, 73→79 and 85→91.
 
-Both YES and NO can trade. There is no $32.85 distance filter, YES-only filter,
-or previous-bias conflict filter. Previous-window data is optional diagnostic
-context. Every valid current input set produces a direction; missing or unfinalized
-current lookbacks still prevent signal creation. Quotes and live spot do not
-change the locked bias. Existing entry tiers, take-profit targets, budget limits,
-and one-side-per-market protection continue to apply. This no-skip variant does
-not inherit the filtered research model's historical return result.
-
-BASE_SIGNAL logs include build, both raw biases, vote counts, exact lookback
-boundaries and source tickers, final decision and selection reason. The current window
-must be verified before the signal is saved. Older saved market signals and
-spending records are preserved; new entries wait until a new market, while
-the independent exit monitor continues managing existing inventory.
-
-Predicted-side ask snapshots are scheduled at minutes 2, 4 and 6. A capture may
-be at most 15 seconds late and records its actual observation time. A later cycle
-marks overdue slots missed instead of inventing earlier prices. The final average
-is available only when all three captures exist. These quoted prices are market
-implied values, not calibrated probabilities of success.
+The earlier Boruto signal is retained in old records for audit and exit
+reconciliation. New buys do not require four finalized lookbacks or a stored
+confidence label. Quote snapshots at minutes 2, 4 and 6 remain diagnostics and
+never choose a buy side.
 
 New entries follow fixed price-based windows within each 15-minute market:
 
@@ -40,8 +26,8 @@ New entries follow fixed price-based windows within each 15-minute market:
 | --- | --- |
 | 45–67¢ regular tiers | 0:00–6:00 |
 | 35¢→42¢ tier | 3:00–6:00 |
-| 70¢→80¢ tier | 8:00–12:00 |
-| 73¢→81¢ and 85¢→92¢ late tiers | 11:00–12:00 |
+| 70¢→76¢ tier | 8:00–12:00 |
+| 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
 | Exact 97¢ settlement entry | 12:00–15:00 |
 
 The 52¢ opening route keeps its first-two-minute window. Every route rejects
@@ -67,15 +53,16 @@ All routes use these default outcome-price pairs, configurable through
 | 62¢ | 67¢ |
 | 64¢ | 69¢ |
 | 67¢ | 72¢ |
-| 70¢ (from minute 8) | 80¢ |
+| 70¢ (from minute 8) | 76¢ |
+| 73¢ (from minute 11) | 79¢ |
+| 85¢ (from minute 11) | 91¢ |
 
-During the first two minutes, the bot posts one bias-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same five-contract sizing and shared market allowance as every other route.
+During the first two minutes, the bot posts one strike-selected 52¢ entry limit with a 60¢ target. It never posts both complementary opening sides. The order expires and is canceled at 2:00 if it has not filled. This opening route uses the same five-contract sizing and shared market allowance as every other route.
 
-Regular bias-based entries run first when a valid prediction snapshot is available.
-An optional limit batch submits the regular tiers only on the current bias side. Historical-strike
-touches use the side of approach; the optional early spot trigger buys YES when
-spot is sufficiently above the current strike. This early route operates before
-minute 2 by default; the other three routes start at minute 0.
+Regular entries and the optional limit batch follow the live strike side.
+Historical-strike touches may trigger an attempt, but the current market strike
+chooses its side. The optional early spot trigger buys YES when sufficiently
+above the current strike; this route operates before minute 2 by default.
 
 Earlier entry orders request exactly **5 contracts**, on opening, regular,
 limit-batch, historical, spot and late routes. All routes share a fixed **$15

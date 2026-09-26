@@ -179,7 +179,7 @@ def test_fifteen_dollar_allowance_is_shared_and_survives_restart():
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
 
 
-def test_entry_gateway_enforces_current_bias_and_logs_reason(monkeypatch):
+def test_entry_gateway_enforces_live_strike_and_logs_reason(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     record["signal"] = {"prediction": "YES", "base_confidence": "HIGH"}
     record["previous_bias"] = "YES"
@@ -189,8 +189,8 @@ def test_entry_gateway_enforces_current_bias_and_logs_reason(monkeypatch):
     assert result == {} and quantity == 0
     decision = json.loads(events[-1][1]["details"])
     assert decision == {
-        "selected_side": "NO", "current_bias": "YES", "previous_bias": "YES",
-        "trade_side": "YES", "entry_price": "0.45", "entry_reason": "selected_side_opposes_current_bias", "decision": "SKIP",
+        "selected_side": "NO", "live_strike_side": "YES", "entry_price": "0.45",
+        "entry_reason": "selected_side_opposes_live_strike", "decision": "SKIP",
     }
     assert not fake.entries
 
