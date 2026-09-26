@@ -56,7 +56,8 @@ minute 2 by default; `ENTRY_START_MINUTE` applies to the other three routes.
 `ENTRY_BUDGET_DOLLARS` is desired principal for one trigger. Regular, historical
 and spot triggers split their trigger budget across all six regular tiers. A dual batch splits the same amount
 across its configured attempts, rather than receiving a separate allowance
-per side. All routes share `MARKET_BUDGET_DOLLARS`, hard-capped at $6 per market.
+per side. All routes share a fixed $10 allowance per 15-minute market, including entry fee reserves.
+The legacy `MARKET_BUDGET_DOLLARS` setting is ignored, so an older Railway value cannot retain the former cap.
 The source default is $0.77 per trigger; Railway can override it.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
@@ -89,7 +90,7 @@ Important defaults:
 | `ENTRY_BUDGET_DOLLARS` | `0.77` | Principal per trigger or entire dual batch |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | First-two-minute one-sided entry and exit |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | `5` | Shared cap including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $10 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `2` | Earliest new entry |
@@ -156,4 +157,4 @@ from a phone in v2's deployment logs. `python bot.py --check` also emits it.
 
 ## 2.0.3 — Additional regular entry pairs
 
-Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap, timing, opening and late pairs are unchanged. Rejected-order reservations still consume the market allowance.
+Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap is now $10; timing, opening and late pairs are unchanged. Rejected-order reservations still consume the market allowance.

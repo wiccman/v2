@@ -156,11 +156,23 @@ def test_orders_follows_every_page(monkeypatch):
     assert seen[-1]["cursor"] == "next"
 
 
-def test_budget_setting_cannot_exceed_six(monkeypatch):
-    monkeypatch.setenv("MARKET_BUDGET_DOLLARS", "7")
-    assert entry_policy.market_budget() == 6
-    monkeypatch.setenv("MARKET_BUDGET_DOLLARS", "4")
-    assert entry_policy.market_budget() == 4
+@pytest.mark.parametrize("legacy", [None, "4", "6", "10", "100"])
+def test_fixed_ten_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
+    if legacy is None:
+        monkeypatch.delenv("MARKET_BUDGET_DOLLARS", raising=False)
+    else:
+        monkeypatch.setenv("MARKET_BUDGET_DOLLARS", legacy)
+    assert entry_policy.market_budget() == D("10")
+
+
+def test_ten_dollar_allowance_is_shared_and_survives_restart():
+    record = {}
+    for price in ("0.52", "0.38", "0.39", "0.49", "0.55", "0.56", "0.61", "0.73", "0.85"):
+        entry_policy.reserve(record, "YES", D(price), D("2"), entry_policy.market_budget(), 360, "test")
+    spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
+    assert D("9.99") < spent <= D("10")
+    restored = copy.deepcopy(record)
+    assert entry_policy.reserve(restored, "YES", D("0.39"), D("2"), entry_policy.market_budget(), 360, "test") is None
 
 
 def test_entry_gateway_enforces_current_bias_and_logs_reason(monkeypatch):
