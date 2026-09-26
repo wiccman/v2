@@ -11,6 +11,8 @@ from take_profit import TakeProfitMonitor
 def setup(monkeypatch, elapsed=780, side='YES'):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     fake.held = D('0')
+    record['signal']['prediction'] = side
+    record['trade_side'] = side
     market = fake.market('TEST')
     market.update(yes_ask_dollars='0.97' if side == 'YES' else '0.04',
                   no_ask_dollars='0.97' if side == 'NO' else '0.04')
@@ -186,7 +188,7 @@ def test_exact_settlement_limit_and_fee_budget(monkeypatch, side, ask):
     bot.settlement_entry(record, state, 'TEST', closed)
     assert len(fake.entries) == 1
     wire, qty, price, kwargs = fake.entries[0]
-    assert qty == 6 and kwargs['ioc'] is True
+    assert qty == 6 and kwargs.get('ioc', False) is False
     assert price == (D('.97') if side == 'YES' else D('.03'))
     intent = record['entry_intents'][0]
     assert D(intent['price']) == D('.97') and intent['exit_target'] == '1'
