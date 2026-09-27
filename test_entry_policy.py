@@ -169,22 +169,22 @@ def test_orders_follows_every_page(monkeypatch):
 
 
 @pytest.mark.parametrize("legacy", [None, "4", "6", "10", "100"])
-def test_fixed_twenty_five_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
+def test_fixed_thirty_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
     if legacy is None:
         monkeypatch.delenv("MARKET_BUDGET_DOLLARS", raising=False)
     else:
         monkeypatch.setenv("MARKET_BUDGET_DOLLARS", legacy)
-    assert entry_policy.market_budget() == D("25")
+    assert entry_policy.market_budget() == D("30")
 
 
-def test_twenty_five_dollar_allowance_is_shared_and_survives_restart():
+def test_thirty_dollar_allowance_is_shared_and_survives_restart():
     record = {}
     for price in ("0.45", "0.47", "0.49", "0.52", "0.55", "0.56", "0.61", "0.73", "0.85"):
         entry_policy.reserve(record, "YES", D(price), D("2"), entry_policy.market_budget(), 360, "test")
     while entry_policy.reserve(record, "YES", D("0.45"), D("0.01"), entry_policy.market_budget(), 360, "test"):
         pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("18.52") < spent <= D("19")
+    assert D("23.52") < spent <= D("24")
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80") for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
@@ -289,11 +289,11 @@ def test_each_entry_route_requests_five_despite_old_dollar_budget(monkeypatch, k
     assert fake.entries[0][1] == D("5")
 
 
-@pytest.mark.parametrize("spent", ["19.01", "21", "22", "25"])
+@pytest.mark.parametrize("spent", ["24.07", "26", "28", "30"])
 def test_exhausted_cap_preserves_old_spending_and_blocks_extra_entries(spent):
     record = {"entry_intents": [{"reserved_dollars": spent}]}
     before = copy.deepcopy(record)
-    for kind, price in [("regular", D(".45")), (entry_policy.SETTLEMENT_KIND, D(".97"))]:
-        assert entry_policy.reserve(record, "YES", price, D("100"), D("25"), 900, kind) is None
+    for kind, price in [("regular", D(".45")), (entry_policy.SETTLEMENT_KIND, D(".96"))]:
+        assert entry_policy.reserve(record, "YES", price, D("100"), D("30"), 900, kind) is None
     assert record == before
-    assert entry_policy.remaining_allowance(record, D("25"), "regular") == 0
+    assert entry_policy.remaining_allowance(record, D("30"), "regular") == 0

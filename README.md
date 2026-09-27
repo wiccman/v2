@@ -91,11 +91,11 @@ it buys NO during the opening window. If configured to extend beyond minute 2,
 it retains the existing YES-bias requirement there.
 
 Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
-limit-batch, historical, spot and late routes. All routes share a fixed **$25
+limit-batch, historical, spot and late routes. All routes share a fixed **$30
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
-reserved for the final-three-minute settlement entry**, leaving **$19 for all
+reserved for the final-three-minute settlement entry**, leaving **$24 for all
 earlier routes combined**. Each earlier order uses at most **$2.80 including fees**,
-subject to the $19 earlier allowance. For example, an initial 57¢ or 67¢ order requests
+subject to the $24 earlier allowance. For example, an initial 57¢ or 67¢ order requests
 4 contracts, and a 75¢ or 85¢ order requests 3. The final order may shrink further
 to the whole contracts affordable from the remaining allowance. The earlier allowance covers six maximum $2.80 order allocations plus remaining room; it does not force buys
 outside their price/time rules or guarantee fills. Exchange partial fills remain possible, and exits sell only
@@ -184,7 +184,7 @@ Important defaults:
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries use up to $2.80 and 5 contracts; 96¢ settlement requests 6 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | Existing opening entry; independent 57:62 rule is fixed in code |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $25 including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $30 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum committed regular orders; proven zero-fill attempts excluded |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `1` (fixed) | Early buys are eligible after 60 seconds |
