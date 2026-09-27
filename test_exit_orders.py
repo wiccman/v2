@@ -64,12 +64,12 @@ def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch
                                 open_time=datetime.fromtimestamp(1100, tz=timezone.utc).isoformat(), strike="100000")
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1200, state={"markets": {"MARKET": record}}) is True
-    assert [entry[1] for entry in fake.entries] == ["YES"] * 2
-    assert [entry[2] for entry in fake.entries] == [Decimal(q) for q in (5, 3)]
-    assert [entry[3] for entry in fake.entries] == [Decimal(p) for p in ("0.45", "0.48")]
+    assert [entry[1] for entry in fake.entries] == ["YES"]
+    assert [entry[2] for entry in fake.entries] == [Decimal(5)]
+    assert [entry[3] for entry in fake.entries] == [Decimal("0.45")]
     assert sum(entry[2] * entry[3] for entry in fake.entries) <= bot.MARKET_BUDGET
     assert all(entry[4] == 1460 for entry in fake.entries)
-    assert record["dual_limit_orders"] == [f"dual-yes-{p}" for p in (Decimal('.45'), Decimal('.48'))]
+    assert record["dual_limit_orders"] == ["dual-yes-0.45"]
 
 
 def test_dual_limit_buys_cancel_unfilled_orders_after_five_minutes(monkeypatch):
@@ -120,10 +120,10 @@ def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(mon
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1200, state={"markets": {"MARKET": record}},
     ) is True
-    assert len(fake.entries) == 2
+    assert len(fake.entries) == 1
     assert all(e[0] == "MARKET" and e[1] == "NO" and e[4] == 1460 for e in fake.entries)
-    assert [e[3] for e in fake.entries] == [Decimal('.45'), Decimal('.48')]
-    assert [e[2] for e in fake.entries] == [Decimal(q) for q in (5, 3)]
+    assert [e[3] for e in fake.entries] == [Decimal('.45')]
+    assert [e[2] for e in fake.entries] == [Decimal(5)]
     assert sum(e[2] * e[3] for e in fake.entries) <= bot.MARKET_BUDGET
     assert record["historical_triggered_strikes"] == ["100000"]
     assert record["historical_strike_orders"][0]["strike"] == "100000"

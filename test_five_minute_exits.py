@@ -16,7 +16,7 @@ class CycleClient(KalshiClient):
         self.exits = []
         self.cancelled = []
         self.resting = []
-        self.held = D("16")
+        self.held = D("0")
 
     def market(self, ticker):
         return {"ticker": ticker, "floor_strike": "100000",
@@ -105,7 +105,7 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) >= 5  # The $15 earlier allowance supports five buys.
+    assert len(fake.entries) == 1  # Pending inventory occupies the initial slot.
     assert all(1 <= q <= 5 for _, q, _, _ in fake.entries)
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("15")
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)

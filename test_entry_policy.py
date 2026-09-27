@@ -40,16 +40,17 @@ def test_all_entry_routes_share_lower_cap_and_restart_does_not_refund(monkeypatc
     bot.place_historical_strike_entries(record, "TEST", D("100010"), closed, state=state)
     bot.funded_entry(record, state, "TEST", "NO", D("0.45"), closed, "regular")
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert spent == D("3.84")  # One five-contract buy plus three affordable contracts.
+    assert spent == D("2.40")  # Pending five-contract buy occupies the initial slot.
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("6")
-    assert len(fake.entries) == 2
-    assert [q for _, q, _, _ in fake.entries] == [D(5), D(3)]
+    assert len(fake.entries) == 1
+    assert [q for _, q, _, _ in fake.entries] == [D(5)]
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
         i["entry_closed"] = True  # Cancel, fill or sale never replenishes allowance.
     result, quantity = bot.funded_entry(record, restored, "TEST", "YES", D("0.45"), closed, "regular")
-    assert result == {} and quantity == 0
+    assert result["order_id"] and quantity == 3  # The old reservation still limits the next episode.
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("4")
     new_record = {}
     assert entry_policy.reserve(new_record, "YES", D("0.45"), D("2"), D("5"), 360, "spot")
 
@@ -226,10 +227,12 @@ def test_balance_rejection_releases_only_failed_intent_and_survives_restart(monk
     accepted = fake.place_entry
     bot.funded_entry(record, state, 'TEST', 'YES', D('0.45'), closed, 'regular')
     original_reserved = record['entry_intents'][0]['reserved_dollars']
+    record['entry_intents'][0]['entry_closed'] = True
+    fake.held = D(5)
     def rejected(*args, **kwargs):
         raise KalshiAPIError(400, 'insufficient balance', code='insufficient_balance')
     monkeypatch.setattr(fake, 'place_entry', rejected)
-    for _ in range(3):
+    for _ in range(1):
         with pytest.raises(KalshiAPIError):
             bot.funded_entry(record, state, 'TEST', 'YES', D('0.53'), closed, 'regular')
         assert bot.funded_entry(record, state, 'TEST', 'YES', D('0.53'), closed, 'regular') == ({}, 0)

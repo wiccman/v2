@@ -48,6 +48,7 @@ def test_read_failure_and_price_above_limit_do_not_spend(monkeypatch):
 
 def test_old_buy_is_cancelled_and_reservation_preserved(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    fake.held = D(16)  # Legacy open position must remain untouched by migration.
     old = dict(order_id='old', client_id='old', side='YES', price='.45', quantity='5',
                reserved_dollars='2.40', cancel_at=closed.timestamp(), kind='regular', entry_closed=False)
     record['entry_intents'] = [old]
