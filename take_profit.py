@@ -8,6 +8,7 @@ Normal take-profit orders do not depend on quotes. A requested settlement-side
 transition uses the observed bid to close opposite inventory, even at a loss.
 """
 import json
+import hashlib
 import os
 import threading
 import time
@@ -18,9 +19,15 @@ from pathlib import Path
 
 from kalshi import KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestDeferred, retry_delay
-from price_pairs import paired_inventory, fill_cost_inventory, order_profit_inventory, order_percentage_inventory, InventorySyncError
+from price_pairs import paired_inventory, fill_cost_inventory, order_profit_inventory, order_percentage_inventory, owned_position, InventorySyncError
 
 TERMINAL = {"executed", "canceled", "expired"}
+
+
+def entry_fingerprint(record):
+    """Bind an ownership receipt to the entry ledger it actually verified."""
+    return hashlib.sha256(json.dumps(record.get("entry_intents", []),
+                                    sort_keys=True).encode()).hexdigest()
 
 
 class TakeProfitMonitor:
@@ -61,6 +68,23 @@ class TakeProfitMonitor:
         return (ready.get("side") == side and not ledger.get("pending")
                 and 0 <= self.clock() - ready.get("checked_at", 0) <= max(10, 3 * self.poll)
                 and self.clock() < ready.get("close_timestamp", 0))
+
+    def bot_inventory(self, ticker, record, account_held):
+        """Use the exit worker's atomic, recent fill reconciliation for sizing.
+
+        No additional fill-history requests are added to the entry loop. A
+        changed position, entry ledger, or unresolved exit requires a new pass.
+        """
+        if not self.healthy or self.pairs is None or not self.path.exists():
+            raise InventorySyncError("Ownership monitor not ready")
+        ledger = json.loads(self.path.read_text()).get("markets", {}).get(ticker, {})
+        receipt = ledger.get("ownership", {})
+        if (ledger.get("pending") or not receipt
+                or not 0 <= self.clock() - receipt["checked_at"] <= max(10, 3 * self.poll)
+                or receipt["entry_fingerprint"] != entry_fingerprint(record)
+                or Decimal(receipt["account_held"]) != account_held):
+            raise InventorySyncError("Waiting for current bot inventory reconciliation")
+        return Decimal(receipt["bot_held"])
 
     def save(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +250,16 @@ class TakeProfitMonitor:
         # An order status can update before its fills endpoint. Do not reuse the
         # inventory until all previously confirmed exits appear in fill history.
         unique = {f.get("fill_id") or f.get("trade_id"): f for f in fills}
+        for item in record.get("entry_intents", []):
+            order_id = item.get("order_id") or by_client.get(item.get("client_id"))
+            receipt = terminal_ioc_receipt(item)
+            confirmed = (receipt["fill_count_fp"] if receipt is not None
+                         else item.get("confirmed_entry_filled_quantity"))
+            if order_id and confirmed is not None:
+                observed = sum((Decimal(str(f.get("count_fp", f.get("count", "0"))))
+                                for f in unique.values() if f.get("order_id") == order_id), Decimal(0))
+                if observed < Decimal(confirmed):
+                    raise InventorySyncError("Confirmed entry is not yet visible in fill history")
         for order_id, order in exits.items():
             observed = sum((Decimal(str(f.get("count_fp", f.get("count", "0"))))
                             for f in unique.values() if f.get("order_id") == order_id), Decimal(0))
@@ -251,6 +285,13 @@ class TakeProfitMonitor:
             self.save()
             self.emit("TP_OUTSIDE_INVENTORY", ticker=ticker, lots=outside,
                       action="excluded_from_take_profit", position_verified=True)
+        bot_held, allocations = owned_position(fills, entries, exits, held, ticker)
+        ledger["ownership"] = {
+            "checked_at": self.clock(), "entry_fingerprint": entry_fingerprint(record),
+            "account_held": str(held), "bot_held": str(bot_held),
+            "outside_held": str(held - bot_held), "allocations": allocations,
+        }
+        self.save()
         return result
 
     def _market(self, ticker, record, ledger):
@@ -293,6 +334,8 @@ class TakeProfitMonitor:
         held = Decimal(str(matches[0]["position_fp"])) if matches else Decimal("0")
         if not held.is_finite():
             raise ValueError("Invalid position quantity")
+        buckets, plans = (self._paired_buckets(ticker, record, ledger, held)
+                          if self.pairs is not None else ({self.target: held}, {}))
         switch = record.get("settlement_switch", {})
         switching = (switch.get("side") in {"YES", "NO"} and switch.get("allow_loss") is True
                      and not any(item.get("kind") == SETTLEMENT_KIND and attempt_committed(item) for item in record.get("entry_intents", []))
@@ -305,6 +348,16 @@ class TakeProfitMonitor:
                 return False
             opposite = (switch["side"] == "YES" and held < 0) or (switch["side"] == "NO" and held > 0)
             if opposite:
+                if self.pairs is not None and Decimal(ledger["ownership"]["outside_held"]):
+                    # Opposing buys would net the manual position. Leave both
+                    # the manual lots and bot lots intact until it is removed.
+                    if not ledger.get("manual_switch_blocked"):
+                        ledger["manual_switch_blocked"] = True
+                        self.save()
+                        self.emit("SETTLEMENT_MANUAL_POSITION_WAIT", ticker=ticker,
+                                  outside_held=ledger["ownership"]["outside_held"],
+                                  action="manual_inventory_preserved")
+                    return True
                 market = self.client.market(ticker)
                 if not settlement_entry_price_allowed(market[switch["side"].lower() + "_ask_dollars"]):
                     return False
@@ -312,13 +365,12 @@ class TakeProfitMonitor:
                 bid = Decimal(str(market[held_side + "_bid_dollars"]))
                 if not bid.is_finite() or not Decimal("0") < bid < Decimal("1"):
                     return False
-                # Full net position, reduce-only, at the observed bid: the
-                # authorized settlement transition may realize a loss. FIFO
-                # attribution allows this close to span all old entry tiers.
+                # Close only verified bot lots, at the observed bid. Persist
+                # exact allocations so a restart cannot reassign manual lots.
+                plan = ({"allocations": ledger["ownership"]["allocations"], "cost_groups": []}
+                        if self.pairs is not None else None)
                 return self._submit(ticker, ledger, close, held, bid,
-                                    paired=False, purpose="settlement_switch")
-        buckets, plans = (self._paired_buckets(ticker, record, ledger, held)
-                          if self.pairs is not None else ({self.target: held}, {}))
+                                    paired=False, purpose="settlement_switch", plan=plan)
         if switching:
             ledger["settlement_ready"] = {"side": switch["side"], "checked_at": self.clock(),
                                            "close_timestamp": float(close)}
