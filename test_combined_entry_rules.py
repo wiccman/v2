@@ -33,7 +33,7 @@ def setup(monkeypatch, elapsed, price, side='YES'):
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('elapsed,allowed', [(-1, False), (0, False), (59.999, False), (60, True), (119.999, True), (120, False), (180, False)])
+@pytest.mark.parametrize('elapsed,allowed', [(-1, False), (0, True), (59.999, True), (60, True), (119.999, True), (120, False), (180, False)])
 def test_new_opening_tier_uses_its_own_two_minute_deadline(monkeypatch, side, elapsed, allowed):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, '.57', side)
     record['opening_bias_attempted'] = True

@@ -5,7 +5,7 @@ Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 
 ## Signals and timing
 
-**Early direction, 1:00–6:00:** use `2.1.1 Boruto Scalp No Skip` to select
+**Early direction, 0:00–6:00:** use `2.1.1 Boruto Scalp No Skip` to select
 YES or NO. Read four finalized Kalshi benchmarks at T−60, T−45, T−30 and
 T−15 against the current contract's fixed strike. The newest point votes in
 its own direction (above → YES); T−45 and T−60 vote inversely (below → YES).
@@ -39,20 +39,22 @@ New entries follow fixed price-based windows within each 15-minute market:
 
 | Entry | Window (start inclusive, end exclusive) |
 | --- | --- |
-| 52¢→60¢ opening entry | 1:00–2:00 |
-| New 57¢→62¢ opening entry | 1:00–2:00 |
-| 45–59¢ regular tiers | 1:00–6:00 |
+| 52¢→60¢ opening entry | 0:00–2:00 |
+| New 57¢→62¢ opening entry | 0:00–2:00 |
+| 45–59¢ regular tiers | 0:00–6:00 |
 | 60–69¢ regular tiers (currently 62¢/64¢/67¢) | 5:00–6:00 |
 | New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
 | 97¢ settlement limit | 12:00–15:00 |
 
-Every new buy waits until **1:00 after contract open**, including opening,
-regular, optional limit-batch, historical-strike and spot routes. The shared
-entry gateway enforces the actual clock even if an old setting or caller asks
-for an earlier start. Waiting does not consume an attempt or reserve allowance;
-order reconciliation and exit monitoring continue.
+Eligible early buys can start **immediately at contract open**. There is no
+one-minute waiting period. The opening, regular, optional limit-batch, historical
+and spot routes still enforce their own prices, bias, funds and deadlines.
+Buy limits of 60¢ or more still wait until minute 5; the 75¢, other 70¢+ and
+settlement routes retain their later windows. The shared gateway blocks buys
+before contract open, regardless of a caller timestamp or stale start setting.
+Order reconciliation and exit monitoring continue throughout the contract.
 
 The 35¢ buy is retired. The 57¢ rule requires an exact quoted ask; the 75¢ rule
 triggers at an ask of at least 75¢. Neither limit can pay more, although exchange
@@ -93,7 +95,7 @@ at the entry limit; cheaper fills now produce lower exit targets.
 | 73¢ (from minute 11) | 79¢ |
 | 85¢ (from minute 11) | 91¢ |
 
-From 1:00 until 2:00, the bot may submit a bias-selected 52¢ limit
+From contract open until 2:00, the bot may submit a bias-selected 52¢ limit
 with a 60¢ target and an independent 57¢ limit with a 62¢ target. Each route
 uses the shared allowance and at most $2.80 per order, including entry fee room.
 Opening orders are IOC; an unfilled quantity is canceled immediately, and no
@@ -201,7 +203,7 @@ Important defaults:
 | `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $10 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum committed regular orders; proven zero-fill attempts excluded |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
-| `ENTRY_START_MINUTE` | `1` (fixed) | All new buys wait 60 seconds after contract open |
+| `ENTRY_START_MINUTE` | `0` (fixed) | Early buys are eligible at contract open |
 | `ENTRY_END_MINUTE` | Ignored | Fixed price-based windows listed above |
 | `POLL_SECONDS` | `5` | Entry-loop delay |
 | `EXIT_POLL_SECONDS` | `1` | Independent exit-loop delay |
