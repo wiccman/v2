@@ -74,7 +74,7 @@ CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 BUDGET = Decimal("0.77")
 MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
-ENTRY_START_DELAY = 60  # Fixed from contract open on every entry route.
+ENTRY_START_DELAY = 0  # Early entries are eligible immediately at contract open.
 START = ENTRY_START_DELAY
 END = 900 - SETTLEMENT_WINDOW  # Final three minutes belong to the settlement route.
 PREDICTION_MINUTES = (2, 4, 6)
@@ -437,7 +437,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     # Use the actual clock, not a caller-supplied timestamp or stale Railway
     # configuration. Opening and optional trigger routes share this minimum.
     if time.time() < closed.timestamp() - 900 + ENTRY_START_DELAY:
-        return skip("before_one_minute", minimum_elapsed_seconds=ENTRY_START_DELAY)
+        return skip("market_not_started", minimum_elapsed_seconds=ENTRY_START_DELAY)
     if kind == "regular" and committed_regular_orders(record) >= MAX_BUYS:
         return skip("regular_order_limit_reached", committed_orders=committed_regular_orders(record))
     # Gate the submitted limit on every route. A 62c/67c limit can otherwise
@@ -1160,7 +1160,7 @@ def cycle(state):
     save_state(state)
     reconcile_entries(state)
     if time.time() < started.timestamp() + ENTRY_START_DELAY:
-        write_log("ENTRY_START_WAIT", ticker, details="New buys open at 1:00 after contract start")
+        write_log("ENTRY_START_WAIT", ticker, details="Early buys are eligible at contract open")
         return  # Preserve all entry opportunities while reconciliation continues.
     if closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
         settlement_entry(record, state, ticker, closed)
@@ -1284,15 +1284,15 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; early_entry_side={SIGNAL_BUILD}; from360s=live_BTC_vs_market_strike", flush=True)
-    print("ENTRY_START_GATE: no new buy before60s after contract open; opening entries run60s..120s; exit monitoring continues", flush=True)
+    print("ENTRY_START_GATE: early buys eligible at contract open; opening entries run0s..120s; exit monitoring continues", flush=True)
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=720s..900s; live strike side; trigger_ask>=97c and <100c; limit=97c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
-    print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; target=62c at limit fill; quantity<=4; independent opening attempt", flush=True)
+    print("OPENING_57_ENTRY window=0s..120s; exact_ask=57c; limit=57c IOC; target=62c at limit fill; quantity<=4; independent opening attempt", flush=True)
     print(f"SIX_MINUTE_ENTRY window=360s..{END}s; trigger_ask>=75c and <100c; limit=75c GTC until {END}s; target=83c at limit fill; quantity<=3; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/97c GTC limits; exchange price improvement remains possible", flush=True)
-    print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; room for at least five qualifying earlier orders; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
+    print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
@@ -1301,7 +1301,7 @@ def main():
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
-        print("CONFIG_IGNORED: fixed windows: all buys wait1m; under60c from1m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from1m to2m; settlement from12m; 35c retired", flush=True)
+        print("CONFIG_IGNORED: fixed windows: early buys from contract open; under60c from0m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from0m to2m; settlement from12m; 35c retired", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:
