@@ -1,4 +1,4 @@
-import argparse, csv, json, os, time
+import argparse, csv, json, os, time, uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -75,6 +75,11 @@ CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
 MAX_BUYS = 15  # Stale Railway overrides cannot restore the previous seven-order cap.
+MAX_OPEN_CONTRACTS = Decimal("8")
+INITIAL_OPEN_CONTRACTS = Decimal("5")
+MAX_AVERAGE_CONTRACTS = Decimal("3")
+MAX_AVERAGE_DOLLARS = Decimal("2.50")
+AVERAGE_DOWN_CUTOFF = 180
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 ENTRY_START_DELAY = 0  # Early entries are eligible immediately at contract open.
 START = ENTRY_START_DELAY
@@ -449,6 +454,39 @@ def committed_regular_orders(record):
                for i in record.get("entry_intents", []))
 
 
+def pending_entry_contracts(record):
+    # Unknown acknowledgements and resting orders can still fill. Count their
+    # entire remaining quantity until reconciliation proves them terminal.
+    return sum((Decimal(i["quantity"]) for i in record.get("entry_intents", [])
+                if not i.get("entry_closed")), Decimal("0"))
+
+
+def scalp_entry_limit(record, held, price, kind, closed):
+    pending = pending_entry_contracts(record)
+    room = MAX_OPEN_CONTRACTS - abs(held) - pending
+    if kind == SETTLEMENT_KIND:
+        return max(Decimal("0"), room), False, None
+    if held == 0 and pending == 0:
+        # A fully closed position starts a new episode. A sale during an open
+        # position cannot reset the one-average-down allowance.
+        record["scalp_episode"] = {"id": str(uuid.uuid4())}
+    episode = record.get("scalp_episode")
+    if not episode:
+        # On upgrade, the bot cannot safely reconstruct whether an existing
+        # position has already been averaged down. Wait until it is flat.
+        return Decimal("0"), False, "untracked_open_position"
+    averaging = held != 0
+    if not averaging:
+        return max(Decimal("0"), min(room, INITIAL_OPEN_CONTRACTS - pending)), False, None
+    if time.time() >= closed.timestamp() - 900 + AVERAGE_DOWN_CUTOFF:
+        return Decimal("0"), True, "average_down_window_closed"
+    if any(i.get("scalp_episode") == episode["id"] and i.get("averaging_entry")
+           and attempt_committed(i) for i in record.get("entry_intents", [])):
+        return Decimal("0"), True, "average_down_already_used"
+    affordable = (MAX_AVERAGE_DOLLARS / (Decimal(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
+    return max(Decimal("0"), min(room, MAX_AVERAGE_CONTRACTS, affordable)), True, None
+
+
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
     def skip(reason, **details):
         write_log("ENTRY_SKIP", ticker, prediction=side, price=str(price), details=json.dumps({
@@ -550,11 +588,20 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             write_log("ENTRY_OPPOSITE_POSITION_WAIT", ticker, prediction=side, details=str(held))
             return skip("opposite_inventory", held=str(held))
         if any(not i.get("entry_closed") and i.get("side") != side
-               for i in record.get("entry_intents", [])):
+                for i in record.get("entry_intents", [])):
             return skip("opposite_entry_unresolved")
+    else:
+        try:
+            held = settlement_position(ticker)
+        except Exception:
+            return skip("settlement_position_unavailable")
+    quantity_limit, averaging_entry, limit_reason = scalp_entry_limit(record, held, price, kind, closed)
+    if limit_reason or quantity_limit < 1:
+        return skip(limit_reason or "open_contract_limit", held=str(held),
+                    pending=str(pending_entry_contracts(record)), maximum=str(MAX_OPEN_CONTRACTS))
     if time.time() < record.get("cash_retry_at", 0):
         return skip("cash_retry_delay", retry_at=record["cash_retry_at"])
-    quantity = entry_quantity(price, kind, record, MARKET_BUDGET)
+    quantity = entry_quantity(price, kind, record, MARKET_BUDGET, max_quantity=quantity_limit)
     available_budget = remaining_allowance(record, MARKET_BUDGET, kind)
     if record.get("entry_budget_legacy") or quantity < 1 or quantity * (Decimal(price) + FEE_RESERVE) > available_budget:
         return skip("market_allowance_unavailable", remaining_dollars=str(available_budget), quantity=str(quantity))
@@ -620,6 +667,10 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return skip("final_position_unavailable")
         if (side == "YES" and held < 0) or (side == "NO" and held > 0):
             return skip("opposite_inventory_before_post", held=str(held))
+    else:
+        held = settlement_position(ticker)
+    if abs(held) + pending_entry_contracts(record) + quantity > MAX_OPEN_CONTRACTS:
+        return skip("open_contract_limit_before_post", held=str(held), quantity=str(quantity))
     if switch:
         held = settlement_position(ticker)
         if (side == "YES" and held < 0) or (side == "NO" and held > 0):
@@ -630,10 +681,13 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         return skip("deadline_reached_before_reservation")
     cancel_at = min(cutoff, cancellation_deadline(closed) if cancel_at is None else cancel_at)
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
-                           MARKET_BUDGET, cancel_at, kind)
+                           MARKET_BUDGET, cancel_at, kind, max_quantity=quantity)
     if intent is None:
         return skip("reservation_unavailable", remaining_dollars=str(remaining_allowance(record, MARKET_BUDGET, kind)))
     intent["entry_execution_version"] = ENTRY_EXECUTION_VERSION
+    if kind != SETTLEMENT_KIND:
+        intent["scalp_episode"] = record["scalp_episode"]["id"]
+        intent["averaging_entry"] = averaging_entry
     intent["side_source"] = decision["side_source"]
     if side_source == "boruto":
         intent["bias_build"] = SIGNAL_BUILD
@@ -1367,6 +1421,7 @@ def main():
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/97c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
     print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the $15 earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
+    print(f"POSITION_CAP maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",

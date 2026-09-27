@@ -158,7 +158,7 @@ def test_signal_entries_have_priority_and_dual_batch_shares_market_cap(monkeypat
     intents = record['entry_intents']
     assert [i['kind'] for i in intents[:1]] == ['regular']
     dual = [i for i in intents if i['kind'] == 'dual']
-    assert len(dual) == 1  # The larger shared allowance leaves room after regular orders.
+    assert len(dual) == 0  # The initial pending buy occupies the open-position slot.
     assert all(1 <= D(i['quantity']) <= 5 and D(i['reserved_dollars']) <= D('2.80') for i in intents)
     assert sum(D(i['reserved_dollars']) for i in intents) <= D('15')
 

@@ -55,16 +55,18 @@ def remaining_allowance(record, cap, kind):
     return max(ZERO, limit - spent)
 
 
-def entry_quantity(price, kind, record=None, cap=None):
+def entry_quantity(price, kind, record=None, cap=None, max_quantity=None):
     if kind == SETTLEMENT_KIND:
-        return (SETTLEMENT_BUDGET / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
-    available = EARLIER_ORDER_BUDGET
-    if record is not None:
-        available = min(available, remaining_allowance(record, market_budget() if cap is None else cap, kind))
-    return min(ENTRY_QUANTITY, (available / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
+        quantity = (SETTLEMENT_BUDGET / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
+    else:
+        available = EARLIER_ORDER_BUDGET
+        if record is not None:
+            available = min(available, remaining_allowance(record, market_budget() if cap is None else cap, kind))
+        quantity = min(ENTRY_QUANTITY, (available / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
+    return quantity if max_quantity is None else min(quantity, max(ZERO, D(max_quantity)))
 
 
-def reserve(record, side, price, order_budget, cap, cancel_at, kind):
+def reserve(record, side, price, order_budget, cap, cancel_at, kind, max_quantity=None):
     initialize(record)
     if record.get("entry_budget_legacy"):
         return None
@@ -84,7 +86,7 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
     else:
         # Earlier trades cannot consume the settlement budget reserved for settlement.
         cap = min(cap, market_budget() - SETTLEMENT_BUDGET)
-    quantity = entry_quantity(price, kind, record, cap)
+    quantity = entry_quantity(price, kind, record, cap, max_quantity=max_quantity)
     if quantity < 1 or quantity * (price + FEE_RESERVE) > cap - spent:
         return None
     intent = dict(client_id=str(uuid.uuid4()), side=side, price=str(price),
