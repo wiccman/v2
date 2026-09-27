@@ -2,7 +2,7 @@ import base64
 import os
 import time
 import uuid
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,6 +20,30 @@ class KalshiAPIError(RuntimeError):
         self.status_code = status_code
         self.retry_after = retry_after
         self.code = code
+
+
+def terminal_ioc_receipt(intent):
+    """Validate a saved V2 IOC placement result without a delayed GET.
+
+    Kalshi documents remaining_count as the final post-cancellation count for
+    IOC orders. Missing/invalid counts and lost ACKs still require lookup.
+    Callers must know that this intent was submitted as an IOC.
+    """
+    receipt = intent.get("placement_receipt", {})
+    if (not intent.get("order_id") or receipt.get("order_id") != intent["order_id"]
+            or receipt.get("client_order_id", intent["client_id"]) != intent["client_id"]):
+        return None
+    try:
+        filled = Decimal(str(receipt.get("fill_count", "NaN")))
+        remaining = Decimal(str(receipt.get("remaining_count", "NaN")))
+        quantity = Decimal(str(intent.get("quantity", "NaN")))
+        if (not all(n.is_finite() for n in (filled, remaining, quantity))
+                or not 0 <= filled <= quantity or quantity <= 0 or remaining != 0):
+            return None
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+    return {"order_id": intent["order_id"], "fill_count_fp": str(filled),
+            "status": "executed" if filled == quantity else "canceled"}
 
 def _latest_index_value(payload):
     """Extract the newest numeric index value from a CF Benchmarks response."""

@@ -19,7 +19,11 @@ def parse_pairs(value="39:46"):
     return dict(sorted(pairs.items()))
 
 
-def _remaining_lots(fills, entry_orders, exit_orders, held, ticker):
+class InventorySyncError(ValueError):
+    """Independent exchange snapshots have not converged yet."""
+
+
+def _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked=None):
     """Replay verified fills, retaining the identity of every unsold entry lot.
 
     New exits consume their saved fill allocations; historical paired exits
@@ -120,15 +124,20 @@ def _remaining_lots(fills, entry_orders, exit_orders, held, ticker):
     lots = [lot for lot in lots if lot["quantity"]]
     reconstructed = sum((lot["quantity"] * lot["sign"] for lot in lots), D(0))
     if reconstructed != D(held):
-        raise ValueError("Fills and position disagree; waiting for consistent exchange data")
-    if any(lot["target"] is None for lot in lots):
+        raise InventorySyncError("Fills and position disagree; waiting for consistent exchange data")
+    outside = [lot for lot in lots if lot["target"] is None]
+    if outside and untracked is None:
         raise ValueError("Untracked inventory has no verified paired exit target")
-    return lots
+    if untracked is not None:
+        untracked.extend({"fill_id": lot["fill_id"], "order_id": lot["fill"].get("order_id"),
+                          "side": "YES" if lot["sign"] > 0 else "NO",
+                          "quantity": str(lot["quantity"])} for lot in outside)
+    return [lot for lot in lots if lot["target"] is not None]
 
 
-def paired_inventory(fills, entry_orders, exit_orders, held, ticker):
+def paired_inventory(fills, entry_orders, exit_orders, held, ticker, untracked=None):
     """Original fixed-pair accounting, also used to verify legacy receipts."""
-    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker)
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked)
     buckets = {}
     for lot in lots:
         buckets[lot["target"]] = buckets.get(lot["target"], D(0)) + lot["quantity"] * lot["sign"]
@@ -157,7 +166,7 @@ def _outcome_cost(fill, sign):
     return prices[side] if side in prices else 1 - prices[other]
 
 
-def fill_cost_inventory(fills, entry_orders, exit_orders, held, ticker):
+def fill_cost_inventory(fills, entry_orders, exit_orders, held, ticker, untracked=None):
     """Return quantities and durable exit plans from remaining actual fill costs.
 
     Share a weighted average only among lots with the same profit increment.
@@ -165,7 +174,7 @@ def fill_cost_inventory(fills, entry_orders, exit_orders, held, ticker):
     pass. Whole-cent ceilings preserve the gross increment without requiring a
     quote/market lookup; whole cents are valid on Kalshi's current price grids.
     """
-    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker)
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked)
     groups, buckets, plans = {}, {}, {}
     for lot in lots:
         if lot["target"] == 1:

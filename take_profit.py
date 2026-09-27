@@ -16,9 +16,9 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
-from kalshi import KalshiAPIError
+from kalshi import KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestDeferred, retry_delay
-from price_pairs import paired_inventory, fill_cost_inventory
+from price_pairs import paired_inventory, fill_cost_inventory, InventorySyncError
 
 TERMINAL = {"executed", "canceled", "expired"}
 
@@ -130,7 +130,10 @@ class TakeProfitMonitor:
             return True
         if self.clock() < intent.get("next_status_at", 0):
             return False
-        if intent.get("order_id"):
+        order = terminal_ioc_receipt(intent)
+        if order is not None:
+            pass  # Durable matching-engine result; no read-model lookup needed.
+        elif intent.get("order_id"):
             try:
                 order = self.client.order(intent["order_id"], ticker)
             except KalshiAPIError as error:
@@ -167,6 +170,10 @@ class TakeProfitMonitor:
         return True
 
     def _paired_buckets(self, ticker, record, ledger, held):
+        fills = self.client.all_fills(ticker)
+        # An entry can land while the exchange reads are in flight. Its intent
+        # was persisted before POST; refresh that snapshot before attribution.
+        record = self.read_entries().get("markets", {}).get(ticker, record)
         by_client = ledger.setdefault("entry_order_ids", {})
         missing = [i for i in record.get("entry_intents", [])
                    if not i.get("order_id") and not i.get("entry_closed")
@@ -192,6 +199,8 @@ class TakeProfitMonitor:
             if target is None:
                 target = {Decimal("0.25"): Decimal("0.31"),
                           Decimal("0.32"): Decimal("0.39")}.get(price)
+            if order_id and target is None and any(f.get("order_id") == order_id for f in fills):
+                raise ValueError("Known entry fill has no configured exit target")
             if order_id and target is not None:
                 saved_target = Decimal(item.get("exit_target", str(target)))
                 previous_target = {Decimal("0.70"): Decimal("0.80"),
@@ -202,7 +211,6 @@ class TakeProfitMonitor:
                     raise ValueError("Saved entry target conflicts with configured pair")
                 entries[order_id] = {"side": item["side"], "target": str(saved_target),
                                      "price": str(price)}
-        fills = self.client.all_fills(ticker)
         exits = ledger.get("exit_orders", {})
         # An order status can update before its fills endpoint. Do not reuse the
         # inventory until all previously confirmed exits appear in fill history.
@@ -211,10 +219,22 @@ class TakeProfitMonitor:
             observed = sum((Decimal(str(f.get("count_fp", f.get("count", "0"))))
                             for f in unique.values() if f.get("order_id") == order_id), Decimal(0))
             if observed != Decimal(order["filled"]):
-                raise ValueError("Confirmed exit is not yet consistent with fill history")
+                raise InventorySyncError("Confirmed exit is not yet consistent with fill history")
+        outside = []
         if self.fill_cost_targets:
-            return fill_cost_inventory(fills, entries, exits, held, ticker)
-        return paired_inventory(fills, entries, exits, held, ticker), {}
+            result = fill_cost_inventory(fills, entries, exits, held, ticker, outside)
+        else:
+            result = paired_inventory(fills, entries, exits, held, ticker, outside), {}
+        if outside and any(i.get("client_id") not in by_client for i in missing):
+            # A bot POST with a lost ACK could explain these lots. Resolve its
+            # identity before classifying inventory as belonging to others.
+            raise InventorySyncError("Entry acknowledgement unresolved; inventory ownership pending")
+        if ledger.get("outside_inventory", []) != outside:
+            ledger["outside_inventory"] = outside
+            self.save()
+            self.emit("TP_OUTSIDE_INVENTORY", ticker=ticker, lots=outside,
+                      action="excluded_from_take_profit", position_verified=True)
+        return result
 
     def _market(self, ticker, record, ledger):
         close = record.get("close_timestamp")
@@ -343,6 +363,7 @@ class TakeProfitMonitor:
         if not result.get("order_id"):
             raise RuntimeError("Exit response missing order ID; saved for reconciliation")
         intent["order_id"] = result["order_id"]
+        intent["placement_receipt"] = result
         self.save()
         self.emit(prefix + "_SUBMITTED", ticker=ticker, order_id=result["order_id"], **armed,
                   execution="reduce_only_ioc", fill_confirmed=False)
@@ -359,7 +380,14 @@ class TakeProfitMonitor:
                 continue
             ledger = self.state["markets"].setdefault(ticker, {})
             try:
-                ok = self._market(ticker, record, ledger) and ok
+                try:
+                    market_ok = self._market(ticker, record, ledger)
+                except InventorySyncError:
+                    # Retry once before failing closed; no exit was submitted
+                    # from the inconsistent snapshot.
+                    fresh = self.read_entries().get("markets", {}).get(ticker, record)
+                    market_ok = self._market(ticker, fresh, ledger)
+                ok = market_ok and ok
             except Exception as error:
                 ok = False
                 # Includes rate limits on GET/order reconciliation, not just POST.
