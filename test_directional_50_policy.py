@@ -55,7 +55,7 @@ def test_settlement_route_uses_same_distance(monkeypatch, side, spot, allowed):
 def test_resting_settlement_buy_is_canceled_when_btc_reenters_band(monkeypatch):
     enable(monkeypatch)
     fake, record, state, clock, closed = settlement_setup(monkeypatch, side="YES")
-    fake.market("TEST")["yes_ask_dollars"] = "0.98"  # 97c limit rests.
+    fake.market("TEST")["yes_ask_dollars"] = "0.98"  # 96c limit rests.
     spot = [D("100060")]
     monkeypatch.setattr(fake, "btc_reference_price", lambda: spot[0])
     bot.settlement_entry(record, state, "TEST", closed)
