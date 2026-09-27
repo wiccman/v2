@@ -18,18 +18,20 @@ from pathlib import Path
 
 from kalshi import KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestDeferred, retry_delay
-from price_pairs import paired_inventory, fill_cost_inventory, InventorySyncError
+from price_pairs import paired_inventory, fill_cost_inventory, order_profit_inventory, InventorySyncError
 
 TERMINAL = {"executed", "canceled", "expired"}
 
 
 class TakeProfitMonitor:
     def __init__(self, client, read_entries, path, target=Decimal("0.45"),
-                 poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False):
+                 poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False,
+                 per_order_profit=None):
         self.client, self.read_entries = client, read_entries
         self.path, self.target = Path(path), Decimal(target)
         self.pairs = pairs
         self.fill_cost_targets = fill_cost_targets
+        self.per_order_profit = Decimal(per_order_profit) if per_order_profit is not None else None
         self.poll, self.clock = max(1.0, float(poll)), clock
         self.emit = emit or (lambda event, **data: print(json.dumps({
             "event": event, "time_utc": datetime.now(timezone.utc).isoformat(), **data
@@ -221,7 +223,10 @@ class TakeProfitMonitor:
             if observed != Decimal(order["filled"]):
                 raise InventorySyncError("Confirmed exit is not yet consistent with fill history")
         outside = []
-        if self.fill_cost_targets:
+        if self.per_order_profit is not None:
+            result = order_profit_inventory(fills, entries, exits, held, ticker,
+                                            self.per_order_profit)
+        elif self.fill_cost_targets:
             result = fill_cost_inventory(fills, entries, exits, held, ticker, outside)
         else:
             result = paired_inventory(fills, entries, exits, held, ticker, outside), {}
