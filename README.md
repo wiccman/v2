@@ -108,13 +108,13 @@ The optional spot trigger requires YES bias as well as BTC sufficiently above
 the current strike; this route operates before minute 2 by default.
 
 Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
-limit-batch, historical, spot and late routes. All routes share a fixed **$10
+limit-batch, historical, spot and late routes. All routes share a fixed **$21
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
-reserved for the final-three-minute settlement entry**, leaving **$4 for all
+reserved for the final-three-minute settlement entry**, leaving **$15 for all
 earlier routes combined**. Each earlier order uses at most **$2.80 including fees**,
-subject to the $4 earlier allowance. For example, an initial 57¢ or 67¢ order requests
+subject to the $15 earlier allowance. For example, an initial 57¢ or 67¢ order requests
 4 contracts, and a 75¢ or 85¢ order requests 3. The final order may shrink further
-to the whole contracts affordable from the remaining allowance. The smaller market cap may prevent five earlier orders; it does not force buys
+to the whole contracts affordable from the remaining allowance. The earlier allowance covers five maximum $2.80 order allocations; it does not force buys
 outside their price/time rules or guarantee fills. Exchange partial fills remain possible, and exits sell only
 verified filled inventory.
 Legacy `ENTRY_BUDGET_DOLLARS` and `MARKET_BUDGET_DOLLARS` settings are ignored.
@@ -200,7 +200,7 @@ Important defaults:
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries use up to $2.80 and 5 contracts; 97¢ settlement requests 6 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | Existing opening entry; independent 57:62 rule is fixed in code |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $10 including entry fee reserves |
+| `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $21 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum committed regular orders; proven zero-fill attempts excluded |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `0` (fixed) | Early buys are eligible at contract open |
@@ -370,7 +370,7 @@ limits open from 8:00, with the existing 73¢/85¢ route starting at 11:00.
 
 Other buys use immediate-or-cancel. A quote check cannot enforce a minimum
 exchange fill price if the book changes before matching; favorable execution
-below the limit remains possible, including for resting orders. New rules share the $10 cap ($4 earlier /
+below the limit remains possible, including for resting orders. New rules share the $21 cap ($15 earlier /
 $6 settlement), and existing inventory keeps its recorded exits.
 
 ## Request and order-status recovery
@@ -410,7 +410,7 @@ it may remain unfilled if offers never reach its limit. A better execution price
 is still possible. The ordinary minute-12 cancellation sweep preserves this
 order's separate contract-close deadline.
 The $6 reserve covers six contracts plus the existing 3-cent per-contract fee
-cushion. The overall cap is $10. One filled or unresolved settlement attempt per
+cushion. The overall cap is $21. One filled or unresolved settlement attempt per
 market and monitor-health gating remain; a confirmed zero-fill cancellation can
 retry before close. Existing 98/99-cent settlement lots remain
 recognized, keep their $1 target, and are excluded from scalp exits. No fill or
@@ -427,7 +427,11 @@ Partial closes retry only after status reconciliation; missing acknowledgements,
 The entry worker switches its side lock and buys only after the exit worker has
 confirmed no opposite inventory, with exit fills reflected in history. It rereads
 the position, live strike side and qualifying quote before submission. Loss-taking exits use FIFO
-inventory accounting and do not reset the $10 spending ledger. Missing liquidity,
+inventory accounting and do not reset the $21 spending ledger. Missing liquidity,
 an unavailable qualifying quote, insufficient cash/budget, or market close can prevent the
 transition from completing. Logs distinguish `SETTLEMENT_CLOSE_*` from normal
 take-profit events and record the requested/ready side transition.
+
+## 2.2.8 — $21 shared market allowance
+
+Raise the per-market cap to $21 including entry fee reserves: $15 for all earlier routes and $6 reserved for the 97-cent settlement entry. Existing spending reservations remain counted across upgrades and restarts; sales do not replenish the allowance. Entry timing, price pairs, per-order sizing and exit tracking are unchanged.

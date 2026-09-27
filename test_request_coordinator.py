@@ -260,7 +260,7 @@ def test_only_proven_local_no_send_releases_new_entry_reservation(monkeypatch, o
     restored = json.loads(json.dumps(state))['markets']['TEST']['entry_intents']
     assert restored[0] == accepted
     intent = restored[-1]
-    assert D(intent['reserved_dollars']) == (0 if outcome == 'deferred' else D('1.44'))
+    assert D(intent['reserved_dollars']) == (0 if outcome == 'deferred' else D('2.40'))
     assert (intent.get('release_reason') == 'request_deferred') == (outcome == 'deferred')
 
 
