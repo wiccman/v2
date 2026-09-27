@@ -173,8 +173,9 @@ def test_unknown_manual_inventory_is_not_given_an_invented_target(tmp_path):
     e.manual(1, "2")
     m, _, events = paired_monitor(tmp_path, e)
     m.run_once()
-    assert not m.healthy and not e.submissions
-    assert any("Untracked inventory" in d.get("error", "") for _, d in events)
+    assert m.healthy and not e.submissions
+    assert any(event == "TP_OUTSIDE_INVENTORY" and d["lots"][0]["order_id"] == "manual"
+               for event, d in events)
 
 
 def test_unfilled_then_partial_entry_only_arms_verified_quantity(tmp_path):

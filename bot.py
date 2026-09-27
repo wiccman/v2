@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from dotenv import load_dotenv
-from kalshi import KalshiClient, KalshiAPIError
+from kalshi import KalshiClient, KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestCoordinator, RequestDeferred
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, EARLIER_ORDER_BUDGET, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed, remaining_allowance, reconcile_reservation, attempt_committed
 from take_profit import TakeProfitMonitor
@@ -651,6 +651,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         raise
     if result.get("order_id"):
         intent["order_id"] = result["order_id"]
+        intent["placement_receipt"] = result
         if kind != SETTLEMENT_KIND:
             record["trade_side"] = side
     elif not result:
@@ -751,7 +752,23 @@ def reconcile_entries(state, now_timestamp=None):
                 if item.get("entry_closed") and now_timestamp >= close:
                     continue
                 try:
-                    order = client.order(item["order_id"], ticker)
+                    order = terminal_ioc_receipt(item) if item.get("resting_entry") is False else None
+                    # A partial fill still needs the fee totals before any
+                    # allowance is released. Keep its full reservation if the
+                    # read model has not caught up with the placement receipt.
+                    partial = order and 0 < Decimal(order["fill_count_fp"]) < Decimal(item["quantity"])
+                    if order is None or partial:
+                        try:
+                            remote = client.order(item["order_id"], ticker)
+                            if (partial and remote.get("status") in {"executed", "canceled", "expired"}
+                                    and Decimal(str(remote.get("fill_count_fp", remote.get("fill_count", "NaN"))))
+                                    != Decimal(order["fill_count_fp"])):
+                                raise ValueError("Order lookup disagrees with terminal IOC receipt")
+                            if order is None or remote.get("status") in {"executed", "canceled", "expired"}:
+                                order = remote
+                        except KalshiAPIError as error:
+                            if order is None or error.status_code != 404:
+                                raise
                     if order.get("status") in {"executed", "canceled", "expired"}:
                         complete(item, order)
                 except Exception as error:

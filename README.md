@@ -435,3 +435,24 @@ take-profit events and record the requested/ready side transition.
 ## 2.2.8 — $21 shared market allowance
 
 Raise the per-market cap to $21 including entry fee reserves: $15 for all earlier routes and $6 reserved for the 97-cent settlement entry. Existing spending reservations remain counted across upgrades and restarts; sales do not replenish the allowance. Entry timing, price pairs, per-order sizing and exit tracking are unchanged.
+
+## 2.2.9 — Shared inventory and IOC recovery
+
+Manual trades and other bots can share the account. Normal take-profit exits
+cover only lots linked to this bot's durable entry intents; outside lots are
+excluded from exit quantities and average costs and logged as
+`TP_OUTSIDE_INVENTORY`. Full fill history must still reconcile to the account's
+net position. External reductions consume lots FIFO; they can reduce this bot's
+remaining attributable quantity. The existing settlement transition still has
+its separate, explicit authorization to close opposite net inventory.
+
+The monitor refreshes entry state after fetching fills and retries one
+inconsistent position snapshot before pausing. IOC placement receipts are
+persisted across restarts and validated against order/client IDs and quantity.
+A receipt with a final zero remaining count proves completion without waiting
+for the order lookup to appear. Missing or invalid receipts still require
+read-only recovery. Partial entry fees must be verified before releasing unused
+allowance, and confirmed exit fills must appear in history before another exit.
+The $21 cap, $6 settlement reserve, entry rules and profit increments remain.
+
+Receipt semantics: https://docs.kalshi.com/api-reference/orders/create-order-v2
