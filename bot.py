@@ -8,6 +8,7 @@ from request_coordinator import RequestCoordinator, RequestDeferred
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, EARLIER_ORDER_BUDGET, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed, remaining_allowance, reconcile_reservation, attempt_committed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
+from sale_recycling import confirmed_credits
 from balance_diagnostics import log_api_cash, BalanceMonitor
 from boruto import BUILD as SIGNAL_BUILD, build_signal
 from strategy import strike_ruler, live_confidence, average_open_price, average_prediction_confidence, spot_is_above_strike, seconds_from_minutes
@@ -73,7 +74,7 @@ MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
-MAX_BUYS = int(os.getenv("MAX_PURCHASES_PER_MARKET", "7"))
+MAX_BUYS = 15  # Stale Railway overrides cannot restore the previous seven-order cap.
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 ENTRY_START_DELAY = 0  # Early entries are eligible immediately at contract open.
 START = ENTRY_START_DELAY
@@ -680,6 +681,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         EXIT_MONITOR.wake()
     write_log("ENTRY_BUDGET", ticker, details=json.dumps({
         "cap": str(MARKET_BUDGET), "reserved": str(sum(Decimal(i["reserved_dollars"]) for i in record["entry_intents"])),
+        "recycled": str(sum((Decimal(v) for v in record.get("recycled_exit_orders", {}).values()), Decimal(0))),
+        "remaining_earlier": str(remaining_allowance(record, MARKET_BUDGET, "regular")),
         "kind": kind, "client_id": intent["client_id"], "cancel_at": intent["cancel_at"],
     }))
     return result, quantity
@@ -1164,6 +1167,44 @@ def settlement_entry(record, state, ticker, closed):
                cash_retry_at=record.get("cash_retry_at"), quantity=str(quantity))
 
 
+def reconcile_sale_allowance(state, ticker, record):
+    """Only independently confirmed, fill-backed sells can restore allowance."""
+    path = getattr(EXIT_MONITOR, "path", None)
+    if path is None or not path.exists():
+        return
+    try:
+        ledger = json.loads(path.read_text()).get("markets", {}).get(ticker, {})
+        exits = ledger.get("exit_orders", {})
+        snapshot = {oid: str(item.get("filled")) for oid, item in exits.items()
+                    if item.get("purpose") == "take_profit" and item.get("allocations")}
+        if snapshot == record.get("recycling_exit_snapshot", {}) and record.get("recycling_checked"):
+            return
+        credits = confirmed_credits(record, exits, client.all_fills(ticker), ticker)
+        previous = record.get("recycled_exit_orders", {})
+        if any(credits.get(oid) != amount for oid, amount in previous.items()):
+            raise ValueError("Previously credited sale is absent or changed")
+        spent = sum((Decimal(item["reserved_dollars"]) for item in record.get("entry_intents", [])), Decimal(0))
+        if sum((Decimal(amount) for amount in credits.values()), Decimal(0)) > spent:
+            raise ValueError("Confirmed sale credit exceeds entry reservations")
+        record["recycled_exit_orders"] = credits
+        record["recycling_exit_snapshot"] = snapshot
+        record["recycling_checked"] = True
+        save_state(state)
+        additional = sum((Decimal(credits[oid]) for oid in credits.keys() - previous.keys()), Decimal(0))
+        if additional:
+            write_log("ENTRY_SALE_ALLOWANCE_RESTORED", ticker, details=json.dumps({
+                "new_credit_dollars": str(additional),
+                "available_earlier_dollars": str(remaining_allowance(record, MARKET_BUDGET, "regular")),
+                "confirmed_exit_orders": len(credits)}))
+    except Exception as error:
+        # Existing reservations stay charged. A lagging or inconsistent exchange
+        # read never frees budget and does not stop the independent exit worker.
+        if record.get("recycling_error") != repr(error):
+            record["recycling_error"] = repr(error)
+            save_state(state)
+            write_log("ENTRY_SALE_ALLOWANCE_PENDING", ticker, details=repr(error))
+
+
 def cycle(state):
     reconcile_entries(state)
     if EXIT_MONITOR is None:
@@ -1191,6 +1232,7 @@ def cycle(state):
     record["close_timestamp"] = closed.timestamp()
     save_state(state)
     reconcile_entries(state)
+    reconcile_sale_allowance(state, ticker, record)
     if time.time() < started.timestamp() + ENTRY_START_DELAY:
         write_log("ENTRY_START_WAIT", ticker, details="Early buys are eligible at contract open")
         return  # Preserve all entry opportunities while reconciliation continues.
@@ -1324,6 +1366,7 @@ def main():
     print(f"SIX_MINUTE_ENTRY window=360s..{END}s; trigger_ask>=75c and <100c; limit=75c GTC until {END}s; target=83c at limit fill; quantity<=3; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/97c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
+    print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the $15 earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",

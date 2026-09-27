@@ -48,6 +48,10 @@ def remaining_allowance(record, cap, kind):
     cap = min(D(cap), market_budget())
     limit = cap if kind == SETTLEMENT_KIND else min(cap, market_budget() - SETTLEMENT_BUDGET)
     spent = sum((D(item["reserved_dollars"]) for item in record.get("entry_intents", [])), ZERO)
+    recovered = sum((D(value) for value in record.get("recycled_exit_orders", {}).values()), ZERO)
+    if recovered < ZERO or recovered > spent:
+        raise ValueError("Invalid confirmed sale credit")
+    spent -= recovered
     return max(ZERO, limit - spent)
 
 
@@ -70,6 +74,10 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
         return None
     cap = min(cap, market_budget())
     spent = sum((D(item["reserved_dollars"]) for item in record["entry_intents"]), ZERO)
+    recovered = sum((D(value) for value in record.get("recycled_exit_orders", {}).values()), ZERO)
+    if recovered < ZERO or recovered > spent:
+        raise ValueError("Invalid confirmed sale credit")
+    spent -= recovered
     if kind == SETTLEMENT_KIND:
         if price != SETTLEMENT_PRICE or any(i.get("kind") == SETTLEMENT_KIND and attempt_committed(i) for i in record["entry_intents"]):
             return None
