@@ -54,7 +54,7 @@ def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     fake.held = D('0')
     fake.bias_side = side
-    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
+    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('99990') if side == 'YES' else D('100010'))
     record['signal']['prediction'] = side
     market = dict(fake.market('TEST'))
     market[side.lower() + '_ask_dollars'] = price

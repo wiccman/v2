@@ -67,6 +67,9 @@ def cycle_setup(monkeypatch, elapsed):
     started = datetime.fromtimestamp(1000000000, timezone.utc)
     closed = datetime.fromtimestamp(1000000900, timezone.utc)
     fake = CycleClient()
+    # Keep the default YES inventory compatible with the active opening rule.
+    if 0 <= elapsed < 120:
+        monkeypatch.setattr(fake, "btc_reference_price", lambda: D("99990"))
     record = {"entry_intents": [], "entry_budget_legacy": False, "entry_cancel_at": 1000000360, "buys": 0, "last_buy": 0, "orders": [],
               "signal": {"build": bot.SIGNAL_BUILD, "prediction": "YES", "base_confidence": "HIGH"},
               "predictions": [{"ask": "0.70"}] * 3,

@@ -1,11 +1,18 @@
-# Strike Ruler — Boruto Early Bias Scalp
+# Strike Ruler — Opposite-Strike Opening Scalp
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-**Early direction, 0:00–6:00:** use `2.1.1 Boruto Scalp No Skip` to select
+**Opening direction, 0:00–2:00:** buy the opposite side of the current BTC
+reference versus the contract's fixed strike: above → NO; below → YES.
+At equality or with an invalid/unavailable reference, wait and retry. Recheck
+before every submission. This applies to all opening buy routes, including
+regular tiers and optional triggers, independently of saved bias or lookbacks.
+An attempt that starts before 2:00 cannot submit after that boundary.
+
+**Early direction, 2:00–6:00:** use `2.1.1 Boruto Scalp No Skip` to select
 YES or NO. Read four finalized Kalshi benchmarks at T−60, T−45, T−30 and
 T−15 against the current contract's fixed strike. The newest point votes in
 its own direction (above → YES); T−45 and T−60 vote inversely (below → YES).
@@ -14,12 +21,12 @@ a majority, use the first nonzero vote in newest/T−45/T−60 order, with YES o
 when all three are equal. Confidence, previous-bias conflicts, the research
 YES-only filter and the $32.85 distance filter do not block these scalp signals.
 
-Save the bias and its inputs as `entry_bias` before placing an early order.
+Save the bias and its inputs as `entry_bias` before placing a Boruto-selected order.
 Reuse that market's saved bias across polls and restarts; preserve older `signal`
-records for audit. Every under-70¢ buy route checks the same bias, including
-opening, regular, optional limit-batch, historical and spot triggers. Live BTC
-crossing the strike cannot change early direction. Missing or invalid finalized
-lookbacks block early entries until the data is available; they cannot become
+records for audit. From 2:00 to 6:00, every under-70¢ buy route checks the same bias,
+including regular, optional limit-batch, historical and spot triggers. Live BTC
+crossing the strike cannot change direction in that window. Missing or invalid finalized
+lookbacks block Boruto entries until the data is available; they cannot become
 an invented signal. Entry logs include the selected side and its source.
 
 **From 6:00 onward:** select YES above the live strike and NO below; wait at
@@ -50,7 +57,7 @@ New entries follow fixed price-based windows within each 15-minute market:
 
 Eligible early buys can start **immediately at contract open**. There is no
 one-minute waiting period. The opening, regular, optional limit-batch, historical
-and spot routes still enforce their own prices, bias, funds and deadlines.
+and spot routes still enforce their own prices, side rules, funds and deadlines.
 Buy limits of 60¢ or more still wait until minute 5; the 75¢, other 70¢+ and
 settlement routes retain their later windows. The shared gateway blocks buys
 before contract open, regardless of a caller timestamp or stale start setting.
@@ -95,7 +102,7 @@ at the entry limit; cheaper fills now produce lower exit targets.
 | 73¢ (from minute 11) | 79¢ |
 | 85¢ (from minute 11) | 91¢ |
 
-From contract open until 2:00, the bot may submit a bias-selected 52¢ limit
+From contract open until 2:00, the bot may submit an opposite-strike 52¢ limit
 with a 60¢ target and an independent 57¢ limit with a 62¢ target. Each route
 uses the shared allowance and at most $2.80 per order, including entry fee room.
 Opening orders are IOC; an unfilled quantity is canceled immediately, and no
@@ -103,9 +110,10 @@ new opening submission may occur at or after 2:00. Each attempt rechecks directi
 and opposing inventory. Quote or funding waits do not consume the opportunity.
 
 Regular entries and optional limit batches use the active window's side rule.
-Historical-strike touches may trigger an attempt but cannot override early bias.
-The optional spot trigger requires YES bias as well as BTC sufficiently above
-the current strike; this route operates before minute 2 by default.
+Historical-strike touches may trigger an attempt but cannot override the active side rule.
+The optional spot trigger still requires BTC sufficiently above the current strike;
+it buys NO during the opening window. If configured to extend beyond minute 2,
+it retains the existing YES-bias requirement there.
 
 Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
 limit-batch, historical, spot and late routes. All routes share a fixed **$21

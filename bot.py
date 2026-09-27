@@ -42,6 +42,7 @@ OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
 OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
 OPENING_EXTRA_PAIR = parse_pairs("57:62")
 OPENING_EXTRA_WINDOW = 120
+OPENING_OPPOSITE_WINDOW = 120
 LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
 LATE_ENTRY_PAIRS.update(parse_pairs("73:79,85:91"))
 LATE_ENTRY_PAIRS = {price: target for price, target in LATE_ENTRY_PAIRS.items()
@@ -67,7 +68,7 @@ HIGH_PRICE_ENTRY_START = 480
 SIX_MINUTE_ENTRY_PRICE = Decimal("0.75")
 SIX_MINUTE_ENTRY_START = 360
 LOW_PRICE_ENTRY_END = 360
-ENTRY_EXECUTION_VERSION = 9
+ENTRY_EXECUTION_VERSION = 10
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
@@ -352,8 +353,24 @@ def uses_entry_bias(price, kind):
     return kind != SETTLEMENT_KIND and Decimal(str(price)) < EARLY_ENTRY_PRICE_CEILING
 
 
+def entry_side_source(closed, price=Decimal("0"), kind="regular"):
+    elapsed = time.time() - (closed.timestamp() - 900)
+    if uses_entry_bias(price, kind) and elapsed < LOW_PRICE_ENTRY_END:
+        return "opposite_strike" if 0 <= elapsed < OPENING_OPPOSITE_WINDOW else "boruto"
+    return "live_strike"
+
+
+def selected_entry_side(record, state, ticker, market, closed, source):
+    if source == "boruto":
+        bias = ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
+        return bias, None, bias
+    live = strike_side(market, client.btc_reference_price())
+    selected = {"YES": "NO", "NO": "YES"}.get(live) if source == "opposite_strike" else live
+    return selected, live, None
+
+
 def ensure_entry_bias(record, state, ticker, market, closed):
-    """Lock the no-skip Boruto signal once per market, before any early buy."""
+    """Lock the no-skip Boruto signal once per market for minutes 2 through 6."""
     started = closed - timedelta(minutes=15)
     saved = record.get("entry_bias")
     if saved is not None:
@@ -379,7 +396,7 @@ def ensure_entry_bias(record, state, ticker, market, closed):
     return signal
 
 
-def entry_decision(record, side, price, kind, live_side=None, bias_side=None):
+def entry_decision(record, side, price, kind, live_side=None, bias_side=None, side_source="live_strike"):
     allowed = live_side in ("YES", "NO") and side == live_side
     if kind == SETTLEMENT_KIND:
         allowed = side in ("YES", "NO") and side == live_side and Decimal(str(price)) == SETTLEMENT_PRICE
@@ -390,7 +407,11 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None):
             if locked_side in ("YES", "NO") and side != locked_side:
                 allowed = False
                 reason = "settlement_switch_not_confirmed"
-    elif uses_entry_bias(price, kind):
+    elif side_source == "opposite_strike":
+        allowed = live_side in ("YES", "NO") and side == {"YES": "NO", "NO": "YES"}[live_side]
+        reason = ("opposite_strike_" + kind if allowed else
+                  "btc_at_strike" if live_side is None else "selected_side_not_opposite_strike")
+    elif side_source == "boruto":
         allowed = bias_side in ("YES", "NO") and side == bias_side
         reason = ("boruto_bias_" + kind if allowed else
                   "bias_unavailable" if bias_side is None else "selected_side_opposes_bias")
@@ -407,7 +428,7 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None):
         "selected_side": side,
         "live_strike_side": live_side,
         "bias_side": bias_side,
-        "side_source": "boruto" if uses_entry_bias(price, kind) else "live_strike",
+        "side_source": side_source,
         "entry_price": str(price),
         "entry_reason": reason,
         "decision": "ALLOW" if allowed else "SKIP",
@@ -472,18 +493,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return skip("settlement_transition_pending")
         if EXIT_MONITOR is None or not EXIT_MONITOR.settlement_ready(ticker, side):
             return skip("settlement_exit_not_ready")
+    side_source = entry_side_source(closed, price, kind)
     try:
         current_market = client.market(ticker)
-        if uses_entry_bias(price, kind):
-            bias_side = ensure_entry_bias(record, state, ticker, current_market, closed)["prediction"]
-            live_side = None
-        else:
-            bias_side = None
-            live_side = strike_side(current_market, client.btc_reference_price())
+        _, live_side, bias_side = selected_entry_side(record, state, ticker, current_market, closed, side_source)
     except Exception as error:
         write_log("ENTRY_SIDE_UNAVAILABLE", ticker, details=repr(error))
-        return skip("bias_unavailable" if uses_entry_bias(price, kind) else "live_side_unavailable")
-    allowed, decision = entry_decision(record, side, price, kind, live_side, bias_side)
+        return skip("bias_unavailable" if side_source == "boruto" else "live_side_unavailable")
+    allowed, decision = entry_decision(record, side, price, kind, live_side, bias_side, side_source)
     write_log("ENTRY_DECISION", ticker, prediction=side, price=str(price), details=json.dumps(decision))
     if not allowed:
         return skip(decision["entry_reason"])
@@ -499,6 +516,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     policy_cutoff = closed.timestamp() - 900 + (LOW_PRICE_ENTRY_END
         if Decimal(str(price)) < EARLY_ENTRY_PRICE_CEILING else END)
+    if side_source == "opposite_strike":
+        policy_cutoff = min(policy_cutoff, closed.timestamp() - 900 + OPENING_OPPOSITE_WINDOW)
     if Decimal(str(price)) in OPENING_EXTRA_PAIR:
         if time.time() < closed.timestamp() - 900:
             return skip("market_not_started")
@@ -562,9 +581,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     # the explicit 75c and settlement limits may rest after submission.
     try:
         fresh_market = client.market(ticker)
-        fresh_side = (ensure_entry_bias(record, state, ticker, fresh_market, closed)["prediction"]
-                      if uses_entry_bias(price, kind) else
-                      strike_side(fresh_market, client.btc_reference_price()))
+        fresh_side, _, _ = selected_entry_side(record, state, ticker, fresh_market, closed, side_source)
         if fresh_side != side:
             return skip("entry_side_changed_before_post")
         ask, _ = quotes(fresh_market, side)
@@ -608,6 +625,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return skip("opposite_inventory_before_settlement", held=str(held))
         if time.time() >= cutoff or not EXIT_MONITOR.settlement_ready(ticker, side):
             return skip("settlement_not_ready_before_post")
+    if time.time() >= cutoff:
+        return skip("deadline_reached_before_reservation")
     cancel_at = min(cutoff, cancellation_deadline(closed) if cancel_at is None else cancel_at)
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
                            MARKET_BUDGET, cancel_at, kind)
@@ -615,7 +634,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         return skip("reservation_unavailable", remaining_dollars=str(remaining_allowance(record, MARKET_BUDGET, kind)))
     intent["entry_execution_version"] = ENTRY_EXECUTION_VERSION
     intent["side_source"] = decision["side_source"]
-    if uses_entry_bias(price, kind):
+    if side_source == "boruto":
         intent["bias_build"] = SIGNAL_BUILD
     intent["exit_target"] = "1" if kind == SETTLEMENT_KIND else str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
     intent["resting_entry"] = resting
@@ -829,9 +848,7 @@ def place_dual_limit_buys(record, ticker, closed, now_timestamp=None, *, state, 
     changed = True
     if side is None:
         market = client.market(ticker)
-        side = (ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
-                if time.time() < closed.timestamp() - 900 + LOW_PRICE_ENTRY_END else
-                strike_side(market, client.btc_reference_price()))
+        side, _, _ = selected_entry_side(record, state, ticker, market, closed, entry_side_source(closed))
     if side not in ("YES", "NO"):
         return changed
     for side in (side,):
@@ -890,9 +907,7 @@ def place_historical_strike_entries(record, ticker, spot, closed, now_timestamp=
             continue
         if side is None:
             market = client.market(ticker)
-            side = (ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
-                    if time.time() < closed.timestamp() - 900 + LOW_PRICE_ENTRY_END else
-                    strike_side(market, spot))
+            side, _, _ = selected_entry_side(record, state, ticker, market, closed, entry_side_source(closed))
         if side is None:
             continue
         triggered.add(strike_key)
@@ -1196,21 +1211,19 @@ def cycle(state):
                 write_log("HISTORICAL_STRIKES_UNAVAILABLE", ticker, details=repr(error))
                 save_state(state)
     current = client.market(ticker)
-    if time.time() < started.timestamp() + LOW_PRICE_ENTRY_END:
-        try:
-            signal = ensure_entry_bias(record, state, ticker, current, closed)
-        except Exception as error:
-            write_log("ENTRY_BIAS_UNAVAILABLE", ticker, details=repr(error))
-            return
-        selected_side = signal["prediction"]
-    else:
-        spot = client.btc_reference_price()
-        selected_side = strike_side(current, spot)
-        signal = {"prediction": selected_side, "base_confidence": "LIVE_STRIKE"}
-        write_log("LIVE_STRIKE_SIDE", ticker, prediction=selected_side or "AT_STRIKE",
-                  details=json.dumps({"btc_reference": str(spot), "strike": str(current["floor_strike"]) }))
+    side_source = entry_side_source(closed)
+    try:
+        selected_side, live_side, _ = selected_entry_side(record, state, ticker, current, closed, side_source)
+    except Exception as error:
+        write_log("ENTRY_SIDE_UNAVAILABLE", ticker, details=repr(error))
+        return
+    signal = (record["entry_bias"] if side_source == "boruto" else
+              {"prediction": selected_side, "base_confidence": side_source.upper()})
+    write_log("ENTRY_SIDE", ticker, prediction=selected_side or "AT_STRIKE",
+              details=json.dumps({"side_source": side_source, "live_strike_side": live_side,
+                                  "strike": str(current["floor_strike"])}))
     elapsed = time.time() - started.timestamp()
-    # Opening orders follow the saved Boruto direction.
+    # Every opening route follows the opposite live strike side until 2:00.
     if OPENING_BIAS_ENABLED and ENTRY_START_DELAY <= elapsed < OPENING_WINDOW and signal["prediction"] in ("YES", "NO"):
         price, target = next(iter(OPENING_BIAS_PAIR.items()))
         result, quantity = funded_entry(record, state, ticker, selected_side, price, closed, "opening_bias",
@@ -1280,17 +1293,18 @@ def cycle(state):
                 record["historical_spot_error_logged"] = True
                 write_log("HISTORICAL_SPOT_UNAVAILABLE", ticker, details=repr(error))
                 save_state(state)
-    if ENTRY_START_DELAY <= elapsed < SPOT_ENTRY_WINDOW and selected_side == "YES" and not record["spot_entry_attempted"]:
+    if (ENTRY_START_DELAY <= elapsed < SPOT_ENTRY_WINDOW and selected_side in ("YES", "NO")
+            and (selected_side == "YES" or side_source == "opposite_strike") and not record["spot_entry_attempted"]):
         spot = client.btc_reference_price(); strike = Decimal(str(current["floor_strike"]))
         if spot_is_above_strike(spot, strike, SPOT_ENTRY_THRESHOLD):
-            ask, _ = quotes(current, "YES")
+            ask, _ = quotes(current, selected_side)
             if Decimal("0") < ask <= Decimal("1"):
                 record["spot_entry_attempted"] = True; save_state(state)
-                for price, result, quantity in paired_entries(record, state, ticker, "YES", closed, "spot", submit_before=started.timestamp() + SPOT_ENTRY_WINDOW):
+                for price, result, quantity in paired_entries(record, state, ticker, selected_side, closed, "spot", submit_before=started.timestamp() + SPOT_ENTRY_WINDOW):
                     if result.get("order_id"): record["orders"].append(result["order_id"])
                     save_state(state)
                     details = {"spot": str(spot), "strike": str(strike), "distance_above_strike": str(spot - strike), "order": result}
-                    write_log("SPOT_TRIGGER_BUY", ticker, prediction="YES", confidence=live_confidence(ask), price=str(price), quantity=str(quantity), details=json.dumps(details))
+                    write_log("SPOT_TRIGGER_BUY", ticker, prediction=selected_side, confidence=live_confidence(ask), price=str(price), quantity=str(quantity), details=json.dumps(details))
 
 def check():
     balance = client.balance(); markets = client.markets(series_ticker="KXBTC15M", status="open", limit=1)
@@ -1300,7 +1314,7 @@ def main():
     global EXIT_MONITOR
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
-    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; early_entry_side={SIGNAL_BUILD}; from360s=live_BTC_vs_market_strike", flush=True)
+    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; 0s..120s=opposite_live_strike; 120s..360s={SIGNAL_BUILD}; from360s=live_BTC_vs_market_strike", flush=True)
     print("ENTRY_START_GATE: early buys eligible at contract open; opening entries run0s..120s; exit monitoring continues", flush=True)
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)

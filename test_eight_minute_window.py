@@ -27,7 +27,7 @@ def test_regular_entries_obey_price_based_windows(monkeypatch, elapsed):
         monkeypatch.setattr(fake, 'market', lambda ticker: market)
     bot.cycle(state)
     assert bool(fake.entries) == (0 <= elapsed < 360 or 480 <= elapsed < 720)
-    assert all(item[3]['expiration_time'] == 1000000000 + (360 if item[2] < D('.70') else 720)
+    assert all(item[3]['expiration_time'] == 1000000000 + (120 if elapsed < 120 else 360 if item[2] < D('.70') else 720)
                for item in fake.entries)
     assert all((item[2] < D('.70')) == (elapsed < 360) for item in fake.entries)
     assert record['close_timestamp'] == 1000000900
