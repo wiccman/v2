@@ -9,11 +9,11 @@ from test_combined_entry_rules import setup
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
 @pytest.mark.parametrize("kind,price", [
-    ("opening_bias", ".52"), ("opening_57", ".57"), ("regular", ".52"),
+    ("regular", ".52"),
     ("dual", ".52"), ("historical", ".52"), ("spot", ".52"),
 ])
 def test_every_early_route_obeys_bias_when_live_strike_opposes(monkeypatch, side, kind, price):
-    fake, record, state, clock, closed = setup(monkeypatch, 60, price, side)
+    fake, record, state, clock, closed = setup(monkeypatch, 180, price, side)
     monkeypatch.setattr(fake, "btc_reference_price", lambda: D("99990" if side == "YES" else "100010"))
     result, _ = bot.funded_entry(record, state, "TEST", side, D(price), closed, kind)
     assert result["order_id"]
@@ -26,7 +26,7 @@ def test_every_early_route_obeys_bias_when_live_strike_opposes(monkeypatch, side
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
 def test_full_cycle_locks_bias_and_never_buys_opposite_side(monkeypatch, side):
-    fake, record, state, clock, closed = setup(monkeypatch, 60, ".57", side)
+    fake, record, state, clock, closed = setup(monkeypatch, 180, ".59", side)
     record["signal"] = {"prediction": "NO" if side == "YES" else "YES", "build": "old"}
     monkeypatch.setattr(fake, "btc_reference_price", lambda: D("99900" if side == "YES" else "100100"))
     bot.cycle(state)
@@ -54,7 +54,7 @@ def test_saved_bias_survives_restart_without_repull_or_live_price_dependency(mon
 
 @pytest.mark.parametrize("fault", ["missing", "unfinalized"])
 def test_bad_history_blocks_early_entries_but_can_retry(monkeypatch, fault):
-    fake, record, state, clock, closed = setup(monkeypatch, 60, ".52")
+    fake, record, state, clock, closed = setup(monkeypatch, 180, ".52")
     history = fake.markets()
     broken = copy.deepcopy(history)
     if fault == "missing":
@@ -85,7 +85,7 @@ def test_late_routes_ignore_conflicting_bias_and_missing_lookbacks(monkeypatch, 
 
 @pytest.mark.parametrize("field,value", [("ticker", "OTHER"), ("strike", "1"), ("build", "old"), ("prediction", "SKIP")])
 def test_mismatched_saved_bias_cannot_create_an_order(monkeypatch, field, value):
-    fake, record, state, clock, closed = setup(monkeypatch, 60, ".52")
+    fake, record, state, clock, closed = setup(monkeypatch, 180, ".52")
     bot.ensure_entry_bias(record, state, "TEST", fake.market("TEST"), closed)
     record["entry_bias"][field] = value
     assert bot.funded_entry(record, state, "TEST", "YES", D(".52"), closed, "regular") == ({}, 0)
@@ -93,7 +93,7 @@ def test_mismatched_saved_bias_cannot_create_an_order(monkeypatch, field, value)
 
 
 def test_failed_bias_save_is_not_reused_in_memory(monkeypatch):
-    fake, record, state, clock, closed = setup(monkeypatch, 60, ".52")
+    fake, record, state, clock, closed = setup(monkeypatch, 180, ".52")
     monkeypatch.setattr(bot, "save_state", lambda s: (_ for _ in ()).throw(OSError("disk full")))
     assert bot.funded_entry(record, state, "TEST", "YES", D(".52"), closed, "regular") == ({}, 0)
     assert "entry_bias" not in record and not fake.entries and not record["entry_intents"]

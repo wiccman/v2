@@ -114,7 +114,7 @@ def test_closed_window_cannot_get_a_fresh_lock():
 
 
 def test_legacy_saved_signal_does_not_veto_new_bias(monkeypatch):
-    fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
+    fake,record,state,clock,closed=cycle_setup(monkeypatch,180)
     record['signal'].pop('build')
     before=dict(record['signal'])
     bot.cycle(state)
@@ -122,14 +122,14 @@ def test_legacy_saved_signal_does_not_veto_new_bias(monkeypatch):
 
 
 def test_saved_skip_does_not_veto_new_bias(monkeypatch):
-    fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
+    fake,record,state,clock,closed=cycle_setup(monkeypatch,180)
     record['signal'].update(prediction='SKIP',reason='previous_current_bias_conflict')
     bot.cycle(state)
     assert fake.entries and all(i['side'] == 'YES' for i in record['entry_intents'])
 
 
 def test_missing_lookbacks_block_early_bias_entries(monkeypatch):
-    fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
+    fake,record,state,clock,closed=cycle_setup(monkeypatch,180)
     record['signal']=None
     monkeypatch.setattr(fake,'markets',lambda **kw: [],raising=False)
     monkeypatch.setattr(bot,'build_signal',lambda *args: (_ for _ in ()).throw(RuntimeError('DATA UNAVAILABLE')))

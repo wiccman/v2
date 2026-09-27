@@ -190,7 +190,7 @@ def test_twenty_one_dollar_allowance_is_shared_and_survives_restart():
 
 
 def test_entry_gateway_enforces_bias_and_logs_reason(monkeypatch):
-    fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 180)
     record["signal"] = {"prediction": "YES", "base_confidence": "HIGH"}
     record["previous_bias"] = "YES"
     events = []

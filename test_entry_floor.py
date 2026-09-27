@@ -10,6 +10,9 @@ from test_five_minute_exits import cycle_setup
 @pytest.mark.parametrize('ask', ['0.44', '0.21', 'NaN', '0', '1'])
 def test_all_routes_block_below_floor_and_invalid_quotes(monkeypatch, side, kind, ask):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 780 if kind == bot.SETTLEMENT_KIND else 60)
+    fake.held = D('0')
+    above = (side == 'YES') if kind == bot.SETTLEMENT_KIND else (side == 'NO')
+    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010' if above else '99990'))
     record['signal']['prediction'] = side
     market = fake.market('TEST')
     market[side.lower() + '_ask_dollars'] = ask
@@ -24,7 +27,7 @@ def test_boundary_45_uses_ioc_with_existing_target(monkeypatch, side):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     fake.held = D('0')
     fake.bias_side = side
-    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
+    monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('99990') if side == 'YES' else D('100010'))
     record['signal']['prediction'] = side
     market = fake.market('TEST'); market[side.lower() + '_ask_dollars'] = '.45'
     monkeypatch.setattr(fake, 'market', lambda t: market)

@@ -53,7 +53,7 @@ class DualLimitClient:
 
 def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch):
     monkeypatch.setattr(bot, "MARKET_BUDGET", Decimal("4"))  # Explicit small-cap expiry fixture.
-    monkeypatch.setattr(bot.time, "time", lambda: 1200)
+    monkeypatch.setattr(bot.time, "time", lambda: 1220)
     fake = DualLimitClient()
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "write_log", lambda *args, **kwargs: None)
@@ -99,7 +99,7 @@ def test_historical_strike_reaction_uses_approach_side():
 
 def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(monkeypatch):
     monkeypatch.setattr(bot, "MARKET_BUDGET", Decimal("4"))  # Explicit small-cap expiry fixture.
-    monkeypatch.setattr(bot.time, "time", lambda: 1200)
+    monkeypatch.setattr(bot.time, "time", lambda: 1220)
     fake = DualLimitClient()
     monkeypatch.setattr(fake, "btc_reference_price", lambda: Decimal("99980"))
     monkeypatch.setattr(bot, "client", fake)
