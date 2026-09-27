@@ -97,7 +97,7 @@ def cycle_setup(monkeypatch, elapsed):
 def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeypatch, elapsed):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     bot.cycle(state)
-    assert fake.entries == []  # At 12:00 only an exact-97c settlement entry can run.
+    assert fake.entries == []  # At 12:00 only an exact-96c settlement entry can run.
     assert fake.exits == []  # Independent worker owns exits; no single-target fallback.
     assert all(x[3].get("ioc") and x[3].get("reduce_only") for x in fake.exits)
 

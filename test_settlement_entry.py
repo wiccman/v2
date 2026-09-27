@@ -14,8 +14,8 @@ def setup(monkeypatch, elapsed=780, side='YES'):
     record['signal']['prediction'] = side
     record['trade_side'] = side
     market = fake.market('TEST')
-    market.update(yes_ask_dollars='0.97' if side == 'YES' else '0.04',
-                  no_ask_dollars='0.97' if side == 'NO' else '0.04')
+    market.update(yes_ask_dollars='0.96' if side == 'YES' else '0.05',
+                  no_ask_dollars='0.96' if side == 'NO' else '0.05')
     monkeypatch.setattr(fake, 'market', lambda ticker: market)
     monkeypatch.setattr(fake, 'btc_reference_price',
                         lambda: D('100010') if side == 'YES' else D('99990'))
@@ -32,42 +32,42 @@ def test_boundary_side_and_six_contract_resting_limit(monkeypatch, elapsed, expe
     if expected:
         wire, quantity, price, kwargs = fake.entries[0]
         assert quantity == 6 and kwargs.get('ioc', False) is False
-        assert (wire, price) == (('bid', D('.97')) if side == 'YES' else ('ask', D('.03')))
+        assert (wire, price) == (('bid', D('.96')) if side == 'YES' else ('ask', D('.04')))
         intent = record['entry_intents'][-1]
         assert intent['hold_to_settlement'] and intent['exit_target'] == '1'
-        assert D(intent['reserved_dollars']) == 6
+        assert D(intent['reserved_dollars']) == D('5.94')
         bot.settlement_entry(copy.deepcopy(record), state, 'TEST', closed)
         assert len(fake.entries) == 1
 
 
 @pytest.mark.parametrize('ask,expected', [
-    ('.96', 0), ('.9699', 0), ('.97', 1), ('.9701', 1),
+    ('.95', 0), ('.9599', 0), ('.96', 1), ('.9601', 1), ('.97', 1),
     ('.975', 1), ('.98', 1), ('.99', 1), ('.999', 1), ('1', 0), ('1.001', 0),
 ])
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-def test_97_cent_limit_rests_when_selected_side_ask_is_at_least_97(monkeypatch, ask, expected, side):
+def test_96_cent_limit_rests_when_selected_side_ask_is_at_least_96(monkeypatch, ask, expected, side):
     fake, record, state, clock, closed = setup(monkeypatch, side=side)
     fake.market('TEST')[side.lower() + '_ask_dollars'] = ask
     bot.settlement_entry(record, state, 'TEST', closed)
     assert len(fake.entries) == expected
     if expected:
         wire, quantity, limit, kwargs = fake.entries[0]
-        assert quantity == 6 and limit == (D('.97') if side == 'YES' else D('.03'))
+        assert quantity == 6 and limit == (D('.96') if side == 'YES' else D('.04'))
         assert kwargs.get('ioc', False) is False
-        assert record['entry_intents'][0]['price'] == '0.97'
+        assert record['entry_intents'][0]['price'] == '0.96'
 
 
-def test_final_window_reports_actual_quotes_when_no_97_cent_side(monkeypatch):
+def test_final_window_reports_actual_quotes_when_no_96_cent_side(monkeypatch):
     import json
     fake, record, state, clock, closed = setup(monkeypatch)
-    fake.market('TEST')['yes_ask_dollars'] = '0.96'
+    fake.market('TEST')['yes_ask_dollars'] = '0.95'
     events = []
     monkeypatch.setattr(bot, 'write_log', lambda event, *a, **k: events.append((event, k)))
     bot.settlement_entry(record, state, 'TEST', closed)
     checks = [json.loads(data['details']) for event, data in events if event == 'SETTLEMENT_97_CHECK']
-    assert checks[-1]['reason'] == 'selected_side_not_at_or_above_97'
-    assert checks[-1]['required_ask'] == checks[-1]['entry_limit'] == '0.97'
-    assert checks[-1]['yes_ask'] == '0.96' and checks[-1]['no_ask'] == '0.04'
+    assert checks[-1]['reason'] == 'selected_side_not_at_or_above_96'
+    assert checks[-1]['required_ask'] == checks[-1]['entry_limit'] == '0.96'
+    assert checks[-1]['yes_ask'] == '0.95' and checks[-1]['no_ask'] == '0.05'
     assert checks[-1]['seconds_remaining'] == 120
     assert not fake.entries
 
@@ -124,12 +124,12 @@ def test_reserve_six_dollars_and_preserve_existing_spend():
         pass
     earlier = sum(D(i['reserved_dollars']) for i in record['entry_intents'])
     assert 18 < earlier <= 19
-    intent = policy.reserve(record, 'YES', D('.97'), D('10'), D('25'), 900, policy.SETTLEMENT_KIND)
+    intent = policy.reserve(record, 'YES', D('.96'), D('10'), D('25'), 900, policy.SETTLEMENT_KIND)
     assert D(intent['quantity']) == 6
     assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= 25
-    assert policy.reserve(record, 'YES', D('.97'), D('10'), D('25'), 900, policy.SETTLEMENT_KIND) is None
+    assert policy.reserve(record, 'YES', D('.96'), D('10'), D('25'), 900, policy.SETTLEMENT_KIND) is None
     legacy = {'entry_intents':[{'reserved_dollars':'16'}]}
-    assert policy.reserve(legacy, 'YES', D('.97'), D('10'), D('15'), 900, policy.SETTLEMENT_KIND) is None
+    assert policy.reserve(legacy, 'YES', D('.96'), D('10'), D('15'), 900, policy.SETTLEMENT_KIND) is None
 
 
 def test_opposite_inventory_does_not_get_netted(monkeypatch):
@@ -153,7 +153,7 @@ def test_final_entry_never_flips_the_market_side(monkeypatch):
     assert not fake.entries
 
 
-@pytest.mark.parametrize('hold_price', ['.97', '.98', '.99', '.999'])
+@pytest.mark.parametrize('hold_price', ['.96', '.97', '.98', '.99', '.999'])
 @pytest.mark.parametrize('quantity', ['10','3.25'])
 @pytest.mark.parametrize('sign', [1,-1])
 def test_exit_worker_holds_settlement_lots_and_sells_only_scalps(tmp_path, quantity, sign, hold_price):
@@ -179,7 +179,7 @@ def test_exit_worker_holds_settlement_lots_and_sells_only_scalps(tmp_path, quant
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('ask', ['.97', '.9700'])
+@pytest.mark.parametrize('ask', ['.96', '.9600'])
 def test_exact_settlement_limit_and_fee_budget(monkeypatch, side, ask):
     fake, record, state, clock, closed = setup(monkeypatch, side=side)
     record['signal'] = {'prediction': side}
@@ -189,9 +189,9 @@ def test_exact_settlement_limit_and_fee_budget(monkeypatch, side, ask):
     assert len(fake.entries) == 1
     wire, qty, price, kwargs = fake.entries[0]
     assert qty == 6 and kwargs.get('ioc', False) is False
-    assert price == (D('.97') if side == 'YES' else D('.03'))
+    assert price == (D('.96') if side == 'YES' else D('.04'))
     intent = record['entry_intents'][0]
-    assert D(intent['price']) == D('.97') and intent['exit_target'] == '1'
+    assert D(intent['price']) == D('.96') and intent['exit_target'] == '1'
     assert intent['hold_to_settlement'] and bot.tracked_entry_price_allowed(intent)
     assert D(intent['reserved_dollars']) <= 6
     bot.settlement_entry(copy.deepcopy(record), state, 'TEST', closed)
@@ -207,24 +207,24 @@ def test_higher_price_does_not_override_same_side_lock(monkeypatch, ask):
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('next_ask,expected', [('.96', 0), ('.9701', 1), ('.98', 1), ('.99', 1)])
-def test_quote_above_97_before_post_still_uses_resting_97_limit(monkeypatch, side, next_ask, expected):
+@pytest.mark.parametrize('next_ask,expected', [('.95', 0), ('.9601', 1), ('.98', 1), ('.99', 1)])
+def test_quote_above_96_before_post_still_uses_resting_96_limit(monkeypatch, side, next_ask, expected):
     fake, record, state, clock, closed = setup(monkeypatch, side=side)
     market = dict(fake.market('TEST'))
     count = [0]
     def changing(ticker):
         count[0] += 1
-        return {**market, side.lower() + '_ask_dollars': '.97' if count[0] == 1 else next_ask}
+        return {**market, side.lower() + '_ask_dollars': '.96' if count[0] == 1 else next_ask}
     monkeypatch.setattr(fake, 'market', changing)
     bot.settlement_entry(record, state, 'TEST', closed)
     assert len(fake.entries) == expected
     if expected:
-        assert fake.entries[0][2] == (D('.97') if side == 'YES' else D('.03'))
+        assert fake.entries[0][2] == (D('.96') if side == 'YES' else D('.04'))
         assert fake.entries[0][3].get('ioc', False) is False
 
 
-@pytest.mark.parametrize('price', ['.9701', '.98', '.99'])
-def test_direct_entry_and_reservation_cannot_bypass_97_limit(monkeypatch, price):
+@pytest.mark.parametrize('price', ['.9601', '.97', '.98', '.99'])
+def test_direct_entry_and_reservation_cannot_bypass_96_limit(monkeypatch, price):
     fake, record, state, clock, closed = setup(monkeypatch)
     fake.market('TEST')['yes_ask_dollars'] = price
     assert bot.funded_entry(record, state, 'TEST', 'YES', D(price), closed,
@@ -234,7 +234,7 @@ def test_direct_entry_and_reservation_cannot_bypass_97_limit(monkeypatch, price)
     assert not fake.entries and not record['entry_intents']
 
 
-@pytest.mark.parametrize('price', ['.97', '.98', '.99', '.999'])
+@pytest.mark.parametrize('price', ['.96', '.97', '.98', '.99', '.999'])
 def test_existing_settlement_intents_stay_recognized(price):
     intent = dict(kind=policy.SETTLEMENT_KIND, price=price,
                   hold_to_settlement=True, exit_target='1')

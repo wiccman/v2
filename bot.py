@@ -867,7 +867,7 @@ def reconcile_entries(state, now_timestamp=None):
                 or record.get("entry_budget_legacy")
                 or (record.get("settlement_switch") and i.get("kind") != SETTLEMENT_KIND))}
             # A resting buy cannot remain eligible after BTC leaves the
-            # qualifying side. This includes the 97c settlement limit in the
+            # qualifying side. This includes the 96c settlement limit in the
             # directional policy; cancel on an unavailable quote as well.
             scalps = [i for i in pending if i.get("resting_entry") and
                       (DIRECTIONAL_ENTRY_POLICY or i.get("kind") != SETTLEMENT_KIND)]
@@ -882,7 +882,7 @@ def reconcile_entries(state, now_timestamp=None):
                 legacy = set(record.get("orders", [])) | set(record.get("dual_limit_orders", []))
                 legacy |= {i["order_id"] for i in record.get("historical_strike_orders", [])
                            if i.get("order_id") and not i.get("entry_closed")}
-                ids |= legacy - tracked  # Tracked 97c orders keep their own close deadline.
+                ids |= legacy - tracked  # Tracked settlement orders keep their own close deadline.
             for order_id in sorted(ids):
                 if not cancel_confirmed(order_id, ticker):
                     continue
@@ -1146,7 +1146,7 @@ def settlement_position(ticker):
 
 
 def settlement_entry(record, state, ticker, closed):
-    """Rest a 97c maximum buy on the live strike side; reconcile side changes."""
+    """Rest a 96c maximum buy on the live strike side; reconcile side changes."""
     now = time.time()
     if not closed.timestamp() - SETTLEMENT_WINDOW <= now < closed.timestamp():
         return
@@ -1181,7 +1181,7 @@ def settlement_entry(record, state, ticker, closed):
     if locked_side not in ("YES", "NO"):
         locked_side = (record.get("signal") or {}).get("prediction")
     if not settlement_entry_price_allowed(asks[side]):
-        report("selected_side_not_at_or_above_97", side=side, selected_ask=str(asks[side]))
+        report("selected_side_not_at_or_above_96", side=side, selected_ask=str(asks[side]))
         return
     held = settlement_position(ticker)
     opposite = (side == "YES" and held < 0) or (side == "NO" and held > 0)
@@ -1199,7 +1199,7 @@ def settlement_entry(record, state, ticker, closed):
                 return
             if opposite:
                 # The loss close may yield almost nothing. Check the market's
-                # actual shard before selling inventory to fund a 97c entry.
+                # actual shard before selling inventory to fund a 96c entry.
                 # Do not count prospective sale proceeds: the bid can move or
                 # the close can partially fill before the replacement order.
                 try:
@@ -1444,10 +1444,10 @@ def main():
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print("SETTLEMENT_ENTRY window=720s..900s; live strike side; trigger_ask>=97c and <100c; limit=97c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
+    print("SETTLEMENT_ENTRY window=720s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
     print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
     print(f"SIX_MINUTE_ENTRY window=360s..{END}s; trigger_ask>=75c and <100c; limit=75c GTC until {END}s; target=83c at limit fill; quantity<=3; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
-    print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/97c GTC limits; exchange price improvement remains possible", flush=True)
+    print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
     print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
     print(f"POSITION_CAP maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3", flush=True)

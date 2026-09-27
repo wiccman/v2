@@ -17,8 +17,8 @@ class SwitchExchange(PairExchange):
         super().__init__(bid='.02', liquidity=liquidity)
         self.desired = desired
         self.buys = []
-        self.quotes = {'yes_ask_dollars': '.97' if desired == 'YES' else '.03',
-                       'no_ask_dollars': '.97' if desired == 'NO' else '.03',
+        self.quotes = {'yes_ask_dollars': '.96' if desired == 'YES' else '.04',
+                       'no_ask_dollars': '.96' if desired == 'NO' else '.04',
                        'yes_bid_dollars': '.96' if desired == 'YES' else '.02',
                        'no_bid_dollars': '.96' if desired == 'NO' else '.02'}
         self.entry_failure = None
@@ -42,7 +42,7 @@ class SwitchExchange(PairExchange):
         quantity = D(body['count'])
         oid = f'settlement-{len(self.buys)}'
         selected_ask = D(self.quotes[self.desired.lower() + '_ask_dollars'])
-        filled = selected_ask <= D('.97')
+        filled = selected_ask <= D('.96')
         if filled:
             self.held += sign * quantity
             self.remote[oid] = {'order_id': oid, 'client_order_id': body['client_order_id'],
@@ -84,7 +84,7 @@ def setup_switch(tmp_path, monkeypatch, desired='YES', liquidity='100', manual=F
 
 @pytest.mark.parametrize('desired', ['YES', 'NO'])
 @pytest.mark.parametrize('manual', [False, True])
-def test_loss_close_is_confirmed_before_fixed_97_cent_buy(tmp_path, monkeypatch, desired, manual):
+def test_loss_close_is_confirmed_before_fixed_96_cent_buy(tmp_path, monkeypatch, desired, manual):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch, desired, manual=manual)
     reserved = sum(D(i['reserved_dollars']) for i in record['entry_intents'])
     bot.settlement_entry(record, state, 'T', closed)
@@ -100,9 +100,9 @@ def test_loss_close_is_confirmed_before_fixed_97_cent_buy(tmp_path, monkeypatch,
     assert monitor.settlement_ready('T', desired)
     bot.settlement_entry(record, state, 'T', closed)
     assert len(e.buys) == 1 and D(e.buys[0]['count']) == 6
-    assert e.buys[0]['price'] == ('0.9700' if desired == 'YES' else '0.0300')
+    assert e.buys[0]['price'] == ('0.9600' if desired == 'YES' else '0.0400')
     assert record['trade_side'] == desired
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == reserved + 6
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == reserved + D('5.94')
     assert any(event == 'SETTLEMENT_CLOSE_FILL' for event, _ in events)
     monitor.run_once()
     assert monitor.healthy and abs(e.held) == 6
@@ -208,7 +208,7 @@ def test_failed_close_never_allows_netting_buy(tmp_path, monkeypatch, failure):
     assert len(e.submissions) == 1
 
 
-def test_resting_97_limit_does_not_overpay_after_loss_close(tmp_path, monkeypatch):
+def test_resting_96_limit_does_not_overpay_after_loss_close(tmp_path, monkeypatch):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
     bot.settlement_entry(record, state, 'T', closed)
     e.quotes['yes_ask_dollars'] = '.98'
@@ -218,7 +218,7 @@ def test_resting_97_limit_does_not_overpay_after_loss_close(tmp_path, monkeypatc
     assert monitor.settlement_ready('T', 'YES')
     bot.settlement_entry(record, state, 'T', closed)
     assert len(e.buys) == 1 and e.buys[0]['time_in_force'] == 'good_till_canceled'
-    assert e.buys[0]['price'] == '0.9700' and e.held == 0
+    assert e.buys[0]['price'] == '0.9600' and e.held == 0
 
 
 def test_market_close_prevents_both_transition_orders(tmp_path, monkeypatch):
@@ -237,7 +237,7 @@ def test_exhausted_allowance_does_not_liquidate_for_unfundable_entry(tmp_path, m
     assert 'settlement_switch' not in record and not e.buys and not e.submissions
 
 
-@pytest.mark.parametrize('cash', ['1.8891', '5.99'])
+@pytest.mark.parametrize('cash', ['1.8891', '5.93'])
 def test_insufficient_shard_cash_blocks_loss_close_before_switch(tmp_path, monkeypatch, cash):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
     monkeypatch.setattr(e, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': cash})

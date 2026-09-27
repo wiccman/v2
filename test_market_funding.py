@@ -122,11 +122,11 @@ def test_slow_cash_lookup_cannot_buy_after_cutoff(monkeypatch):
 def test_cash_wait_does_not_consume_settlement_one_attempt(monkeypatch):
     from test_settlement_entry import setup
     fake, record, state, clock, closed = setup(monkeypatch)
-    cash = ['5.99']
+    cash = ['5.93']
     monkeypatch.setattr(fake, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': cash[0]})
     bot.settlement_entry(record, state, 'TEST', closed)
     assert not fake.entries and not record['entry_intents']
-    cash[0] = '6'
+    cash[0] = '5.94'
     clock[0] += 30
     bot.settlement_entry(record, state, 'TEST', closed)
     assert len(fake.entries) == 1 and fake.entries[0][1] == 6

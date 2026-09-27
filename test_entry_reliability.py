@@ -48,7 +48,7 @@ def test_scalps_plus_six_contract_settlement_fit_twenty_five(price):
     assert 0 < scalp_spend <= 19
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80")
                for i in record["entry_intents"])
-    final = policy.reserve(record, "YES", D(".97"), D(100), D(25), 900, policy.SETTLEMENT_KIND)
+    final = policy.reserve(record, "YES", D(".96"), D(100), D(25), 900, policy.SETTLEMENT_KIND)
     assert final["quantity"] == "6"
     assert scalp_spend + D(final["reserved_dollars"]) <= 25
 
@@ -113,10 +113,10 @@ def test_unproven_terminal_fill_count_never_refunds(monkeypatch, count):
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
-@pytest.mark.parametrize("price,ask,elapsed,deadline", [(".75", ".78", 365, 720), (".97", ".972", 725, 900)])
+@pytest.mark.parametrize("price,ask,elapsed,deadline", [(".75", ".78", 365, 720), (".96", ".972", 725, 900)])
 def test_resting_limits_survive_next_loop_but_expire_at_correct_deadline(monkeypatch, side, price, ask, elapsed, deadline):
     e, record, state, clock, closed, _ = exchange(monkeypatch, elapsed, ask, side)
-    kind = policy.SETTLEMENT_KIND if price == ".97" else "regular"
+    kind = policy.SETTLEMENT_KIND if price == ".96" else "regular"
     result, qty = bot.funded_entry(record, state, "TEST", side, D(price), closed, kind,
         cancel_at=closed.timestamp() if kind == policy.SETTLEMENT_KIND else None)
     assert result.get("order_id") and not e.entries[-1][3].get("ioc", False)

@@ -128,13 +128,13 @@ def test_25_cap_preserves_saved_spending_and_six_dollar_settlement_reserve():
     before = copy.deepcopy(record)
     assert policy.market_budget() == 25
     assert policy.reserve(record, 'YES', D('.75'), D('.77'), D(25), 720, 'regular') is None
-    assert policy.reserve(record, 'YES', D('.97'), D('.77'), D(25), 900, policy.SETTLEMENT_KIND) is None
+    assert policy.reserve(record, 'YES', D('.96'), D('.77'), D(25), 900, policy.SETTLEMENT_KIND) is None
     assert record == before
     restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '19', 'entry_closed': True}]}
     assert policy.reserve(restored, 'YES', D('.45'), D('.77'), D(25), 720, 'regular') is None
-    settlement = policy.reserve(restored, 'YES', D('.97'), D('.77'), D(25), 900, policy.SETTLEMENT_KIND)
+    settlement = policy.reserve(restored, 'YES', D('.96'), D('.77'), D(25), 900, policy.SETTLEMENT_KIND)
     assert D(settlement['quantity']) == 6
-    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('25')
+    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('24.94')
 
 
 def test_stale_configuration_cannot_restore_35_or_regular_57():
