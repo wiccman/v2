@@ -202,3 +202,37 @@ def fill_cost_inventory(fills, entry_orders, exit_orders, held, ticker, untracke
         plan["cost_groups"].append({"average_fill_cost": str(cost), "quantity": str(quantity),
                                     "profit_increment": str(margin)})
     return dict(sorted(buckets.items())), plans
+
+
+def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profit):
+    """Price each buy order's remaining inventory for a dollar gross profit.
+
+    Targets use verified entry fills, never the limit price. An unattainable
+    target keeps the original paired exit so the position is still managed.
+    """
+    profit = D(profit)
+    if not profit.is_finite() or profit <= 0:
+        raise ValueError("Per-order profit must be positive")
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, [])
+    groups, buckets, plans = {}, {}, {}
+    for lot in lots:
+        if lot["target"] == 1:
+            buckets[D(1)] = buckets.get(D(1), D(0)) + lot["sign"] * lot["quantity"]
+        else:
+            groups.setdefault((lot["sign"], lot["fill"]["order_id"]), []).append(lot)
+    for (sign, order_id), members in sorted(groups.items()):
+        quantity = sum((lot["quantity"] for lot in members), D(0))
+        cost = sum((lot["quantity"] * _outcome_cost(lot["fill"], sign)
+                    for lot in members), D(0)) / quantity
+        target = (cost + profit / quantity).quantize(D("0.01"), rounding=ROUND_CEILING)
+        if target > D("0.99"):
+            # This buy cannot earn the requested amount before settlement.
+            # Preserve its saved scalp exit rather than leave it unmanaged.
+            target = max(lot["target"] for lot in members)
+        buckets[target] = buckets.get(target, D(0)) + sign * quantity
+        plan = plans.setdefault(target, {"allocations": [], "cost_groups": []})
+        plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
+                                   for lot in members)
+        plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
+                                    "quantity": str(quantity), "gross_profit_goal": str(profit)})
+    return dict(sorted(buckets.items())), plans
