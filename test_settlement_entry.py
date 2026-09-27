@@ -123,10 +123,10 @@ def test_reserve_six_dollars_and_preserve_existing_spend():
     while policy.reserve(record, 'YES', D('.39'), D('2'), D('20'), 480, 'regular'):
         pass
     earlier = sum(D(i['reserved_dollars']) for i in record['entry_intents'])
-    assert 9 < earlier <= 14
+    assert 3 < earlier <= 4
     intent = policy.reserve(record, 'YES', D('.97'), D('10'), D('20'), 900, policy.SETTLEMENT_KIND)
     assert D(intent['quantity']) == 6
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= 20
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= 10
     assert policy.reserve(record, 'YES', D('.97'), D('10'), D('20'), 900, policy.SETTLEMENT_KIND) is None
     legacy = {'entry_intents':[{'reserved_dollars':'16'}]}
     assert policy.reserve(legacy, 'YES', D('.97'), D('10'), D('15'), 900, policy.SETTLEMENT_KIND) is None

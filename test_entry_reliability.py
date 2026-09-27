@@ -39,35 +39,36 @@ def exchange(monkeypatch, elapsed=660, ask=".85", side="YES"):
 
 
 @pytest.mark.parametrize("price", [".45", ".52", ".57", ".59", ".62", ".67", ".70", ".73", ".75", ".85"])
-def test_five_scalp_orders_plus_six_contract_settlement_fit_twenty(price):
+def test_scalps_plus_six_contract_settlement_fit_ten(price):
     record = {}
-    for _ in range(5):
-        intent = policy.reserve(record, "YES", D(price), D(".01"), D(20), 720, "regular")
-        assert intent and 1 <= D(intent["quantity"]) <= 5
-        assert D(intent["reserved_dollars"]) <= D("2.80")
+    # Even an obsolete caller cap of $20 cannot expand the configured cap.
+    while policy.reserve(record, "YES", D(price), D("100"), D(20), 720, "regular"):
+        pass
     scalp_spend = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert scalp_spend <= 14
+    assert 0 < scalp_spend <= 4
+    assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80")
+               for i in record["entry_intents"])
     final = policy.reserve(record, "YES", D(".97"), D(100), D(20), 900, policy.SETTLEMENT_KIND)
     assert final["quantity"] == "6"
-    assert scalp_spend + D(final["reserved_dollars"]) <= 20
+    assert scalp_spend + D(final["reserved_dollars"]) <= 10
 
 
-def test_live_loop_can_place_five_separate_filled_orders_without_recycling(monkeypatch):
+def test_live_loop_respects_reduced_cap_without_recycling_sales(monkeypatch):
     e, record, state, clock, closed, events = exchange(monkeypatch, 301, ".67")
     for _ in range(5):
         bot.cycle(state)
         clock[0] += 8
-    assert len(e.entries) == 5 and all(order[1] == 4 for order in e.entries)
+    assert [order[1] for order in e.entries] == [D(4), D(1)]
     bot.reconcile_entries(state)
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == 14
-    e.held = D(0)  # Selling never frees filled-spend allowance.
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("3.50")
+    e.held = D(0)
     bot.cycle(state)
-    assert len(e.entries) == 5
+    assert len(e.entries) == 2
     clock[0] = closed.timestamp() - 120
     e.market("TEST")["yes_ask_dollars"] = ".972"
     bot.settlement_entry(record, state, "TEST", closed)
-    assert len(e.entries) == 6 and e.entries[-1][1] == 6
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == 20
+    assert len(e.entries) == 3 and e.entries[-1][1] == 6
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("9.50")
 
 
 @pytest.mark.parametrize("filled,retained", [("0", "0"), ("1.25", "0.975"), ("3", "2.34")])

@@ -158,9 +158,9 @@ def test_signal_entries_have_priority_and_dual_batch_shares_market_cap(monkeypat
     intents = record['entry_intents']
     assert [i['kind'] for i in intents[:1]] == ['regular']
     dual = [i for i in intents if i['kind'] == 'dual']
-    assert len(dual) == 1
+    assert len(dual) == 0  # Regular orders exhaust the smaller earlier allowance.
     assert all(1 <= D(i['quantity']) <= 5 and D(i['reserved_dollars']) <= D('2.80') for i in intents)
-    assert sum(D(i['reserved_dollars']) for i in intents) <= D('14')
+    assert sum(D(i['reserved_dollars']) for i in intents) <= D('4')
 
 
 def test_slow_quote_is_not_backdated_to_scheduled_snapshot(monkeypatch):
