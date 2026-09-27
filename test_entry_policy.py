@@ -7,7 +7,15 @@ import pytest
 import bot
 import entry_policy
 from kalshi import KalshiClient, KalshiAPIError
-from test_five_minute_exits import cycle_setup
+from test_five_minute_exits import cycle_setup as base_cycle_setup
+
+
+def cycle_setup(monkeypatch, elapsed):
+    result = base_cycle_setup(monkeypatch, elapsed)
+    fake = result[0]
+    market = {**fake.market("TEST"), "yes_ask_dollars": "0.45"}
+    monkeypatch.setattr(fake, "market", lambda ticker: market)
+    return result
 
 
 def test_all_entry_routes_share_six_dollars_and_restart_does_not_refund(monkeypatch):
@@ -32,10 +40,10 @@ def test_all_entry_routes_share_six_dollars_and_restart_does_not_refund(monkeypa
     bot.place_historical_strike_entries(record, "TEST", D("100010"), closed, state=state)
     bot.funded_entry(record, state, "TEST", "NO", D("0.45"), closed, "regular")
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert spent == D("4.80")  # Two full orders; leftover cannot fund another five.
+    assert spent == D("5.82")  # Two five-contract buys plus two affordable contracts.
     assert sum(q * (p if side == "bid" else 1 - p) for side, q, p, _ in fake.entries) <= D("6")
-    assert len(fake.entries) == 2
-    assert all(q == D("5") for _, q, _, _ in fake.entries)
+    assert len(fake.entries) == 3
+    assert [q for _, q, _, _ in fake.entries] == [D(5), D(5), D(2)]
     restored = json.loads(json.dumps(state))
     record = restored["markets"]["TEST"]
     for i in record["entry_intents"]:
@@ -56,7 +64,9 @@ def test_failed_or_ambiguous_post_retains_reservation(monkeypatch):
     intent = restored["markets"]["TEST"]["entry_intents"][0]
     assert intent["client_id"] and not intent["entry_closed"]
     assert D(intent["reserved_dollars"]) == D("2.40")
-    assert entry_policy.reserve(restored["markets"]["TEST"], "YES", D("0.45"), D("5"), D("4.19"), 360, "regular") is None
+    next_intent = entry_policy.reserve(restored["markets"]["TEST"], "YES", D("0.45"), D("5"), D("4.19"), 360, "regular")
+    assert next_intent["quantity"] == "3"
+    assert D(intent["reserved_dollars"]) == D("2.40")  # Unknown first fill remains reserved.
 
 
 @pytest.mark.parametrize("elapsed", [299, 300, 359, 360, 361])
@@ -174,12 +184,12 @@ def test_twenty_dollar_allowance_is_shared_and_survives_restart():
         pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
     assert D("11.60") < spent <= D("14")
-    assert all(D(i["quantity"]) == 5 for i in record["entry_intents"])
+    assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80") for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
 
 
-def test_entry_gateway_enforces_live_strike_and_logs_reason(monkeypatch):
+def test_entry_gateway_enforces_bias_and_logs_reason(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     record["signal"] = {"prediction": "YES", "base_confidence": "HIGH"}
     record["previous_bias"] = "YES"
@@ -187,10 +197,11 @@ def test_entry_gateway_enforces_live_strike_and_logs_reason(monkeypatch):
     monkeypatch.setattr(bot, "write_log", lambda event, ticker="", **values: events.append((event, values)))
     result, quantity = bot.funded_entry(record, state, "TEST", "NO", D("0.45"), closed, "spot")
     assert result == {} and quantity == 0
-    decision = json.loads(events[-1][1]["details"])
+    decision = json.loads(next(values["details"] for event, values in events if event == "ENTRY_DECISION"))
     assert decision == {
-        "selected_side": "NO", "live_strike_side": "YES", "entry_price": "0.45",
-        "entry_reason": "selected_side_opposes_live_strike", "decision": "SKIP",
+        "selected_side": "NO", "live_strike_side": None, "bias_side": "YES",
+        "side_source": "boruto", "entry_price": "0.45",
+        "entry_reason": "selected_side_opposes_bias", "decision": "SKIP",
     }
     assert not fake.entries
 
@@ -200,6 +211,10 @@ def test_entry_gateway_buys_current_bias_despite_previous_conflict(monkeypatch, 
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     record["signal"] = {"prediction": current, "base_confidence": "MODERATE"}
     record["previous_bias"] = previous
+    fake.bias_side = current
+    fake.held = D(0)
+    fake.market("TEST")[current.lower() + "_ask_dollars"] = ".45"
+    monkeypatch.setattr(fake, "btc_reference_price", lambda: D("100010" if current == "YES" else "99990"))
     result, quantity = bot.funded_entry(record, state, "TEST", current, D("0.45"), closed, "regular")
     assert result.get("order_id") and quantity > 0
     assert len(fake.entries) == 1

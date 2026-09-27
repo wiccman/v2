@@ -216,12 +216,12 @@ def test_pair_target_is_saved_before_five_contract_entry_post(monkeypatch):
     def checked(ticker, side, quantity, price, *args, **kwargs):
         intent = saved[-1]["markets"]["TEST"]["entry_intents"][-1]
         assert D(intent["exit_target"]) == {D(p): D(t) for p, t in [("0.45", "0.55"), ("0.48", "0.53"), ("0.51", "0.56"), ("0.53", "0.58"), ("0.56", "0.61"), ("0.59", "0.64"), ("0.62", "0.67"), ("0.64", "0.69"), ("0.67", "0.72"), ("0.70", "0.80")]}[price]
-        assert quantity == D("5")
+        assert 1 <= quantity <= 5 and D(intent["reserved_dollars"]) <= D("2.80")
         return place(ticker, side, quantity, price, *args, **kwargs)
     monkeypatch.setattr(e, "place_entry", checked)
     result = list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert [p for p, _, _ in result] == list(bot.ENTRY_EXIT_PAIRS)
-    assert sum(p * q for p, _, q in result) == D("12.65")
+    assert sum(p * q for p, _, q in result) == D("12.20")
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= bot.MARKET_BUDGET
     bot.reconcile_entries(state)
     assert not e.cancelled  # A preserved legacy order remains reconciled safely.
@@ -346,6 +346,5 @@ def test_removed_32_cent_inventory_keeps_original_exit(tmp_path):
 
 def test_retired_entry_is_rejected_before_submission(monkeypatch):
     e, record, state, clock, closed = cycle_setup(monkeypatch, 120)
-    with pytest.raises(ValueError, match='configured fixed entry limit'):
-        bot.funded_entry(record, state, 'TEST', 'YES', D('0.32'), closed, 'regular')
+    assert bot.funded_entry(record, state, 'TEST', 'YES', D('0.32'), closed, 'regular') == ({}, 0)
     assert not e.entries and not record['entry_intents']

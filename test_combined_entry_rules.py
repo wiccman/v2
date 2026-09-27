@@ -23,6 +23,7 @@ def setup(monkeypatch, elapsed, price, side='YES'):
     monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     monkeypatch.setattr(bot, 'DUAL_LIMIT_BUYS_ENABLED', False)
     monkeypatch.setattr(bot, 'HISTORICAL_STRIKE_ENABLED', False)
+    fake.bias_side = side
     monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010' if side == 'YES' else '99990'))
     market = dict(fake.market('TEST'))
     market[side.lower() + '_ask_dollars'] = price
@@ -32,7 +33,7 @@ def setup(monkeypatch, elapsed, price, side='YES'):
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('elapsed,allowed', [(-1, False), (0, True), (119.999, True), (120, False), (180, False)])
+@pytest.mark.parametrize('elapsed,allowed', [(-1, False), (0, False), (59.999, False), (60, True), (119.999, True), (120, False), (180, False)])
 def test_new_opening_tier_uses_its_own_two_minute_deadline(monkeypatch, side, elapsed, allowed):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, '.57', side)
     record['opening_bias_attempted'] = True
@@ -41,7 +42,7 @@ def test_new_opening_tier_uses_its_own_two_minute_deadline(monkeypatch, side, el
     assert bool(result.get('order_id')) == allowed
     if allowed:
         intent = record['entry_intents'][0]
-        assert quantity == 5 and D(intent['exit_target']) == D('.62')
+        assert quantity == 4 and D(intent['exit_target']) == D('.62')
         assert intent['cancel_at'] == closed.timestamp() - 780
         assert fake.entries[0][3]['ioc'] is True
 
@@ -57,8 +58,10 @@ def test_75_cent_tier_runs_from_six_until_twelve_minutes(monkeypatch, side, elap
         assert len(matching) == 1
         intent = matching[0]
         assert intent['side'] == side and D(intent['price']) == D('.75')
-        assert D(intent['exit_target']) == D('.83') and D(intent['quantity']) == 5
-        assert D(intent['reserved_dollars']) == D('3.90')
+        assert D(intent['exit_target']) == D('.83') and D(intent['quantity']) == 3
+        assert D(intent['reserved_dollars']) == D('2.34')
+        wire_price = D('.75') if side == 'YES' else D('.25')
+        assert all(not order[3].get('ioc', False) for order in fake.entries if order[2] == wire_price)
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
@@ -77,7 +80,7 @@ def test_full_cycle_opening_57_is_independent_of_consumed_52_attempt(monkeypatch
 
 
 @pytest.mark.parametrize('price,elapsed,ask', [('.57', 60, '.52'), ('.57', 60, '.5701'),
-                                             ('.75', 360, '.70'), ('.75', 360, '.7501')])
+                                             ('.75', 360, '.70'), ('.75', 360, '.7499')])
 def test_new_rules_wait_for_their_specified_quote_without_spending(monkeypatch, price, elapsed, ask):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, ask)
     assert bot.funded_entry(record, state, 'TEST', 'YES', D(price), closed, 'regular') == ({}, 0)
@@ -124,12 +127,13 @@ def test_20_cap_preserves_saved_spending_and_six_dollar_settlement_reserve():
     before = copy.deepcopy(record['entry_intents'][0])
     assert policy.market_budget() == 20
     assert policy.reserve(record, 'YES', D('.75'), D('.77'), policy.market_budget(), 720, 'regular')
+    assert policy.reserve(record, 'YES', D('.75'), D('.77'), policy.market_budget(), 720, 'regular')
     assert policy.reserve(record, 'YES', D('.75'), D('.77'), policy.market_budget(), 720, 'regular') is None
     restored = json.loads(json.dumps(record))
     settlement = policy.reserve(restored, 'YES', D('.97'), D('.77'), policy.market_budget(), 900, policy.SETTLEMENT_KIND)
     assert D(settlement['quantity']) == 6
     assert restored['entry_intents'][0] == before
-    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('18.90')
+    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('19.68')
 
 
 def test_stale_configuration_cannot_restore_35_or_regular_57():

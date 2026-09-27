@@ -1,5 +1,5 @@
 """Offline regression coverage: no credentials or live exchange requests."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal as D
 from types import SimpleNamespace
 
@@ -25,6 +25,15 @@ class CycleClient(KalshiClient):
 
     def market_cash(self, ticker):
         return {"exchange_index": 2, "cash_dollars": "100"}
+
+    def markets(self, **kwargs):
+        opened = datetime.fromtimestamp(1000000000, timezone.utc)
+        return [dict(ticker=f"PAST-{offset}", status="finalized",
+                     open_time=(opened - timedelta(minutes=15 * (offset + 1))).isoformat(),
+                     close_time=(opened - timedelta(minutes=15 * offset)).isoformat(),
+                     floor_strike="100000", expiration_value=str(value))
+                for offset, value in zip((4, 3, 2, 1), (99980, 99985, 99990, 100010) if getattr(self, "bias_side", "YES") == "YES"
+                                        else (100020, 100015, 100010, 99990))]
 
     def order(self, order_id, ticker=None):
         return {"order_id": order_id, "status": "resting"}
@@ -73,7 +82,8 @@ def cycle_setup(monkeypatch, elapsed):
     monkeypatch.setattr(bot, "END", 300)
     monkeypatch.setattr(bot, "CANCEL_AFTER", 360)
     monkeypatch.setattr(bot.time, "time", lambda: clock[0])
-    monkeypatch.setattr(bot, "datetime", SimpleNamespace(now=lambda tz: datetime.fromtimestamp(clock[0], tz)))
+    monkeypatch.setattr(bot, "datetime", SimpleNamespace(now=lambda tz: datetime.fromtimestamp(clock[0], tz),
+                                                       fromisoformat=datetime.fromisoformat))
     monkeypatch.setattr(bot, "active_market", lambda now: (fake.market("TEST"), started, closed))
     monkeypatch.setattr(bot, "save_state", lambda s: None)
     monkeypatch.setattr(bot, "write_log", lambda *a, **k: None)
@@ -92,9 +102,9 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) == 6  # Five regular tiers plus one dual limit fit the $16 allowance.
-    assert all(q == D("5") for _, q, _, _ in fake.entries)
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("25")
+    assert len(fake.entries) == 6  # Five regular tiers plus a smaller dual order.
+    assert [q for _, q, _, _ in fake.entries] == [D(5), D(5), D(5), D(4), D(4), D(2)]
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("14")
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
@@ -112,12 +122,13 @@ def test_restart_cancels_legacy_entries_even_without_saved_signal(monkeypatch):
 
 def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
-    def slow_spot():
+    original = fake.markets
+    def slow_history(**kwargs):
         clock[0] = 1000000301
-        return D("100010")
-    monkeypatch.setattr(fake, "btc_reference_price", slow_spot)
+        return original(**kwargs)
+    monkeypatch.setattr(fake, "markets", slow_history)
     bot.cycle(state)
-    assert len(fake.entries) == 6  # Five regular tiers plus one dual limit fit the earlier allowance.
+    assert not fake.entries  # The legacy five-minute route deadline passed during the call.
     assert not any(i["kind"] == "historical" for i in record["entry_intents"])
 
 

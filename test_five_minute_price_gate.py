@@ -23,7 +23,7 @@ def test_62_cent_entry_window_is_five_to_six_minutes(monkeypatch, elapsed, allow
     result, quantity = bot.funded_entry(record, state, 'TEST', side, D('.62'), closed, 'regular')
     assert bool(result.get('order_id')) == allowed
     if allowed:
-        assert quantity == 5 and D(record['entry_intents'][0]['exit_target']) == D('.67')
+        assert quantity == 4 and D(record['entry_intents'][0]['exit_target']) == D('.67')
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
@@ -41,7 +41,7 @@ def test_regular_orders_repeat_after_interval_within_shared_cap(monkeypatch, sid
     clock[0] += 1
     bot.cycle(state)
     assert len(fake.entries) == 2 and record['buys'] == 2
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == D('6.50')
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == D('5.20')
 
 
 def test_higher_early_limits_cannot_consume_allowance_at_contract_start(monkeypatch):

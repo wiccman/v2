@@ -7,7 +7,7 @@ from test_five_minute_exits import cycle_setup
 
 def setup_current_window(monkeypatch, elapsed):
     start, end, cancel = bot.START, bot.END, bot.CANCEL_AFTER
-    assert (start, end, cancel) == (0, 720, 720)
+    assert (start, end, cancel) == (60, 720, 720)
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     monkeypatch.setattr(bot, 'START', start)
     monkeypatch.setattr(bot, 'END', end)
@@ -18,7 +18,7 @@ def setup_current_window(monkeypatch, elapsed):
     return fake, record, state, clock, closed
 
 
-@pytest.mark.parametrize('elapsed', [0, 180, 300, 359, 360, 420, 479, 480, 481, 600, 719, 720])
+@pytest.mark.parametrize('elapsed', [0, 59.999, 60, 180, 300, 359, 360, 420, 479, 480, 481, 600, 719, 720])
 def test_regular_entries_obey_price_based_windows(monkeypatch, elapsed):
     fake, record, state, clock, closed = setup_current_window(monkeypatch, elapsed)
     fake.held = D('0')
@@ -26,7 +26,7 @@ def test_regular_entries_obey_price_based_windows(monkeypatch, elapsed):
         market = {**fake.market('TEST'), 'yes_ask_dollars': '.70', 'no_ask_dollars': '.30'}
         monkeypatch.setattr(fake, 'market', lambda ticker: market)
     bot.cycle(state)
-    assert bool(fake.entries) == (elapsed < 360 or 480 <= elapsed < 720)
+    assert bool(fake.entries) == (60 <= elapsed < 360 or 480 <= elapsed < 720)
     assert all(item[3]['expiration_time'] == 1000000000 + (360 if item[2] < D('.70') else 720)
                for item in fake.entries)
     assert all((item[2] < D('.70')) == (elapsed < 360) for item in fake.entries)

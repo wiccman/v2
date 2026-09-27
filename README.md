@@ -1,42 +1,62 @@
-# Strike Ruler — Live Strike Scalp
+# Strike Ruler — Boruto Early Bias Scalp
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-**Current scalp direction:** buy YES when the current Bitcoin reference price is
-above this market's strike, buy NO when below, and wait when equal or unavailable.
-Recheck the live spot/strike immediately before each order. Saved Boruto signals,
-confidence and previous side locks do not determine scalp entries. Opposite
-inventory or unresolved opposing buys block a scalp in the new direction until
-they clear; only the final 97¢ route can deliberately close the opposite side at
-a loss. High-price entries require the chosen side to have the higher quoted ask
-and an ask of at least 70¢. The 75¢→83¢ rule starts at minute 6. The minute-8
-70¢ entry keeps its 6¢ take-profit target at 76¢, as do the existing late
-73¢→79¢ and 85¢→91¢ pairs.
+**Early direction, 1:00–6:00:** use `2.1.1 Boruto Scalp No Skip` to select
+YES or NO. Read four finalized Kalshi benchmarks at T−60, T−45, T−30 and
+T−15 against the current contract's fixed strike. The newest point votes in
+its own direction (above → YES); T−45 and T−60 vote inversely (below → YES).
+T−30 is recorded but does not vote. Two agreeing votes choose the side; without
+a majority, use the first nonzero vote in newest/T−45/T−60 order, with YES only
+when all three are equal. Confidence, previous-bias conflicts, the research
+YES-only filter and the $32.85 distance filter do not block these scalp signals.
 
-The earlier Boruto signal is retained in old records for audit and exit
-reconciliation. New buys do not require four finalized lookbacks or a stored
-confidence label. Quote snapshots at minutes 2, 4 and 6 remain diagnostics and
-never choose a buy side.
+Save the bias and its inputs as `entry_bias` before placing an early order.
+Reuse that market's saved bias across polls and restarts; preserve older `signal`
+records for audit. Every under-70¢ buy route checks the same bias, including
+opening, regular, optional limit-batch, historical and spot triggers. Live BTC
+crossing the strike cannot change early direction. Missing or invalid finalized
+lookbacks block early entries until the data is available; they cannot become
+an invented signal. Entry logs include the selected side and its source.
+
+**From 6:00 onward:** select YES above the live strike and NO below; wait at
+equality or when the live reference is unavailable. Recheck before submitting.
+These trades do not require the early bias or its lookbacks. High-price scalp
+entries still require the higher ask, at least 70¢. The 75¢→83¢ rule starts at
+minute 6; 70¢→76¢ starts at minute 8; 73¢→79¢ and 85¢→91¢ start at minute 11.
+The final 97¢ limit continues to follow the live strike side.
+
+Opposite inventory or unresolved opposing buys still block a new scalp until
+they clear; only the final 97¢ route can deliberately close the opposite side
+at a loss. Existing filled positions keep their saved exits and spending
+reservations. Unfilled orders from an older execution policy reconcile before
+new exposure. Quote snapshots at minutes 2, 4 and 6 remain diagnostics.
 
 New entries follow fixed price-based windows within each 15-minute market:
 
 | Entry | Window (start inclusive, end exclusive) |
 | --- | --- |
-| 52¢→60¢ opening entry | 0:00–2:00 |
-| New 57¢→62¢ opening entry | 0:00–2:00 |
-| 45–59¢ regular tiers | 0:00–6:00 |
+| 52¢→60¢ opening entry | 1:00–2:00 |
+| New 57¢→62¢ opening entry | 1:00–2:00 |
+| 45–59¢ regular tiers | 1:00–6:00 |
 | 60–69¢ regular tiers (currently 62¢/64¢/67¢) | 5:00–6:00 |
 | New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
-| Exact 97¢ settlement entry | 12:00–15:00 |
+| 97¢ settlement limit | 12:00–15:00 |
 
-The 35¢ buy is retired. The 57¢ and 75¢ rules require their respective exact
-quoted asks; their limits cannot pay more, although exchange price improvement
-can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
+Every new buy waits until **1:00 after contract open**, including opening,
+regular, optional limit-batch, historical-strike and spot routes. The shared
+entry gateway enforces the actual clock even if an old setting or caller asks
+for an earlier start. Waiting does not consume an attempt or reserve allowance;
+order reconciliation and exit monitoring continue.
+
+The 35¢ buy is retired. The 57¢ rule requires an exact quoted ask; the 75¢ rule
+triggers at an ask of at least 75¢. Neither limit can pay more, although exchange
+price improvement can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
 of the 52¢ opening flag. Quote/cash waits can retry before minute 2; an accepted
 or ambiguous attempt cannot be duplicated after restart.
 The 75¢ tier is the only new entry available from 6:00 to 8:00. Other 70¢+
@@ -73,35 +93,56 @@ at the entry limit; cheaper fills now produce lower exit targets.
 | 73¢ (from minute 11) | 79¢ |
 | 85¢ (from minute 11) | 91¢ |
 
-During the first two minutes, the bot may submit a strike-selected 52¢ limit
+From 1:00 until 2:00, the bot may submit a bias-selected 52¢ limit
 with a 60¢ target and an independent 57¢ limit with a 62¢ target. Each route
-uses five contracts and the shared allowance. All new entries are IOC; an
-unfilled quantity is canceled immediately, and no new opening submission may
-occur at or after 2:00. Each attempt rechecks direction and opposing inventory.
+uses the shared allowance and at most $2.80 per order, including entry fee room.
+Opening orders are IOC; an unfilled quantity is canceled immediately, and no
+new opening submission may occur at or after 2:00. Each attempt rechecks direction
+and opposing inventory. Quote or funding waits do not consume the opportunity.
 
-Regular entries and the optional limit batch follow the live strike side.
-Historical-strike touches may trigger an attempt, but the current market strike
-chooses its side. The optional early spot trigger buys YES when sufficiently
-above the current strike; this route operates before minute 2 by default.
+Regular entries and optional limit batches use the active window's side rule.
+Historical-strike touches may trigger an attempt but cannot override early bias.
+The optional spot trigger requires YES bias as well as BTC sufficiently above
+the current strike; this route operates before minute 2 by default.
 
-Earlier entry orders request exactly **5 contracts**, on opening, regular,
+Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
 limit-batch, historical, spot and late routes. All routes share a fixed **$20
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
 reserved for the final-three-minute settlement entry**, leaving **$14 for all
-earlier routes combined**. An earlier order is not
-submitted if five contracts plus the fee reserve will not fit the remaining
-allowance; the bot does not shrink it to a fractional order. Exchange partial
-fills remain possible, and exits sell only verified filled inventory.
+earlier routes combined**. Each earlier order uses at most **$2.80 including fees**,
+so five qualifying orders fit within $14. For example, a 57¢ or 67¢ order requests
+4 contracts, and a 75¢ or 85¢ order requests 3. The final order may shrink further
+to the whole contracts affordable from the remaining allowance. This creates
+room for five orders; it does not force buys outside their price/time rules or
+guarantee five fills. Exchange partial fills remain possible, and exits sell only
+verified filled inventory.
 Legacy `ENTRY_BUDGET_DOLLARS` and `MARKET_BUDGET_DOLLARS` settings are ignored.
-Existing reservations remain intact when upgrading or restarting.
+Existing reservations survive upgrades and restarts until reconciled.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
 saved before submission. Explicit HTTP 400 `insufficient_balance` rejections
-release their reservation because no order was accepted. Cancellations, partial fills, sales,
-ambiguous failures and restarts do not replenish the allowance. This intentionally limits retries and
-can leave part of the allowance unused. Exit fees are separate.
-`MAX_PURCHASES_PER_MARKET` limits regular trigger batches; it does not allocate
-additional money or count each tier as a separate purchase.
+release their reservation because no order was accepted. A terminal order with
+verified fill counts releases only its unfilled allowance. Partial fills also
+require verified maker/taker fees; retained allowance covers filled contracts
+and at least their actual entry fees. Missing counts, missing partial-fill fees
+and ambiguous submissions retain their allowance while reconciliation retries.
+Sales do not replenish filled-entry allowance. Exit fees are separate.
+`MAX_PURCHASES_PER_MARKET` counts individual committed regular orders, including
+unresolved submissions; proven zero-fill orders do not consume this count.
+
+The 75¢ tier triggers from minute 6 when the selected ask is at least 75¢ and
+rests at a maximum purchase price of 75¢ until minute 12. Only one 75¢ order may
+be pending at once; it is canceled if the live strike side changes. The final
+97¢ limit triggers at an ask of at least 97¢ and rests until contract close.
+Both need executable liquidity at or below their limits to fill. Other entry
+orders remain IOC. Opening and late tiers retry eligible checks until their
+cutoffs, using persisted per-tier intents to prevent duplicate filled or
+ambiguous attempts. Confirmed zero-fill attempts may retry.
+
+`ENTRY_SKIP` records each attempted tier's rejection reason. Terminal allowance
+recovery emits `ENTRY_UNUSED_ALLOWANCE_RELEASED`; incomplete proof emits
+`ENTRY_ALLOWANCE_RECONCILIATION_PENDING`. Order counts and fee fields follow the
+[Get Order response](https://docs.kalshi.com/api-reference/orders/get-order).
 
 An independent worker reconciles fills and net inventory and submits reduce-only
 immediate-or-cancel exits at the calculated target or better. It retries remaining
@@ -155,13 +196,13 @@ Important defaults:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `ENTRY_EXIT_PAIRS_CENTS` | `45:50,47:52,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
-| `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries request 5 contracts; exact-97¢ settlement requests 6 |
+| `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries use up to $2.80 and 5 contracts; 97¢ settlement requests 6 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | Existing opening entry; independent 57:62 rule is fixed in code |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
 | `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $20 including entry fee reserves |
-| `MAX_PURCHASES_PER_MARKET` | `7` | Maximum regular trigger batches |
+| `MAX_PURCHASES_PER_MARKET` | `7` | Maximum committed regular orders; proven zero-fill attempts excluded |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
-| `ENTRY_START_MINUTE` | `0` (fixed) | Earliest new entry |
+| `ENTRY_START_MINUTE` | `1` (fixed) | All new buys wait 60 seconds after contract open |
 | `ENTRY_END_MINUTE` | Ignored | Fixed price-based windows listed above |
 | `POLL_SECONDS` | `5` | Entry-loop delay |
 | `EXIT_POLL_SECONDS` | `1` | Independent exit-loop delay |
@@ -233,7 +274,7 @@ are performed. Funding the market's shard is a separate account action.
 
 `ENTRY_WAIT_MARKET_CASH` logs the shard, its available cash and the required
 amount. `ENTRY_CASH_UNAVAILABLE` means the read could not be verified, not a zero
-balance. These checks preserve five-contract sizing and the $6 settlement
+balance. These checks preserve each order's allocation and the $6 settlement
 allowance. They cannot guarantee acceptance if funds change before submission.
 
 Cancellation checks terminal status first. An already executed, canceled or
@@ -264,6 +305,9 @@ not invalidate existing signals. After deployment, the balance line is visible
 from a phone in v2's deployment logs. `python bot.py --check` also emits it.
 
 ## 2.0.3 — Additional regular entry pairs
+
+The versioned notes below describe historical releases; current rules and caps
+are listed in **Entries, exits and budgets** above.
 
 Added 55¢→62¢, 49¢→59¢, 38¢→43¢, 56¢→61¢, and 61¢→70¢ alongside 39¢→46¢. These additions are applied even with an older Railway ENTRY_EXIT_PAIRS_CENTS setting. Trigger budgets are divided among regular tiers; the shared market cap is now $10; timing, opening and late pairs are unchanged. See 2.0.5 for explicit balance-rejection reservation recovery.
 
@@ -314,17 +358,18 @@ remain subject to the existing protections and one-attempt policy.
 
 ## Entry quote floors
 
-New entries require a fresh selected-outcome ask of at least 45 cents and no
-higher than the route limit. The retired 35¢ exception is removed. New 57¢ and
-75¢ entries require asks of exactly 57¢ and 75¢ respectively. Settlement requires
-an exact 97¢ ask and uses a fixed 97¢ limit. Missing or invalid quotes block entry.
+New entries require a fresh selected-outcome ask of at least 45 cents and below
+100 cents. IOC routes also require an ask no higher than their limit. The retired
+35¢ exception is removed. New 57¢ entries require an ask of exactly 57¢. The 75¢
+and 97¢ routes trigger at or above their respective limits and may rest there;
+the submitted maximum prices remain 75¢ and 97¢. Missing or invalid quotes block entry.
 High-price scalps require the selected side to have the strictly higher ask and
 a quote of at least 70¢. The explicit 75¢ tier opens at 6:00; other high-price
 limits open from 8:00, with the existing 73¢/85¢ route starting at 11:00.
 
-All new buys use immediate-or-cancel. A quote check cannot enforce a minimum
+Other buys use immediate-or-cancel. A quote check cannot enforce a minimum
 exchange fill price if the book changes before matching; favorable execution
-below the limit remains possible. New rules share the $20 cap ($14 earlier /
+below the limit remains possible, including for resting orders. New rules share the $20 cap ($14 earlier /
 $6 settlement), and existing inventory keeps its recorded exits.
 
 ## Request and order-status recovery
@@ -336,7 +381,8 @@ resume first, entries one second later, diagnostics two seconds later. Requests
 already in flight cannot be recalled. There is no lock held during HTTP and no
 automatic replay of order POSTs. A locally deferred request was never sent;
 only that new reservation may be released, with its audit record retained.
-Accepted or ambiguous orders keep their reservations and recovery IDs.
+Accepted or ambiguous orders keep their reservations and recovery IDs until
+terminal fill counts prove an unused allowance as described above.
 
 Adjacent tier/funding checks reuse market snapshots for at most half a second,
 measured from request start. Mutating requests invalidate the cache. Cash is
@@ -352,16 +398,20 @@ visibility conservatively; it does not assume every 404 will eventually resolve.
 
 API reference: [Kalshi rate limits](https://docs.kalshi.com/getting_started/rate_limits).
 
-## Final-three-minute exact-97-cent entry and side transition
+## Final-three-minute 97-cent limit and side transition
 
-In minutes 12–15, the settlement route selects the unique outcome with an ask
-of exactly 97 cents, checks it again before submission, and submits a fixed
-97-cent limit IOC. Quotes of 98 or 99 cents, or fractional prices above 97 cents,
-wait without reserving budget or consuming the attempt. A price move cannot make
-that order buy above its 97-cent limit; a better execution price is still possible.
+In minutes 12–15, the settlement route selects the live BTC strike side: YES
+above the current strike or NO below it. It requires that side's ask to be at
+least 97 cents and below 100 cents, rechecks before submission, and submits a
+fixed 97-cent GTC limit expiring at contract close. Quotes of 97.2, 98 or 99 cents
+can therefore trigger a resting order. The order cannot buy above 97 cents;
+it may remain unfilled if offers never reach its limit. A better execution price
+is still possible. The ordinary minute-12 cancellation sweep preserves this
+order's separate contract-close deadline.
 The $6 reserve covers six contracts plus the existing 3-cent per-contract fee
-cushion. The overall cap is $20. One settlement attempt per market and
-monitor-health gating remain. Existing 98/99-cent settlement lots remain
+cushion. The overall cap is $20. One filled or unresolved settlement attempt per
+market and monitor-health gating remain; a confirmed zero-fill cancellation can
+retry before close. Existing 98/99-cent settlement lots remain
 recognized, keep their $1 target, and are excluded from scalp exits. No fill or
 profit is guaranteed.
 
@@ -375,8 +425,8 @@ Partial closes retry only after status reconciliation; missing acknowledgements,
 
 The entry worker switches its side lock and buys only after the exit worker has
 confirmed no opposite inventory, with exit fills reflected in history. It rereads
-the position and the exact-97¢ quote before submission. Loss-taking exits use FIFO
+the position, live strike side and qualifying quote before submission. Loss-taking exits use FIFO
 inventory accounting and do not reset the $20 spending ledger. Missing liquidity,
-an unavailable 97¢ quote, insufficient cash/budget, or market close can prevent the
+an unavailable qualifying quote, insufficient cash/budget, or market close can prevent the
 transition from completing. Logs distinguish `SETTLEMENT_CLOSE_*` from normal
 take-profit events and record the requested/ready side transition.
