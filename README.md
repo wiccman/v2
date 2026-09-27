@@ -3,6 +3,26 @@
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
+## Manual trades on the same account (v2.2.11)
+
+Verified manual fills on the same side no longer block the bot's first buy or
+consume its eight-contract position cap. The cap, five-contract first entry,
+one average-down allowance, $30 market budget and take-profit sizing apply to
+bot-owned inventory. All orders still require sufficient available account cash.
+
+The exit worker replays fills using saved bot order IDs, reconciles them to the
+account position, and publishes an atomic ownership receipt. Entries require a
+recent receipt matching both the current position and current entry ledger;
+unresolved exits, missing fills, lost acknowledgements and restarts cannot be
+treated as a fresh empty bot position. This reuses the exit worker's fill reads.
+
+Opposite-side manual holdings still pause buys because a buy would offset that
+manual position. The final 96-cent switch also waits when opposite manual lots
+remain; it can close only verified bot lots, with saved fill allocations.
+Manual reductions use FIFO attribution in the shared net position. Simultaneous
+manual trading can still change that position between an API read and an order;
+these records are accounting separation, not separate exchange positions.
+
 ## Signals and timing
 
 **Direction after minute 1:** BTC at least $50 above the fixed strike permits
@@ -14,8 +34,8 @@ An unavailable reference also prevents new orders. The 96¢ settlement route
 uses the same distance rule; exits continue regardless of the entry gate.
 
 Opposite inventory or unresolved opposing buys still block a new scalp until
-they clear; only the final 96¢ route can deliberately close the opposite side
-at a loss. Existing filled positions keep their saved exits and spending
+they clear; only the final 96¢ route can deliberately close the bot's opposite
+inventory at a loss, provided no opposite manual lots remain. Existing filled positions keep their saved exits and spending
 reservations. Unfilled orders from an older execution policy reconcile before
 new exposure. Quote snapshots at minutes 2, 4 and 6 remain diagnostics.
 

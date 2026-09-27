@@ -604,9 +604,14 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             held = settlement_position(ticker)
         except Exception:
             return skip("settlement_position_unavailable")
+    account_held = held
+    try:
+        held = EXIT_MONITOR.bot_inventory(ticker, record, account_held)
+    except Exception as error:
+        return skip("bot_inventory_pending", account_held=str(account_held), detail=str(error))
     quantity_limit, averaging_entry, limit_reason = scalp_entry_limit(record, held, price, kind, closed)
     if limit_reason or quantity_limit < 1:
-        return skip(limit_reason or "open_contract_limit", held=str(held),
+        return skip(limit_reason or "open_contract_limit", held=str(held), account_held=str(account_held),
                     pending=str(pending_entry_contracts(record)), maximum=str(MAX_OPEN_CONTRACTS))
     if time.time() < record.get("cash_retry_at", 0):
         return skip("cash_retry_delay", retry_at=record["cash_retry_at"])
@@ -678,16 +683,27 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return skip("opposite_inventory_before_post", held=str(held))
     else:
         held = settlement_position(ticker)
+    account_held = held
+    try:
+        held = EXIT_MONITOR.bot_inventory(ticker, record, account_held)
+    except Exception as error:
+        return skip("bot_inventory_pending_before_post", account_held=str(account_held), detail=str(error))
     if abs(held) + pending_entry_contracts(record) + quantity > MAX_OPEN_CONTRACTS:
         return skip("open_contract_limit_before_post", held=str(held), quantity=str(quantity))
     if switch:
-        held = settlement_position(ticker)
-        if (side == "YES" and held < 0) or (side == "NO" and held > 0):
-            return skip("opposite_inventory_before_settlement", held=str(held))
+        latest_account_held = settlement_position(ticker)
+        if latest_account_held != account_held:
+            return skip("position_changed_before_settlement")
+        if (side == "YES" and latest_account_held < 0) or (side == "NO" and latest_account_held > 0):
+            return skip("opposite_inventory_before_settlement", held=str(latest_account_held))
         if time.time() >= cutoff or not EXIT_MONITOR.settlement_ready(ticker, side):
             return skip("settlement_not_ready_before_post")
     if time.time() >= cutoff:
         return skip("deadline_reached_before_reservation")
+    if account_held != held:
+        write_log("ENTRY_MANUAL_INVENTORY_EXCLUDED", ticker, prediction=side,
+                  details=json.dumps({"account_held": str(account_held), "bot_held": str(held),
+                                      "manual_held": str(account_held - held), "quantity": str(quantity)}))
     cancel_at = min(cutoff, cancellation_deadline(closed) if cancel_at is None else cancel_at)
     intent = reserve_entry(record, side, price, BUDGET if order_budget is None else order_budget,
                            MARKET_BUDGET, cancel_at, kind, max_quantity=quantity)
@@ -1450,7 +1466,7 @@ def main():
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
     print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
-    print(f"POSITION_CAP maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3", flush=True)
+    print(f"POSITION_CAP bot_owned_maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3; verified manual fills excluded; opposing manual inventory pauses entries and settlement switches", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",

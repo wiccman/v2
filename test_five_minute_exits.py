@@ -79,6 +79,7 @@ def cycle_setup(monkeypatch, elapsed):
     state = {"markets": {"TEST": record}}
     monkeypatch.setattr(bot, "client", fake)
     monkeypatch.setattr(bot, "EXIT_MONITOR", SimpleNamespace(healthy=True, wake=lambda: None,
+                        bot_inventory=lambda ticker, record, held: held,
                         settlement_ready=lambda ticker, side: False))
     # Preserve explicit legacy timing scenarios for migration regression tests.
     monkeypatch.setattr(bot, "START", 120)

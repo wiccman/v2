@@ -1,5 +1,6 @@
 from decimal import Decimal
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import bot
 from kalshi import KalshiClient
@@ -52,6 +53,8 @@ class DualLimitClient:
 
 
 def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch):
+    monkeypatch.setattr(bot, "EXIT_MONITOR", SimpleNamespace(
+        healthy=True, wake=lambda: None, bot_inventory=lambda ticker, record, held: held))
     monkeypatch.setattr(bot, "MARKET_BUDGET", Decimal("4"))  # Explicit small-cap expiry fixture.
     monkeypatch.setattr(bot.time, "time", lambda: 1220)
     fake = DualLimitClient()
@@ -98,6 +101,8 @@ def test_historical_strike_reaction_uses_approach_side():
 
 
 def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(monkeypatch):
+    monkeypatch.setattr(bot, "EXIT_MONITOR", SimpleNamespace(
+        healthy=True, wake=lambda: None, bot_inventory=lambda ticker, record, held: held))
     monkeypatch.setattr(bot, "MARKET_BUDGET", Decimal("4"))  # Explicit small-cap expiry fixture.
     monkeypatch.setattr(bot.time, "time", lambda: 1220)
     fake = DualLimitClient()

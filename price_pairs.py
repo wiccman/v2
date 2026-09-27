@@ -145,6 +145,15 @@ def paired_inventory(fills, entry_orders, exit_orders, held, ticker, untracked=N
     return dict(sorted(buckets.items()))
 
 
+def owned_position(fills, entry_orders, exit_orders, held, ticker):
+    """Verified remaining bot contracts and the exact lots an exit may consume."""
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, [])
+    quantity = sum((lot["quantity"] * lot["sign"] for lot in lots), D(0))
+    allocations = [{"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
+                   for lot in lots]
+    return quantity, allocations
+
+
 def _outcome_cost(fill, sign):
     """Read trade prices, excluding fees, from the exchange fill payload."""
     prices = {}

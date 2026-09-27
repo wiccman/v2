@@ -91,6 +91,14 @@ def test_loss_close_is_confirmed_before_fixed_96_cent_buy(tmp_path, monkeypatch,
     assert record['settlement_switch']['phase'] == 'requested'
     assert not e.buys and not e.submissions
     monitor.run_once()
+    if manual:
+        assert not e.submissions and not e.buys
+        assert abs(e.held) == 2 and monitor.healthy
+        assert not monitor.settlement_ready('T', desired)
+        assert any(event == 'SETTLEMENT_MANUAL_POSITION_WAIT' for event, _ in events)
+        bot.settlement_entry(record, state, 'T', closed)
+        assert not e.submissions and not e.buys
+        return
     assert len(e.submissions) == 1 and e.held == 0
     assert e.submissions[0]['reduce_only'] is True
     assert e.submissions[0]['price'] == ('0.9800' if desired == 'YES' else '0.0200')
