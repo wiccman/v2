@@ -5,7 +5,7 @@ from decimal import Decimal as D
 FEE_RESERVE = D("0.03")  # per contract, including fractional-fill rounding cushion
 ZERO = D("0")
 ENTRY_QUANTITY = D("5")
-EARLIER_ORDER_BUDGET = D("2.80")  # $14 divided across at least five opportunities.
+EARLIER_ORDER_BUDGET = D("2.80")  # Per-order ceiling, also constrained by remaining market allowance.
 SETTLEMENT_BUDGET = D("6")
 SETTLEMENT_PRICE = D("0.97")
 SETTLEMENT_KIND = "settlement_97"
@@ -27,7 +27,7 @@ def settlement_entry_price_allowed(price):
 def market_budget():
     # Fixed requested allowance; stale Railway budget settings must not keep
     # this release at an older cap.
-    return D("20")
+    return D("10")
 
 
 def initialize(record):
@@ -45,7 +45,8 @@ def initialize(record):
 
 
 def remaining_allowance(record, cap, kind):
-    limit = D(cap) if kind == SETTLEMENT_KIND else min(D(cap), market_budget() - SETTLEMENT_BUDGET)
+    cap = min(D(cap), market_budget())
+    limit = cap if kind == SETTLEMENT_KIND else min(cap, market_budget() - SETTLEMENT_BUDGET)
     spent = sum((D(item["reserved_dollars"]) for item in record.get("entry_intents", [])), ZERO)
     return max(ZERO, limit - spent)
 
@@ -67,6 +68,7 @@ def reserve(record, side, price, order_budget, cap, cancel_at, kind):
     price, cap = D(price), D(cap)
     if not all(x.is_finite() and x > ZERO for x in (price, cap)) or price >= 1:
         return None
+    cap = min(cap, market_budget())
     spent = sum((D(item["reserved_dollars"]) for item in record["entry_intents"]), ZERO)
     if kind == SETTLEMENT_KIND:
         if price != SETTLEMENT_PRICE or any(i.get("kind") == SETTLEMENT_KIND and attempt_committed(i) for i in record["entry_intents"]):

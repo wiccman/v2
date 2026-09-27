@@ -102,9 +102,9 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     bot.cycle(state)
-    assert len(fake.entries) == 6  # Five regular tiers plus a smaller dual order.
-    assert [q for _, q, _, _ in fake.entries] == [D(5), D(5), D(5), D(4), D(4), D(2)]
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("14")
+    assert len(fake.entries) == 2  # The $4 earlier allowance limits the batch.
+    assert [q for _, q, _, _ in fake.entries] == [D(5), D(2)]
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("4")
     assert all(x[3]["expiration_time"] == 1000000360 for x in fake.entries)
 
 
