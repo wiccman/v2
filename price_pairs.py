@@ -236,3 +236,35 @@ def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profi
         plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
                                     "quantity": str(quantity), "gross_profit_goal": str(profit)})
     return dict(sorted(buckets.items())), plans
+
+
+def order_percentage_inventory(fills, entry_orders, exit_orders, held, ticker, untracked, percentage):
+    """Target a percentage increase over each buy order's actual average fill price.
+
+    This is a gross price move; exchange fees are not included. Settlement
+    inventory stays held, and prices above 99c use the saved paired exit.
+    """
+    percentage = D(percentage)
+    if not percentage.is_finite() or percentage <= 0:
+        raise ValueError("Per-order percentage must be positive")
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked)
+    groups, buckets, plans = {}, {}, {}
+    for lot in lots:
+        if lot["target"] == 1:
+            buckets[D(1)] = buckets.get(D(1), D(0)) + lot["sign"] * lot["quantity"]
+        else:
+            groups.setdefault((lot["sign"], lot["fill"]["order_id"]), []).append(lot)
+    for (sign, order_id), members in sorted(groups.items()):
+        quantity = sum((lot["quantity"] for lot in members), D(0))
+        cost = sum((lot["quantity"] * _outcome_cost(lot["fill"], sign)
+                    for lot in members), D(0)) / quantity
+        target = (cost * (D(1) + percentage)).quantize(D("0.01"), rounding=ROUND_CEILING)
+        if target > D("0.99"):
+            target = max(lot["target"] for lot in members)
+        buckets[target] = buckets.get(target, D(0)) + sign * quantity
+        plan = plans.setdefault(target, {"allocations": [], "cost_groups": []})
+        plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
+                                   for lot in members)
+        plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
+                                    "quantity": str(quantity), "gross_price_increase": str(percentage)})
+    return dict(sorted(buckets.items())), plans

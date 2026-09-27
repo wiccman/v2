@@ -44,7 +44,7 @@ def test_full_cycle_can_place_opening_order_immediately(monkeypatch):
     assert any(i["kind"] == "opening_bias" for i in record["entry_intents"])
 
 
-def test_old_environment_cannot_restore_one_minute_wait():
-    result = subprocess.run([sys.executable, "-c", "import bot; assert bot.START == bot.ENTRY_START_DELAY == 0"],
-                            env={**os.environ, "ENTRY_START_MINUTE": "1"}, capture_output=True, text=True)
+def test_production_start_is_one_minute_independent_of_old_environment():
+    result = subprocess.run([sys.executable, "-c", "import bot; assert bot.START == bot.ENTRY_START_DELAY == 60 and bot.DIRECTIONAL_ENTRY_POLICY"],
+                            env={**os.environ, "ENTRY_START_MINUTE": "0"}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

@@ -18,7 +18,7 @@ from pathlib import Path
 
 from kalshi import KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestDeferred, retry_delay
-from price_pairs import paired_inventory, fill_cost_inventory, order_profit_inventory, InventorySyncError
+from price_pairs import paired_inventory, fill_cost_inventory, order_profit_inventory, order_percentage_inventory, InventorySyncError
 
 TERMINAL = {"executed", "canceled", "expired"}
 
@@ -26,12 +26,14 @@ TERMINAL = {"executed", "canceled", "expired"}
 class TakeProfitMonitor:
     def __init__(self, client, read_entries, path, target=Decimal("0.45"),
                  poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False,
-                 per_order_profit=None, no_fill_pause=0.0, quote_gate=False):
+                 per_order_profit=None, no_fill_pause=0.0, quote_gate=False,
+                 per_order_percentage=None):
         self.client, self.read_entries = client, read_entries
         self.path, self.target = Path(path), Decimal(target)
         self.pairs = pairs
         self.fill_cost_targets = fill_cost_targets
         self.per_order_profit = Decimal(per_order_profit) if per_order_profit is not None else None
+        self.per_order_percentage = Decimal(per_order_percentage) if per_order_percentage is not None else None
         self.poll, self.clock = max(1.0, float(poll)), clock
         self.no_fill_pause = max(0.0, float(no_fill_pause))
         self.quote_gate = quote_gate
@@ -230,7 +232,10 @@ class TakeProfitMonitor:
             if observed != Decimal(order["filled"]):
                 raise InventorySyncError("Confirmed exit is not yet consistent with fill history")
         outside = []
-        if self.per_order_profit is not None:
+        if self.per_order_percentage is not None:
+            result = order_percentage_inventory(fills, entries, exits, held, ticker, outside,
+                                                self.per_order_percentage)
+        elif self.per_order_profit is not None:
             result = order_profit_inventory(fills, entries, exits, held, ticker,
                                             self.per_order_profit)
         elif self.fill_cost_targets:
