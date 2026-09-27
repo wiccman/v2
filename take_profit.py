@@ -26,13 +26,15 @@ TERMINAL = {"executed", "canceled", "expired"}
 class TakeProfitMonitor:
     def __init__(self, client, read_entries, path, target=Decimal("0.45"),
                  poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False,
-                 per_order_profit=None):
+                 per_order_profit=None, no_fill_pause=0.0, quote_gate=False):
         self.client, self.read_entries = client, read_entries
         self.path, self.target = Path(path), Decimal(target)
         self.pairs = pairs
         self.fill_cost_targets = fill_cost_targets
         self.per_order_profit = Decimal(per_order_profit) if per_order_profit is not None else None
         self.poll, self.clock = max(1.0, float(poll)), clock
+        self.no_fill_pause = max(0.0, float(no_fill_pause))
+        self.quote_gate = quote_gate
         self.emit = emit or (lambda event, **data: print(json.dumps({
             "event": event, "time_utc": datetime.now(timezone.utc).isoformat(), **data
         }), flush=True))
@@ -161,12 +163,17 @@ class TakeProfitMonitor:
         if order.get("status") not in TERMINAL:
             return self._pending_status(ticker, intent, "awaiting_terminal_status")
         if filled:
+            ledger.pop("next_attempt_at", None)
             ledger.setdefault("exit_orders", {})[order["order_id"]] = {
                 "side": intent["side"], "target": intent["target"],
                 "paired": intent.get("paired", False), "filled": str(filled),
                 "purpose": intent.get("purpose", "take_profit")}
             if "allocations" in intent:
                 ledger["exit_orders"][order["order_id"]]["allocations"] = intent["allocations"]
+        elif intent.get("purpose") != "settlement_switch" and self.no_fill_pause:
+            # A known unfilled IOC cannot help until the book changes. Avoid
+            # repeating the same read/reconcile/write cycle every second.
+            ledger["next_attempt_at"] = self.clock() + self.no_fill_pause
         ledger.pop("pending")
         self.save()
         return True
@@ -264,9 +271,16 @@ class TakeProfitMonitor:
             self.save()
         if self.clock() < ledger.get("retry_after", 0):
             return False
+        switch = record.get("settlement_switch", {})
+        urgent_switch = (switch.get("allow_loss") is True and
+                         switch.get("phase") in {"requested", "ready"})
+        if not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0) and not ledger.get("pending"):
+            return True
         self._clear_legacy(ticker, record, ledger)
         if not self._reconcile(ticker, ledger):
             return False
+        if not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0):
+            return True
         positions = self.client.positions(ticker)
         matches = [p for p in positions if p.get("ticker") == ticker]
         if len(matches) > 1:
@@ -320,6 +334,17 @@ class TakeProfitMonitor:
         previous = Decimal(ledger.get("last_target", "-1"))
         target = next((t for t in targets if t > previous), targets[0])
         quantity = buckets[target]
+        if self.quote_gate:
+            # A sell cannot fill at its target while the best bid is lower.
+            # This read replaces futile order writes and reconciliation reads.
+            market = self.client.market(ticker)
+            side = "yes" if quantity > 0 else "no"
+            bid = Decimal(str(market[side + "_bid_dollars"]))
+            if not bid.is_finite() or bid < 0 or bid > 1:
+                raise ValueError("Invalid take-profit bid")
+            if bid < target:
+                ledger["last_target"] = str(target)
+                return True
         return self._submit(ticker, ledger, close, quantity, target,
                             paired=self.pairs is not None, plan=plans.get(target))
 

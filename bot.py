@@ -1184,6 +1184,22 @@ def settlement_entry(record, state, ticker, closed):
             if record.get("entry_budget_legacy") or Decimal(observed["market_reserved_dollars"]) + required > MARKET_BUDGET:
                 report("switch_entry_budget_unavailable")
                 return
+            if opposite:
+                # The loss close may yield almost nothing. Check the market's
+                # actual shard before selling inventory to fund a 97c entry.
+                # Do not count prospective sale proceeds: the bid can move or
+                # the close can partially fill before the replacement order.
+                try:
+                    available = Decimal(client.market_cash(ticker)["cash_dollars"])
+                    if not available.is_finite() or available < 0:
+                        raise ValueError("Invalid switch cash")
+                except Exception as error:
+                    report("switch_cash_unavailable", error_type=type(error).__name__)
+                    return
+                if available < required:
+                    report("switch_cash_insufficient", available_dollars=str(available),
+                           required_dollars=str(required))
+                    return
             switch = {"side": side, "previous_side": locked_side, "phase": "requested",
                       "requested_at": time.time(), "allow_loss": True}
             record["settlement_switch"] = switch
@@ -1461,9 +1477,10 @@ def main():
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")), fill_cost_targets=True,
-            per_order_profit=os.getenv("PER_ORDER_PROFIT_DOLLARS", "0.75"))
+            per_order_profit=os.getenv("PER_ORDER_PROFIT_DOLLARS", "0.75"),
+            no_fill_pause=3.0, quote_gate=True)
         EXIT_MONITOR.start()
-        print(f"TP_MONITOR_STARTED per_order_gross_profit=${EXIT_MONITOR.per_order_profit}; targets use actual fill cost and remaining quantity, rounded up to cents; saved pair target applies if dollar goal is unattainable; independent reduce-only IOC exits", flush=True)
+        print(f"TP_MONITOR_STARTED per_order_gross_profit=${EXIT_MONITOR.per_order_profit}; targets use actual fill cost and remaining quantity, rounded up to cents; saved pair target applies if dollar goal is unattainable; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
         diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
             coordinator=REQUEST_COORDINATOR, role="diagnostics")
