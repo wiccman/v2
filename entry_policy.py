@@ -7,8 +7,8 @@ ZERO = D("0")
 ENTRY_QUANTITY = D("5")
 EARLIER_ORDER_BUDGET = D("2.80")  # Per-order ceiling, also constrained by remaining market allowance.
 SETTLEMENT_BUDGET = D("6")
-SETTLEMENT_PRICE = D("0.97")
-SETTLEMENT_KIND = "settlement_97"
+SETTLEMENT_PRICE = D("0.96")
+SETTLEMENT_KIND = "settlement_97"  # Durable identifier for existing intents across upgrades.
 SETTLEMENT_WINDOW = 180
 
 
@@ -19,7 +19,7 @@ def settlement_price_allowed(price):
 
 
 def settlement_entry_price_allowed(price):
-    """Trigger at 97c or higher; the submitted buy limit remains exactly 97c."""
+    """Trigger at 96c or higher; the submitted buy limit remains exactly 96c."""
     price = D(str(price))
     return price.is_finite() and SETTLEMENT_PRICE <= price < D("1")
 
