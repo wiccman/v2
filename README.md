@@ -9,12 +9,12 @@ Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 YES; at least $50 below permits NO. Inside that band, all new entry routes wait.
 The exchange reference is rechecked immediately before each buy submission.
 No opening opposite-strike trade or early Boruto bias selects a live buy side.
-Resting 75¢ and 97¢ limits are canceled if BTC leaves the qualifying direction.
-An unavailable reference also prevents new orders. The 97¢ settlement route
+Resting 75¢ and 96¢ limits are canceled if BTC leaves the qualifying direction.
+An unavailable reference also prevents new orders. The 96¢ settlement route
 uses the same distance rule; exits continue regardless of the entry gate.
 
 Opposite inventory or unresolved opposing buys still block a new scalp until
-they clear; only the final 97¢ route can deliberately close the opposite side
+they clear; only the final 96¢ route can deliberately close the opposite side
 at a loss. Existing filled positions keep their saved exits and spending
 reservations. Unfilled orders from an older execution policy reconcile before
 new exposure. Quote snapshots at minutes 2, 4 and 6 remain diagnostics.
@@ -30,7 +30,7 @@ New entries follow fixed price-based windows within each 15-minute market:
 | New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
-| 97¢ settlement limit | 12:00–15:00 |
+| 96¢ settlement limit | 12:00–15:00 |
 
 Eligible early buys start **one minute after contract open**. The opening, regular, optional limit-batch, historical
 and spot routes still enforce their own prices, side rules, funds and deadlines.
@@ -117,7 +117,7 @@ unresolved submissions; proven zero-fill orders do not consume this count.
 The 75¢ tier triggers from minute 6 when the selected ask is at least 75¢ and
 rests at a maximum purchase price of 75¢ until minute 12. Only one 75¢ order may
 be pending at once; it is canceled if the live strike side changes. The final
-97¢ limit triggers at an ask of at least 97¢ and rests until contract close.
+96¢ limit triggers at an ask of at least 96¢ and rests until contract close.
 Both need executable liquidity at or below their limits to fill. Other entry
 orders remain IOC. Opening and late tiers retry eligible checks until their
 cutoffs, using persisted per-tier intents to prevent duplicate filled or
@@ -132,7 +132,7 @@ An independent worker reconciles fills and net inventory and submits reduce-only
 immediate-or-cancel exits at the calculated target or better. It retries remaining
 holdings after partial fills. These are **bot-managed exits**, not resting exchange
 brackets. They require the process, API and executable liquidity to be available.
-There is no general stop-loss. The explicit 97¢ settlement transition may close
+There is no general stop-loss. The explicit 96¢ settlement transition may close
 opposite inventory at a loss, as described below. Opposite-side fills net against existing holdings;
 the monitor does not assume independent YES and NO positions. Inconsistent or
 ambiguous fill accounting pauses new entries until reconciliation succeeds.
@@ -181,7 +181,7 @@ Important defaults:
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `ENTRY_EXIT_PAIRS_CENTS` | `45:50,47:52,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
-| `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries use up to $2.80 and 5 contracts; 97¢ settlement requests 6 |
+| `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries use up to $2.80 and 5 contracts; 96¢ settlement requests 6 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | Existing opening entry; independent 57:62 rule is fixed in code |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
 | `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $25 including entry fee reserves |
