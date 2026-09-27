@@ -18,10 +18,10 @@ def cycle_setup(monkeypatch, elapsed):
     return result
 
 
-def test_all_entry_routes_share_four_earlier_dollars_and_restart_does_not_refund(monkeypatch):
+def test_all_entry_routes_share_lower_cap_and_restart_does_not_refund(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     monkeypatch.setattr(bot, "BUDGET", D("2"))
-    monkeypatch.setattr(bot, "MARKET_BUDGET", D("6"))
+    monkeypatch.setattr(bot, "MARKET_BUDGET", D("4"))
     saved = []
     monkeypatch.setattr(bot, "save_state", lambda s: saved.append(copy.deepcopy(s)))
     original = fake._order
@@ -168,22 +168,22 @@ def test_orders_follows_every_page(monkeypatch):
 
 
 @pytest.mark.parametrize("legacy", [None, "4", "6", "10", "100"])
-def test_fixed_ten_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
+def test_fixed_twenty_one_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
     if legacy is None:
         monkeypatch.delenv("MARKET_BUDGET_DOLLARS", raising=False)
     else:
         monkeypatch.setenv("MARKET_BUDGET_DOLLARS", legacy)
-    assert entry_policy.market_budget() == D("10")
+    assert entry_policy.market_budget() == D("21")
 
 
-def test_ten_dollar_allowance_is_shared_and_survives_restart():
+def test_twenty_one_dollar_allowance_is_shared_and_survives_restart():
     record = {}
     for price in ("0.45", "0.47", "0.49", "0.52", "0.55", "0.56", "0.61", "0.73", "0.85"):
         entry_policy.reserve(record, "YES", D(price), D("2"), entry_policy.market_budget(), 360, "test")
     while entry_policy.reserve(record, "YES", D("0.45"), D("0.01"), entry_policy.market_budget(), 360, "test"):
         pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("3.50") < spent <= D("4")
+    assert D("14.52") < spent <= D("15")
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80") for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
@@ -242,7 +242,7 @@ def test_balance_rejection_releases_only_failed_intent_and_survives_restart(monk
     monkeypatch.setattr(fake, 'place_entry', accepted)
     result, quantity = bot.funded_entry(record, restored, 'TEST', 'YES', D('0.53'), closed, 'regular')
     assert result['order_id'] and quantity > 0
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= D('10')
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) <= D('15')
 
 
 @pytest.mark.parametrize('status,code', [(400, None), (400, 'unknown_error'),
@@ -286,8 +286,8 @@ def test_each_entry_route_requests_five_despite_old_dollar_budget(monkeypatch, k
     assert fake.entries[0][1] == D("5")
 
 
-@pytest.mark.parametrize("spent", ["4.01", "10", "11.55", "13.61"])
-def test_lower_cap_preserves_old_spending_and_blocks_extra_entries(spent):
+@pytest.mark.parametrize("spent", ["15.01", "21", "22", "25"])
+def test_exhausted_cap_preserves_old_spending_and_blocks_extra_entries(spent):
     record = {"entry_intents": [{"reserved_dollars": spent}]}
     before = copy.deepcopy(record)
     for kind, price in [("regular", D(".45")), (entry_policy.SETTLEMENT_KIND, D(".97"))]:

@@ -122,17 +122,18 @@ def test_minute_six_keeps_live_strike_and_higher_ask_requirements(monkeypatch, s
     assert not fake.entries and not record['entry_intents']
 
 
-def test_10_cap_preserves_saved_spending_and_six_dollar_settlement_reserve():
-    record = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '9', 'entry_closed': True}]}
+def test_21_cap_preserves_saved_spending_and_six_dollar_settlement_reserve():
+    record = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '16', 'entry_closed': True}]}
     before = copy.deepcopy(record)
-    assert policy.market_budget() == 10
-    assert policy.reserve(record, 'YES', D('.75'), D('.77'), D(20), 720, 'regular') is None
-    assert policy.reserve(record, 'YES', D('.97'), D('.77'), D(20), 900, policy.SETTLEMENT_KIND) is None
+    assert policy.market_budget() == 21
+    assert policy.reserve(record, 'YES', D('.75'), D('.77'), D(21), 720, 'regular') is None
+    assert policy.reserve(record, 'YES', D('.97'), D('.77'), D(21), 900, policy.SETTLEMENT_KIND) is None
     assert record == before
-    restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '4', 'entry_closed': True}]}
-    settlement = policy.reserve(restored, 'YES', D('.97'), D('.77'), D(20), 900, policy.SETTLEMENT_KIND)
+    restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '15', 'entry_closed': True}]}
+    assert policy.reserve(restored, 'YES', D('.45'), D('.77'), D(21), 720, 'regular') is None
+    settlement = policy.reserve(restored, 'YES', D('.97'), D('.77'), D(21), 900, policy.SETTLEMENT_KIND)
     assert D(settlement['quantity']) == 6
-    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('10')
+    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('21')
 
 
 def test_stale_configuration_cannot_restore_35_or_regular_57():
@@ -145,7 +146,7 @@ def test_stale_configuration_cannot_restore_35_or_regular_57():
         "assert bot.NEW_ENTRY_EXIT_PAIRS[D('.75')] == D('.83'); "
         "assert bot.NEW_ENTRY_EXIT_PAIRS[D('.70')] == D('.76'); "
         "assert bot.ALL_ENTRY_EXIT_PAIRS[D('.35')] == D('.42'); "
-        "assert bot.MARKET_BUDGET == 10"], env=env, capture_output=True, text=True)
+        "assert bot.MARKET_BUDGET == 21"], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
 
 

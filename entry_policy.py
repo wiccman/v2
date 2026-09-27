@@ -27,7 +27,7 @@ def settlement_entry_price_allowed(price):
 def market_budget():
     # Fixed requested allowance; stale Railway budget settings must not keep
     # this release at an older cap.
-    return D("10")
+    return D("21")
 
 
 def initialize(record):

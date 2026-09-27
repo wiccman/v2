@@ -41,7 +41,7 @@ def test_regular_orders_repeat_after_interval_within_shared_cap(monkeypatch, sid
     clock[0] += 1
     bot.cycle(state)
     assert len(fake.entries) == 2 and record['buys'] == 2
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == D('3.90')
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == D('5.20')
 
 
 def test_higher_early_limits_cannot_consume_allowance_at_contract_start(monkeypatch):

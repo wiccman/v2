@@ -39,36 +39,36 @@ def exchange(monkeypatch, elapsed=660, ask=".85", side="YES"):
 
 
 @pytest.mark.parametrize("price", [".45", ".52", ".57", ".59", ".62", ".67", ".70", ".73", ".75", ".85"])
-def test_scalps_plus_six_contract_settlement_fit_ten(price):
+def test_scalps_plus_six_contract_settlement_fit_twenty_one(price):
     record = {}
-    # Even an obsolete caller cap of $20 cannot expand the configured cap.
-    while policy.reserve(record, "YES", D(price), D("100"), D(20), 720, "regular"):
+    # Even an obsolete caller cap of $25 cannot expand the configured cap.
+    while policy.reserve(record, "YES", D(price), D("100"), D(25), 720, "regular"):
         pass
     scalp_spend = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert 0 < scalp_spend <= 4
+    assert 0 < scalp_spend <= 15
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80")
                for i in record["entry_intents"])
-    final = policy.reserve(record, "YES", D(".97"), D(100), D(20), 900, policy.SETTLEMENT_KIND)
+    final = policy.reserve(record, "YES", D(".97"), D(100), D(25), 900, policy.SETTLEMENT_KIND)
     assert final["quantity"] == "6"
-    assert scalp_spend + D(final["reserved_dollars"]) <= 10
+    assert scalp_spend + D(final["reserved_dollars"]) <= 21
 
 
-def test_live_loop_respects_reduced_cap_without_recycling_sales(monkeypatch):
+def test_live_loop_funds_five_orders_then_respects_cap_without_recycling_sales(monkeypatch):
     e, record, state, clock, closed, events = exchange(monkeypatch, 301, ".67")
-    for _ in range(5):
+    for _ in range(6):
         bot.cycle(state)
         clock[0] += 8
-    assert [order[1] for order in e.entries] == [D(4), D(1)]
+    assert [order[1] for order in e.entries] == [D(4)] * 5 + [D(1)]
     bot.reconcile_entries(state)
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("3.50")
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("14.70")
     e.held = D(0)
     bot.cycle(state)
-    assert len(e.entries) == 2
+    assert len(e.entries) == 6
     clock[0] = closed.timestamp() - 120
     e.market("TEST")["yes_ask_dollars"] = ".972"
     bot.settlement_entry(record, state, "TEST", closed)
-    assert len(e.entries) == 3 and e.entries[-1][1] == 6
-    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("9.50")
+    assert len(e.entries) == 7 and e.entries[-1][1] == 6
+    assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("20.70")
 
 
 @pytest.mark.parametrize("filled,retained", [("0", "0"), ("1.25", "0.975"), ("3", "2.34")])
@@ -208,7 +208,7 @@ def test_skip_log_explains_quote_and_budget_blockers(monkeypatch):
     bot.funded_entry(record, state, "TEST", "YES", D(".70"), closed, "regular")
     skips = [json.loads(d["details"]) for event, d in events if event == "ENTRY_SKIP"]
     assert skips[-1]["reason"] == "ask_above_limit" and D(skips[-1]["ask"]) == D(".78")
-    record["entry_intents"] = [{"reserved_dollars": "14", "entry_closed": True}]
+    record["entry_intents"] = [{"reserved_dollars": "15", "entry_closed": True}]
     bot.funded_entry(record, state, "TEST", "YES", D(".70"), closed, "regular")
     skips = [json.loads(d["details"]) for event, d in events if event == "ENTRY_SKIP"]
     assert skips[-1]["reason"] == "market_allowance_unavailable"
