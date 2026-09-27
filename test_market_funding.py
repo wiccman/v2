@@ -7,7 +7,15 @@ import pytest
 import bot
 from balance_diagnostics import balance_report
 from kalshi import KalshiAPIError, KalshiClient
-from test_five_minute_exits import cycle_setup
+from test_five_minute_exits import cycle_setup as base_cycle_setup
+
+
+def cycle_setup(monkeypatch, elapsed):
+    result = base_cycle_setup(monkeypatch, elapsed)
+    fake = result[0]
+    market = {**fake.market('TEST'), 'yes_ask_dollars': '.45'}
+    monkeypatch.setattr(fake, 'market', lambda ticker: market)
+    return result
 
 
 @pytest.mark.parametrize('index', [0, 2, 3])
@@ -65,7 +73,7 @@ def test_five_contract_order_requires_shard_cash_including_fee_reserve(monkeypat
         assert fake.entries[0][1] == 5
     else:
         assert record['cash_retry_at'] == clock[0] + 30
-        assert events[-1][0] == 'ENTRY_WAIT_MARKET_CASH'
+        assert any(event == 'ENTRY_WAIT_MARKET_CASH' for event, _ in events)
 
 
 def test_low_cash_wait_survives_restart_then_recovers_without_losing_budget(monkeypatch):
@@ -104,7 +112,7 @@ def test_failed_cash_read_blocks_new_orders_without_touching_existing_reservatio
 def test_slow_cash_lookup_cannot_buy_after_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
     def slow(ticker):
-        clock[0] = 1000000300
+        clock[0] = 1000000360
         return {'exchange_index': 2, 'cash_dollars': '25'}
     monkeypatch.setattr(fake, 'market_cash', slow)
     bot.funded_entry(record, state, 'TEST', 'YES', D('.45'), closed, 'regular')
@@ -114,20 +122,20 @@ def test_slow_cash_lookup_cannot_buy_after_cutoff(monkeypatch):
 def test_cash_wait_does_not_consume_settlement_one_attempt(monkeypatch):
     from test_settlement_entry import setup
     fake, record, state, clock, closed = setup(monkeypatch)
-    cash = ['9.99']
+    cash = ['5.99']
     monkeypatch.setattr(fake, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': cash[0]})
     bot.settlement_entry(record, state, 'TEST', closed)
     assert not fake.entries and not record['entry_intents']
-    cash[0] = '10'
+    cash[0] = '6'
     clock[0] += 30
     bot.settlement_entry(record, state, 'TEST', closed)
-    assert len(fake.entries) == 1 and fake.entries[0][1] == 10
+    assert len(fake.entries) == 1 and fake.entries[0][1] == 6
 
 
 @pytest.mark.parametrize('status', ['executed', 'canceled', 'expired'])
 def test_already_terminal_order_does_not_send_cancel(monkeypatch, status):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 360)
-    monkeypatch.setattr(fake, 'order', lambda oid: {'order_id': oid, 'status': status})
+    monkeypatch.setattr(fake, 'order', lambda oid, ticker=None: {'order_id': oid, 'status': status})
     assert bot.cancel_confirmed('done', 'TEST')
     assert not fake.cancelled
 
@@ -135,7 +143,7 @@ def test_already_terminal_order_does_not_send_cancel(monkeypatch, status):
 def test_cancel_404_racing_with_fill_is_reconciled_without_false_error(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 360)
     statuses = iter(['resting', 'executed'])
-    monkeypatch.setattr(fake, 'order', lambda oid: {'order_id': oid, 'status': next(statuses)})
+    monkeypatch.setattr(fake, 'order', lambda oid, ticker=None: {'order_id': oid, 'status': next(statuses)})
     def not_found(*args):
         raise KalshiAPIError(404, 'not found')
     monkeypatch.setattr(fake, 'cancel', not_found)

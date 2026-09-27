@@ -41,10 +41,10 @@ def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed,
     assert len(fake.entries) == len(record['entry_intents']) == expected
     if expected:
         wire, quantity, price, kwargs = fake.entries[0]
-        assert quantity == 5 and kwargs['ioc'] is True
+        assert quantity == 3 and kwargs['ioc'] is True
         assert price == (D('.70') if side == 'YES' else D('.30'))
         assert D(record['entry_intents'][0]['exit_target']) == D('.76')
-        assert D(record['entry_intents'][0]['reserved_dollars']) == D('3.65')
+        assert D(record['entry_intents'][0]['reserved_dollars']) == D('2.19')
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
@@ -58,7 +58,7 @@ def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
     market[side.lower() + '_ask_dollars'] = price
     monkeypatch.setattr(fake, 'market', lambda ticker: market)
     result, quantity = bot.funded_entry(record, state, 'TEST', side, D(price), closed, kind)
-    assert result['order_id'] and quantity == 5 and len(fake.entries) == 1
+    assert result['order_id'] and quantity == (5 if price == '.52' else 4) and len(fake.entries) == 1
 
 
 def test_future_caller_timestamp_cannot_bypass_early_ceiling(monkeypatch):

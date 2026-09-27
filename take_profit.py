@@ -1,4 +1,4 @@
-from entry_policy import SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed
+from entry_policy import SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed, attempt_committed
 """Independent, durable exit monitor and authorized settlement-side transition.
 
 Kalshi V2 rejects resting reduce-only orders. The worker sends price-protected
@@ -251,7 +251,7 @@ class TakeProfitMonitor:
             raise ValueError("Invalid position quantity")
         switch = record.get("settlement_switch", {})
         switching = (switch.get("side") in {"YES", "NO"} and switch.get("allow_loss") is True
-                     and not any(item.get("kind") == SETTLEMENT_KIND for item in record.get("entry_intents", []))
+                     and not any(item.get("kind") == SETTLEMENT_KIND and attempt_committed(item) for item in record.get("entry_intents", []))
                      and float(close) - SETTLEMENT_WINDOW <= self.clock() < float(close))
         if switching:
             # Entry worker cancels/reconciles buys. Unknown ACKs remain a block

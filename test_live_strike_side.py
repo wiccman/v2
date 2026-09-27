@@ -46,7 +46,7 @@ def test_late_trade_requires_strike_side_higher_quoted_at_least_70(monkeypatch, 
     result, qty = bot.funded_entry(record, state, 'TEST', side, D('.70'), closed, 'regular')
     assert bool(result.get('order_id')) == allowed
     if allowed:
-        assert qty == 5 and D(record['entry_intents'][-1]['exit_target']) == D('.76')
+        assert qty == 3 and D(record['entry_intents'][-1]['exit_target']) == D('.76')
 
 
 @pytest.mark.parametrize('price,target', [('.70', '.76'), ('.73', '.79'), ('.85', '.91')])
