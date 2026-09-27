@@ -1449,7 +1449,7 @@ def main():
     print(f"SIX_MINUTE_ENTRY window=360s..{END}s; trigger_ask>=75c and <100c; limit=75c GTC until {END}s; target=83c at limit fill; quantity<=3; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/97c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
-    print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the $15 earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
+    print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
     print(f"POSITION_CAP maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
