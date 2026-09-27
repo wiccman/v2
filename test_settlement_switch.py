@@ -237,6 +237,27 @@ def test_exhausted_allowance_does_not_liquidate_for_unfundable_entry(tmp_path, m
     assert 'settlement_switch' not in record and not e.buys and not e.submissions
 
 
+@pytest.mark.parametrize('cash', ['1.8891', '5.99'])
+def test_insufficient_shard_cash_blocks_loss_close_before_switch(tmp_path, monkeypatch, cash):
+    e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
+    monkeypatch.setattr(e, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': cash})
+    bot.settlement_entry(record, state, 'T', closed)
+    assert 'settlement_switch' not in record
+    assert not e.buys and not e.submissions and e.held == -2
+
+
+def test_settlement_switch_bypasses_unfilled_take_profit_pause(tmp_path, monkeypatch):
+    e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
+    monitor.no_fill_pause = 3
+    monitor.run_once()  # Ordinary take-profit IOC does not fill.
+    monitor.run_once()  # Reconcile its zero-fill receipt and start the pause.
+    assert monitor.state['markets']['T']['next_attempt_at'] > clock[0]
+    bot.settlement_entry(record, state, 'T', closed)
+    monitor.run_once()
+    assert len(e.submissions) == 2 and e.submissions[-1]['reduce_only']
+    assert e.held == 0
+
+
 def test_new_opposite_inventory_invalidates_ready_receipt(tmp_path, monkeypatch):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
     bot.settlement_entry(record, state, 'T', closed)

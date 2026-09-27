@@ -44,6 +44,8 @@ OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
 OPENING_EXTRA_PAIR = parse_pairs("57:62")
 OPENING_EXTRA_WINDOW = 120
 OPENING_OPPOSITE_WINDOW = 120
+MIN_STRIKE_DISTANCE_DOLLARS = Decimal("50")
+DIRECTIONAL_ENTRY_POLICY = True
 LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
 LATE_ENTRY_PAIRS.update(parse_pairs("73:79,85:91"))
 LATE_ENTRY_PAIRS = {price: target for price, target in LATE_ENTRY_PAIRS.items()
@@ -81,7 +83,7 @@ MAX_AVERAGE_CONTRACTS = Decimal("3")
 MAX_AVERAGE_DOLLARS = Decimal("2.50")
 AVERAGE_DOWN_CUTOFF = 180
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
-ENTRY_START_DELAY = 0  # Early entries are eligible immediately at contract open.
+ENTRY_START_DELAY = 60  # Wait for the first minute of each market.
 START = ENTRY_START_DELAY
 END = 900 - SETTLEMENT_WINDOW  # Final three minutes belong to the settlement route.
 PREDICTION_MINUTES = (2, 4, 6)
@@ -201,12 +203,17 @@ def quotes(market, prediction):
     if prediction == "YES": return Decimal(market["yes_ask_dollars"]), Decimal(market["yes_bid_dollars"])
     return Decimal(market["no_ask_dollars"]), Decimal(market["no_bid_dollars"])
 
-def strike_side(market, spot):
+def strike_side(market, spot, minimum_distance=Decimal("0")):
     """Choose the live outcome from Bitcoin's price versus this market's strike."""
     strike, spot = Decimal(str(market["floor_strike"])), Decimal(str(spot))
     if not strike.is_finite() or strike <= 0 or not spot.is_finite() or spot <= 0:
         raise ValueError("Invalid live strike or BTC reference price")
-    return "YES" if spot > strike else "NO" if spot < strike else None
+    distance = Decimal(str(minimum_distance))
+    if not distance.is_finite() or distance < 0:
+        raise ValueError("Invalid strike distance")
+    if distance == 0:
+        return "YES" if spot > strike else "NO" if spot < strike else None
+    return "YES" if spot - strike >= distance else "NO" if strike - spot >= distance else None
 
 def position(ticker):
     for item in client.positions(ticker):
@@ -360,9 +367,10 @@ def uses_entry_bias(price, kind):
 
 
 def entry_side_source(closed, price=Decimal("0"), kind="regular"):
-    elapsed = time.time() - (closed.timestamp() - 900)
-    if uses_entry_bias(price, kind) and elapsed < LOW_PRICE_ENTRY_END:
-        return "opposite_strike" if 0 <= elapsed < OPENING_OPPOSITE_WINDOW else "boruto"
+    if not DIRECTIONAL_ENTRY_POLICY:
+        elapsed = time.time() - (closed.timestamp() - 900)
+        if uses_entry_bias(price, kind) and elapsed < LOW_PRICE_ENTRY_END:
+            return "opposite_strike" if 0 <= elapsed < OPENING_OPPOSITE_WINDOW else "boruto"
     return "live_strike"
 
 
@@ -370,7 +378,8 @@ def selected_entry_side(record, state, ticker, market, closed, source):
     if source == "boruto":
         bias = ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
         return bias, None, bias
-    live = strike_side(market, client.btc_reference_price())
+    live = strike_side(market, client.btc_reference_price(),
+                       MIN_STRIKE_DISTANCE_DOLLARS if DIRECTIONAL_ENTRY_POLICY else Decimal("0"))
     selected = {"YES": "NO", "NO": "YES"}.get(live) if source == "opposite_strike" else live
     return selected, live, None
 
@@ -422,7 +431,7 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None, si
         reason = ("boruto_bias_" + kind if allowed else
                   "bias_unavailable" if bias_side is None else "selected_side_opposes_bias")
     elif live_side is None:
-        reason = "btc_at_strike"
+        reason = "btc_within_50_dollars_of_strike"
     elif side != live_side:
         reason = "selected_side_opposes_live_strike"
     else:
@@ -857,12 +866,15 @@ def reconcile_entries(state, now_timestamp=None):
                 or now_timestamp >= i.get("cancel_at", record["entry_cancel_at"])
                 or record.get("entry_budget_legacy")
                 or (record.get("settlement_switch") and i.get("kind") != SETTLEMENT_KIND))}
-            # A resting scalp must not remain on the old side after BTC crosses
-            # the strike. Cancel on an unavailable direction check as well.
-            scalps = [i for i in pending if i.get("resting_entry") and i.get("kind") != SETTLEMENT_KIND]
+            # A resting buy cannot remain eligible after BTC leaves the
+            # qualifying side. This includes the 97c settlement limit in the
+            # directional policy; cancel on an unavailable quote as well.
+            scalps = [i for i in pending if i.get("resting_entry") and
+                      (DIRECTIONAL_ENTRY_POLICY or i.get("kind") != SETTLEMENT_KIND)]
             if scalps:
                 try:
-                    live = strike_side(client.market(ticker), client.btc_reference_price())
+                    live = strike_side(client.market(ticker), client.btc_reference_price(),
+                                       MIN_STRIKE_DISTANCE_DOLLARS if DIRECTIONAL_ENTRY_POLICY else Decimal("0"))
                 except Exception:
                     live = None
                 ids.update(i["order_id"] for i in scalps if i.get("order_id") and i.get("side") != live)
@@ -1154,7 +1166,8 @@ def settlement_entry(record, state, ticker, closed):
         return  # Persisted intent prevents repeats after partial fills or lost ACKs.
     market = client.market(ticker)
     spot = client.btc_reference_price()
-    side = strike_side(market, spot)
+    side = strike_side(market, spot,
+                       MIN_STRIKE_DISTANCE_DOLLARS if DIRECTIONAL_ENTRY_POLICY else Decimal("0"))
     asks = {outcome: quotes(market, outcome)[0] for outcome in ("YES", "NO")}
     observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]),
                     btc_reference=str(spot), strike=str(market["floor_strike"]))
@@ -1162,7 +1175,7 @@ def settlement_entry(record, state, ticker, closed):
         report("window_closed_during_quote_read")
         return
     if side is None:
-        report("btc_at_strike")
+        report("btc_within_50_dollars_of_strike")
         return
     locked_side = record.get("trade_side")
     if locked_side not in ("YES", "NO"):
@@ -1184,6 +1197,22 @@ def settlement_entry(record, state, ticker, closed):
             if record.get("entry_budget_legacy") or Decimal(observed["market_reserved_dollars"]) + required > MARKET_BUDGET:
                 report("switch_entry_budget_unavailable")
                 return
+            if opposite:
+                # The loss close may yield almost nothing. Check the market's
+                # actual shard before selling inventory to fund a 97c entry.
+                # Do not count prospective sale proceeds: the bid can move or
+                # the close can partially fill before the replacement order.
+                try:
+                    available = Decimal(client.market_cash(ticker)["cash_dollars"])
+                    if not available.is_finite() or available < 0:
+                        raise ValueError("Invalid switch cash")
+                except Exception as error:
+                    report("switch_cash_unavailable", error_type=type(error).__name__)
+                    return
+                if available < required:
+                    report("switch_cash_insufficient", available_dollars=str(available),
+                           required_dollars=str(required))
+                    return
             switch = {"side": side, "previous_side": locked_side, "phase": "requested",
                       "requested_at": time.time(), "allow_loss": True}
             record["settlement_switch"] = switch
@@ -1288,7 +1317,7 @@ def cycle(state):
     reconcile_entries(state)
     reconcile_sale_allowance(state, ticker, record)
     if time.time() < started.timestamp() + ENTRY_START_DELAY:
-        write_log("ENTRY_START_WAIT", ticker, details="Early buys are eligible at contract open")
+        write_log("ENTRY_START_WAIT", ticker, details="Buys begin one minute after market open")
         return  # Preserve all entry opportunities while reconciliation continues.
     if closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
         settlement_entry(record, state, ticker, closed)
@@ -1410,13 +1439,13 @@ def main():
     global EXIT_MONITOR
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
-    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; 0s..120s=opposite_live_strike; 120s..360s={SIGNAL_BUILD}; from360s=live_BTC_vs_market_strike", flush=True)
-    print("ENTRY_START_GATE: early buys eligible at contract open; opening entries run0s..120s; exit monitoring continues", flush=True)
+    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entries use live BTC at least $50 beyond strike: above=YES, below=NO", flush=True)
+    print("ENTRY_START_GATE: buys eligible from60s; opening entries run60s..120s; exit monitoring continues", flush=True)
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=720s..900s; live strike side; trigger_ask>=97c and <100c; limit=97c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
-    print("OPENING_57_ENTRY window=0s..120s; exact_ask=57c; limit=57c IOC; target=62c at limit fill; quantity<=4; independent opening attempt", flush=True)
+    print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
     print(f"SIX_MINUTE_ENTRY window=360s..{END}s; trigger_ask>=75c and <100c; limit=75c GTC until {END}s; target=83c at limit fill; quantity<=3; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/97c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
@@ -1430,7 +1459,7 @@ def main():
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
-        print("CONFIG_IGNORED: fixed windows: early buys from contract open; under60c from0m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from0m to2m; settlement from12m; 35c retired", flush=True)
+        print("CONFIG_IGNORED: fixed windows: early buys from1m; under60c from1m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from1m to2m; settlement from12m; 35c retired", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:
@@ -1461,9 +1490,9 @@ def main():
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")), fill_cost_targets=True,
-            per_order_profit=os.getenv("PER_ORDER_PROFIT_DOLLARS", "0.75"))
+            per_order_percentage=Decimal("0.05"), no_fill_pause=3.0, quote_gate=True)
         EXIT_MONITOR.start()
-        print(f"TP_MONITOR_STARTED per_order_gross_profit=${EXIT_MONITOR.per_order_profit}; targets use actual fill cost and remaining quantity, rounded up to cents; saved pair target applies if dollar goal is unattainable; independent reduce-only IOC exits", flush=True)
+        print("TP_MONITOR_STARTED target_return=5% per buy order with 3c fee cushion on each leg, based on actual fill and rounded up to cents; saved pair target applies if above 99c; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
         diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
             coordinator=REQUEST_COORDINATOR, role="diagnostics")

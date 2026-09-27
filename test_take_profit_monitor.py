@@ -84,6 +84,48 @@ def test_arms_and_submits_at_45_immediately_on_detected_fill_below_target(tmp_pa
     assert saved["pending"]["client_id"] == body["client_order_id"]
 
 
+def test_unfilled_ioc_pauses_repeated_requests_but_retries_after_deadline(tmp_path):
+    exchange = Exchange(quantity="2", bid="0.20")
+    svc, _, clock, _ = monitor(tmp_path, exchange)
+    svc.no_fill_pause = 3
+    svc.run_once()
+    assert len(exchange.submissions) == 1
+    svc.run_once()  # Reconcile the terminal zero-fill order without reposting.
+    assert len(exchange.submissions) == 1
+    saved = json.loads(svc.path.read_text())["markets"]["T"]
+    assert saved["next_attempt_at"] == 1003
+    clock[0] = 1002.9
+    svc.run_once()
+    assert len(exchange.submissions) == 1
+    clock[0] = 1003
+    exchange.bid = D("0.45")
+    svc.run_once()
+    assert len(exchange.submissions) == 2
+    svc.run_once()
+    assert exchange.held == 0
+
+
+@pytest.mark.parametrize('quantity,side', [('2', 'yes'), ('-2', 'no')])
+def test_quote_gate_avoids_futile_iocs_and_exits_when_bid_reaches_target(tmp_path, quantity, side):
+    exchange = Exchange(quantity=quantity, bid="0.20")
+    quote_reads = []
+    def quote(ticker):
+        quote_reads.append(ticker)
+        return {'yes_bid_dollars': str(exchange.bid), 'no_bid_dollars': str(exchange.bid)}
+    exchange.market = quote
+    svc, _, _, _ = monitor(tmp_path, exchange)
+    svc.quote_gate = True
+    for _ in range(3):
+        svc.run_once()
+    assert quote_reads == ['T'] * 3 and exchange.submissions == []
+    exchange.bid = D('0.45')
+    svc.run_once()
+    assert len(exchange.submissions) == 1
+    assert exchange.submissions[0]['side'] == ('ask' if side == 'yes' else 'bid')
+    svc.run_once()
+    assert exchange.held == 0
+
+
 def test_no_exit_for_unfilled_entry_then_partial_fill_gets_exact_coverage(tmp_path):
     exchange = Exchange(quantity="0")
     svc, _, _, _ = monitor(tmp_path, exchange)

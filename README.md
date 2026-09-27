@@ -1,40 +1,17 @@
-# Strike Ruler — Opposite-Strike Opening Scalp
+# Strike Ruler — Directional BTC Scalp
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
 ## Signals and timing
 
-**Opening direction, 0:00–2:00:** buy the opposite side of the current BTC
-reference versus the contract's fixed strike: above → NO; below → YES.
-At equality or with an invalid/unavailable reference, wait and retry. Recheck
-before every submission. This applies to all opening buy routes, including
-regular tiers and optional triggers, independently of saved bias or lookbacks.
-An attempt that starts before 2:00 cannot submit after that boundary.
-
-**Early direction, 2:00–6:00:** use `2.1.1 Boruto Scalp No Skip` to select
-YES or NO. Read four finalized Kalshi benchmarks at T−60, T−45, T−30 and
-T−15 against the current contract's fixed strike. The newest point votes in
-its own direction (above → YES); T−45 and T−60 vote inversely (below → YES).
-T−30 is recorded but does not vote. Two agreeing votes choose the side; without
-a majority, use the first nonzero vote in newest/T−45/T−60 order, with YES only
-when all three are equal. Confidence, previous-bias conflicts, the research
-YES-only filter and the $32.85 distance filter do not block these scalp signals.
-
-Save the bias and its inputs as `entry_bias` before placing a Boruto-selected order.
-Reuse that market's saved bias across polls and restarts; preserve older `signal`
-records for audit. From 2:00 to 6:00, every under-70¢ buy route checks the same bias,
-including regular, optional limit-batch, historical and spot triggers. Live BTC
-crossing the strike cannot change direction in that window. Missing or invalid finalized
-lookbacks block Boruto entries until the data is available; they cannot become
-an invented signal. Entry logs include the selected side and its source.
-
-**From 6:00 onward:** select YES above the live strike and NO below; wait at
-equality or when the live reference is unavailable. Recheck before submitting.
-These trades do not require the early bias or its lookbacks. High-price scalp
-entries still require the higher ask, at least 70¢. The 75¢→83¢ rule starts at
-minute 6; 70¢→76¢ starts at minute 8; 73¢→79¢ and 85¢→91¢ start at minute 11.
-The final 97¢ limit continues to follow the live strike side.
+**Direction after minute 1:** BTC at least $50 above the fixed strike permits
+YES; at least $50 below permits NO. Inside that band, all new entry routes wait.
+The exchange reference is rechecked immediately before each buy submission.
+No opening opposite-strike trade or early Boruto bias selects a live buy side.
+Resting 75¢ and 97¢ limits are canceled if BTC leaves the qualifying direction.
+An unavailable reference also prevents new orders. The 97¢ settlement route
+uses the same distance rule; exits continue regardless of the entry gate.
 
 Opposite inventory or unresolved opposing buys still block a new scalp until
 they clear; only the final 97¢ route can deliberately close the opposite side
@@ -46,17 +23,16 @@ New entries follow fixed price-based windows within each 15-minute market:
 
 | Entry | Window (start inclusive, end exclusive) |
 | --- | --- |
-| 52¢→60¢ opening entry | 0:00–2:00 |
-| New 57¢→62¢ opening entry | 0:00–2:00 |
-| 45–59¢ regular tiers | 0:00–6:00 |
+| 52¢ opening entry | 1:00–2:00 |
+| 57¢ opening entry | 1:00–2:00 |
+| 45–59¢ regular tiers | 1:00–6:00 |
 | 60–69¢ regular tiers (currently 62¢/64¢/67¢) | 5:00–6:00 |
 | New 75¢→83¢ tier | 6:00–12:00 |
 | 70¢→76¢ tier | 8:00–12:00 |
 | 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
 | 97¢ settlement limit | 12:00–15:00 |
 
-Eligible early buys can start **immediately at contract open**. There is no
-one-minute waiting period. The opening, regular, optional limit-batch, historical
+Eligible early buys start **one minute after contract open**. The opening, regular, optional limit-batch, historical
 and spot routes still enforce their own prices, side rules, funds and deadlines.
 Buy limits of 60¢ or more still wait until minute 5; the 75¢, other 70¢+ and
 settlement routes retain their later windows. The shared gateway blocks buys
@@ -81,10 +57,9 @@ continues until market close.
 
 ## Entries, exits and budgets
 
-All routes use these default outcome-price pairs, configurable through
-`ENTRY_EXIT_PAIRS_CENTS`. Each pair defines an entry limit and a **gross profit
-increment** (second price minus first). The exit column below assumes a fill
-at the entry limit; cheaper fills now produce lower exit targets.
+All routes use these default entry limits, configurable through
+`ENTRY_EXIT_PAIRS_CENTS`. The paired exit column is retained for legacy lots
+and as a fallback when the active 5% target would exceed 99¢.
 
 | Entry limit | Exit if filled at the limit |
 | --- | --- |
@@ -102,8 +77,8 @@ at the entry limit; cheaper fills now produce lower exit targets.
 | 73¢ (from minute 11) | 79¢ |
 | 85¢ (from minute 11) | 91¢ |
 
-From contract open until 2:00, the bot may submit an opposite-strike 52¢ limit
-with a 60¢ target and an independent 57¢ limit with a 62¢ target. Each route
+From minute 1 until 2:00, the bot may submit a directional 52¢ limit
+and an independent 57¢ limit. Each route
 uses the shared allowance and at most $2.80 per order, including entry fee room.
 Opening orders are IOC; an unfilled quantity is canceled immediately, and no
 new opening submission may occur at or after 2:00. Each attempt rechecks direction
@@ -164,16 +139,17 @@ ambiguous fill accounting pauses new entries until reconciliation succeeds.
 
 ### Take profit follows actual fills
 
-The live worker groups remaining shares by their saved profit increment, then
-sets the target to their quantity-weighted **actual fill cost plus that increment**.
-It rounds up to a whole cent, so a 57.3¢ average with a 5¢ increment targets 63¢.
-A 57¢ fill still targets 62¢; a 75¢ fill targets 83¢; a minute-8 70¢ fill targets
-76¢. Entry and exit fees are excluded from this gross price increment.
+The live worker targets a **5% return with a 3¢ per-contract fee cushion on
+each leg** over each buy order's verified average fill cost, rounded up to the
+next cent. A 55¢ fill targets 64¢ whether that order filled one or four
+contracts. This is a conservative estimate, not an exact net guarantee because
+market fee schedules and fill fees can differ. The saved paired target is
+used if the percentage target would exceed 99¢. Legacy exit accounting still
+reconciles already submitted orders before changing any remaining inventory.
 
-Each consistent fill/position snapshot recalculates both target and full remaining
-quantity. For example, five shares at 57¢ plus five at 47¢, both using the 5¢
-rule, produce ten shares averaging 52¢ and a 57¢ target. Different increments
-retain separate averages. The settlement position remains held to settlement.
+Each consistent fill/position snapshot recalculates the remaining quantity for
+each buy order. Different buy orders keep separate 5% targets. The settlement
+position remains held to settlement.
 
 Before submitting an exit, the worker saves the exact entry fill IDs and quantities
 it covers. Partial exits consume those allocations FIFO; sold shares are removed
@@ -182,11 +158,11 @@ must reconcile before another exit can use that inventory. This survives partial
 fills, lost acknowledgements and restarts without selling a share twice.
 
 On upgrade, existing recorded exit orders replay against their original fixed
-targets. Remaining verified scalp inventory then adopts fill-based pricing using
-its saved pair's profit increment, including older entry intents. Missing,
+targets. Remaining verified scalp inventory then adopts the 5% fill-based target.
+Missing,
 inconsistent or over-limit fill prices pause the worker instead of substituting
 a quote, buy limit or displayed account average. `TP_ARMED` logs include the
-average fill cost, profit increment, quantity and rounded target.
+average fill cost, target percentage, quantity and rounded target.
 
 Price inputs follow Kalshi's [fill payload](https://docs.kalshi.com/api-reference/portfolio/get-fills).
 Whole-cent rounding uses prices valid across the documented
@@ -211,7 +187,7 @@ Important defaults:
 | `MARKET_BUDGET_DOLLARS` | Ignored | Market allowance is fixed at $21 including entry fee reserves |
 | `MAX_PURCHASES_PER_MARKET` | `7` | Maximum committed regular orders; proven zero-fill attempts excluded |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
-| `ENTRY_START_MINUTE` | `0` (fixed) | Early buys are eligible at contract open |
+| `ENTRY_START_MINUTE` | `1` (fixed) | Early buys are eligible after 60 seconds |
 | `ENTRY_END_MINUTE` | Ignored | Fixed price-based windows listed above |
 | `POLL_SECONDS` | `5` | Entry-loop delay |
 | `EXIT_POLL_SECONDS` | `1` | Independent exit-loop delay |
