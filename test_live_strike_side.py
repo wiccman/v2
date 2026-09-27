@@ -11,19 +11,22 @@ from test_price_pairs import PairExchange
 
 @pytest.mark.parametrize('spot,side', [('100010', 'YES'), ('99990', 'NO')])
 def test_live_strike_overrides_stale_signal_on_both_sides(monkeypatch, spot, side):
-    fake, record, state, clock, closed = cycle_setup(monkeypatch, 190)
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 480)
+    monkeypatch.setattr(bot, 'END', 720)
+    monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     fake.held = D('0')
     record['signal'] = {'build': 'old', 'prediction': 'NO' if side == 'YES' else 'YES'}
     record['trade_side'] = 'NO' if side == 'YES' else 'YES'
     monkeypatch.setattr(fake, 'btc_reference_price', lambda: D(spot))
     market = dict(fake.market('TEST'))
-    market[side.lower() + '_ask_dollars'] = '.45'
+    market[side.lower() + '_ask_dollars'] = '.70'
+    market[('no' if side == 'YES' else 'yes') + '_ask_dollars'] = '.30'
     monkeypatch.setattr(fake, 'market', lambda ticker: market)
-    result, qty = bot.funded_entry(record, state, 'TEST', side, D('.45'), closed, 'regular')
-    assert result['order_id'] and qty == 5
+    result, qty = bot.funded_entry(record, state, 'TEST', side, D('.70'), closed, 'regular')
+    assert result['order_id'] and qty == 3
     assert record['entry_intents'][-1]['side'] == side
     opposite = 'NO' if side == 'YES' else 'YES'
-    assert bot.funded_entry(record, state, 'TEST', opposite, D('.45'), closed, 'regular') == ({}, D(0))
+    assert bot.funded_entry(record, state, 'TEST', opposite, D('.70'), closed, 'regular') == ({}, D(0))
 
 
 @pytest.mark.parametrize('yes,no,spot,allowed', [

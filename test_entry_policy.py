@@ -189,7 +189,7 @@ def test_twenty_dollar_allowance_is_shared_and_survives_restart():
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
 
 
-def test_entry_gateway_enforces_live_strike_and_logs_reason(monkeypatch):
+def test_entry_gateway_enforces_bias_and_logs_reason(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     record["signal"] = {"prediction": "YES", "base_confidence": "HIGH"}
     record["previous_bias"] = "YES"
@@ -199,8 +199,9 @@ def test_entry_gateway_enforces_live_strike_and_logs_reason(monkeypatch):
     assert result == {} and quantity == 0
     decision = json.loads(next(values["details"] for event, values in events if event == "ENTRY_DECISION"))
     assert decision == {
-        "selected_side": "NO", "live_strike_side": "YES", "entry_price": "0.45",
-        "entry_reason": "selected_side_opposes_live_strike", "decision": "SKIP",
+        "selected_side": "NO", "live_strike_side": None, "bias_side": "YES",
+        "side_source": "boruto", "entry_price": "0.45",
+        "entry_reason": "selected_side_opposes_bias", "decision": "SKIP",
     }
     assert not fake.entries
 
@@ -210,6 +211,7 @@ def test_entry_gateway_buys_current_bias_despite_previous_conflict(monkeypatch, 
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     record["signal"] = {"prediction": current, "base_confidence": "MODERATE"}
     record["previous_bias"] = previous
+    fake.bias_side = current
     fake.held = D(0)
     fake.market("TEST")[current.lower() + "_ask_dollars"] = ".45"
     monkeypatch.setattr(fake, "btc_reference_price", lambda: D("100010" if current == "YES" else "99990"))

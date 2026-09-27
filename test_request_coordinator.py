@@ -216,6 +216,7 @@ def test_adjacent_tier_checks_reuse_quote_but_cash_remains_fresh(monkeypatch):
         assert url.endswith('/portfolio/balance') and kwargs['params'] == {'exchange_index': 2}
         return response(payload={'balance_dollars': '100'})
     monkeypatch.setattr(kalshi.requests, 'request', transport)
+    monkeypatch.setattr(clients['entry'], 'markets', fake.markets)
     monkeypatch.setattr(bot, 'client', clients['entry'])
     list(bot.paired_entries(record, state, 'TEST', 'YES', closed, 'regular'))
     assert sum('/markets/' in url for url in calls) == 1
@@ -225,7 +226,7 @@ def test_adjacent_tier_checks_reuse_quote_but_cash_remains_fresh(monkeypatch):
 
 @pytest.mark.parametrize('outcome', ['deferred', 'timeout', '429'])
 def test_only_proven_local_no_send_releases_new_entry_reservation(monkeypatch, outcome):
-    _, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     accepted = {'order_id': 'prior', 'entry_closed': True, 'price': '.45',
                 'reserved_dollars': '2.40', 'side': 'YES'}
     record['entry_intents'].append(dict(accepted))
@@ -246,6 +247,7 @@ def test_only_proven_local_no_send_releases_new_entry_reservation(monkeypatch, o
         if outcome == 'deferred' and len(record['entry_intents']) > 1:
             gate.limited()
     monkeypatch.setattr(kalshi.requests, 'request', transport)
+    monkeypatch.setattr(clients['entry'], 'markets', fake.markets)
     monkeypatch.setattr(bot, 'client', clients['entry'])
     monkeypatch.setattr(bot, 'save_state', saved)
     if outcome == 'deferred':
@@ -264,8 +266,9 @@ def test_only_proven_local_no_send_releases_new_entry_reservation(monkeypatch, o
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
 def test_slow_funding_refreshes_quote_and_blocks_buy_after_drop(monkeypatch, side):
-    _, record, state, clock, closed = cycle_setup(monkeypatch, 120)
+    fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     record['signal']['prediction'] = side
+    fake.bias_side = side
     _, clients = workers(monkeypatch, clock)
     monkeypatch.setattr(clients['entry'], 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
     monkeypatch.setattr(clients['entry'], 'positions', lambda ticker: [])
@@ -281,6 +284,7 @@ def test_slow_funding_refreshes_quote_and_blocks_buy_after_drop(monkeypatch, sid
         clock[0] += .6
         return response(payload={'balance_dollars': '100'})
     monkeypatch.setattr(kalshi.requests, 'request', transport)
+    monkeypatch.setattr(clients['entry'], 'markets', fake.markets)
     monkeypatch.setattr(bot, 'client', clients['entry'])
     assert bot.funded_entry(record, state, 'TEST', side, D('.45'), closed, 'regular') == ({}, 0)
     assert len(quote_reads) == 2 and not record['entry_intents']

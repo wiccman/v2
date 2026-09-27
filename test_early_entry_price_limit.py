@@ -29,6 +29,7 @@ def test_every_route_blocks_70_or_higher_before_eight_minutes(monkeypatch, side,
 def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed, expected):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     fake.held = D('0')
+    fake.bias_side = side
     monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
     monkeypatch.setattr(bot, 'END', 720)
     monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
@@ -52,6 +53,7 @@ def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed,
 def test_lower_tiers_remain_available_early(monkeypatch, side, price, kind):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     fake.held = D('0')
+    fake.bias_side = side
     monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010') if side == 'YES' else D('99990'))
     record['signal']['prediction'] = side
     market = dict(fake.market('TEST'))

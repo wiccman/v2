@@ -59,6 +59,8 @@ def test_dual_limit_buys_post_remaining_level_with_six_minute_expiry(monkeypatch
     monkeypatch.setattr(bot, "save_state", lambda state: None)
     record = {"dual_limit_orders": [], "signal": {"prediction": "YES"}, "previous_bias": "YES"}
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
+    record["entry_bias"] = dict(build=bot.SIGNAL_BUILD, ticker="MARKET", prediction="YES",
+                                open_time=datetime.fromtimestamp(1100, tz=timezone.utc).isoformat(), strike="100000")
 
     assert bot.place_dual_limit_buys(record, "MARKET", closed, now_timestamp=1200, state={"markets": {"MARKET": record}}) is True
     assert [entry[1] for entry in fake.entries] == ["YES"] * 6
@@ -110,6 +112,8 @@ def test_historical_strike_touch_posts_remaining_pair_with_six_minute_expiry(mon
         "previous_bias": "NO",
     }
     closed = datetime.fromtimestamp(2000, tz=timezone.utc)
+    record["entry_bias"] = dict(build=bot.SIGNAL_BUILD, ticker="MARKET", prediction="NO",
+                                open_time=datetime.fromtimestamp(1100, tz=timezone.utc).isoformat(), strike="100000")
 
     assert bot.place_historical_strike_entries(
         record, "MARKET", Decimal("99980"), closed, now_timestamp=1200, state={"markets": {"MARKET": record}},

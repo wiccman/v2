@@ -113,7 +113,7 @@ def test_closed_window_cannot_get_a_fresh_lock():
     with pytest.raises(RuntimeError,match='open 15-minute'):build_signal(target,history,T+timedelta(minutes=15))
 
 
-def test_legacy_saved_signal_does_not_veto_live_strike_entries(monkeypatch):
+def test_legacy_saved_signal_does_not_veto_new_bias(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
     record['signal'].pop('build')
     before=dict(record['signal'])
@@ -121,20 +121,21 @@ def test_legacy_saved_signal_does_not_veto_live_strike_entries(monkeypatch):
     assert fake.entries and record['signal']==before
 
 
-def test_saved_skip_does_not_veto_live_strike_entries(monkeypatch):
+def test_saved_skip_does_not_veto_new_bias(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
     record['signal'].update(prediction='SKIP',reason='previous_current_bias_conflict')
     bot.cycle(state)
     assert fake.entries and all(i['side'] == 'YES' for i in record['entry_intents'])
 
 
-def test_missing_old_lookbacks_do_not_block_live_strike_entries(monkeypatch):
+def test_missing_lookbacks_block_early_bias_entries(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,60)
     record['signal']=None
     monkeypatch.setattr(fake,'markets',lambda **kw: [],raising=False)
     monkeypatch.setattr(bot,'build_signal',lambda *args: (_ for _ in ()).throw(RuntimeError('DATA UNAVAILABLE')))
     bot.cycle(state)
-    assert record['signal'] is None and fake.entries
+    assert record['signal'] is None and not fake.entries
+    assert 'entry_bias' not in record
 
 
 @pytest.mark.parametrize('offset',[0,5])
@@ -150,7 +151,11 @@ def test_low_confidence_tie_reaches_regular_order_gateway(monkeypatch):
     from decimal import Decimal as D
     from test_five_minute_exits import cycle_setup
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
-    record['signal']['base_confidence'] = 'LOW'
+    history = fake.markets()
+    for row in history:
+        row['expiration_value'] = '100000'
+    monkeypatch.setattr(fake, 'markets', lambda **kw: history)
     bot.cycle(state)
+    assert record['entry_bias']['base_confidence'] == 'LOW'
     assert any(i['kind'] == 'regular' for i in record['entry_intents'])
     assert bot.entry_price_allowed('LOW', D('0.45'))

@@ -23,6 +23,7 @@ def setup(monkeypatch, elapsed, price, side='YES'):
     monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     monkeypatch.setattr(bot, 'DUAL_LIMIT_BUYS_ENABLED', False)
     monkeypatch.setattr(bot, 'HISTORICAL_STRIKE_ENABLED', False)
+    fake.bias_side = side
     monkeypatch.setattr(fake, 'btc_reference_price', lambda: D('100010' if side == 'YES' else '99990'))
     market = dict(fake.market('TEST'))
     market[side.lower() + '_ask_dollars'] = price

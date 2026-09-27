@@ -217,12 +217,6 @@ def test_opening_bias_posts_one_side_at_52_and_cancels_at_two_minutes(monkeypatc
 def test_new_entry_does_not_fetch_previous_bias(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     record['signal'] = None
-    from test_boruto import fixture, T
-    from boruto import build_signal
-    target, history = fixture()
-    history = [x for x in history if x['ticker'] not in ('PAST-0', 'PAST-5')]
-    monkeypatch.setattr(fake, 'markets', lambda **kw: history, raising=False)
-    monkeypatch.setattr(bot, 'build_signal', lambda *args: build_signal(target, history, T))
     def unavailable(*args):
         raise AssertionError('Previous bias must not be required')
     monkeypatch.setattr(bot, 'previous_market_bias', unavailable)
