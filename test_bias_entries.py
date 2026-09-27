@@ -71,12 +71,12 @@ def test_bad_history_blocks_early_entries_but_can_retry(monkeypatch, fault):
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
-@pytest.mark.parametrize("elapsed,price", [(360, ".75"), (480, ".70"), (660, ".85"), (720, ".97")])
+@pytest.mark.parametrize("elapsed,price", [(360, ".75"), (480, ".70"), (660, ".85"), (720, ".96")])
 def test_late_routes_ignore_conflicting_bias_and_missing_lookbacks(monkeypatch, side, elapsed, price):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, price, side)
     record["entry_bias"] = {"prediction": "NO" if side == "YES" else "YES"}
     monkeypatch.setattr(fake, "markets", lambda **kw: pytest.fail("Late route must not fetch lookbacks"))
-    kind = bot.SETTLEMENT_KIND if price == ".97" else "regular" if price != ".85" else "late_bias"
+    kind = bot.SETTLEMENT_KIND if price == ".96" else "regular" if price != ".85" else "late_bias"
     result, _ = bot.funded_entry(record, state, "TEST", side, D(price), closed, kind,
                                  cancel_at=closed.timestamp())
     assert result["order_id"]
