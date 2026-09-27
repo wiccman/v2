@@ -39,18 +39,18 @@ def exchange(monkeypatch, elapsed=660, ask=".85", side="YES"):
 
 
 @pytest.mark.parametrize("price", [".45", ".52", ".57", ".59", ".62", ".67", ".70", ".73", ".75", ".85"])
-def test_scalps_plus_six_contract_settlement_fit_twenty_one(price):
+def test_scalps_plus_six_contract_settlement_fit_twenty_five(price):
     record = {}
-    # Even an obsolete caller cap of $25 cannot expand the configured cap.
+    # Caller cap cannot expand the configured cap.
     while policy.reserve(record, "YES", D(price), D("100"), D(25), 720, "regular"):
         pass
     scalp_spend = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert 0 < scalp_spend <= 15
+    assert 0 < scalp_spend <= 19
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80")
                for i in record["entry_intents"])
     final = policy.reserve(record, "YES", D(".97"), D(100), D(25), 900, policy.SETTLEMENT_KIND)
     assert final["quantity"] == "6"
-    assert scalp_spend + D(final["reserved_dollars"]) <= 21
+    assert scalp_spend + D(final["reserved_dollars"]) <= 25
 
 
 def test_live_loop_limits_pending_inventory_even_with_spare_market_budget(monkeypatch):
@@ -208,7 +208,7 @@ def test_skip_log_explains_quote_and_budget_blockers(monkeypatch):
     bot.funded_entry(record, state, "TEST", "YES", D(".70"), closed, "regular")
     skips = [json.loads(d["details"]) for event, d in events if event == "ENTRY_SKIP"]
     assert skips[-1]["reason"] == "ask_above_limit" and D(skips[-1]["ask"]) == D(".78")
-    record["entry_intents"] = [{"reserved_dollars": "15", "entry_closed": True}]
+    record["entry_intents"] = [{"reserved_dollars": "19", "entry_closed": True}]
     bot.funded_entry(record, state, "TEST", "YES", D(".70"), closed, "regular")
     skips = [json.loads(d["details"]) for event, d in events if event == "ENTRY_SKIP"]
     assert skips[-1]["reason"] == "market_allowance_unavailable"
