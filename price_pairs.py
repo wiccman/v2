@@ -1,5 +1,6 @@
 """Entry limits and their durable take-profit targets (outcome cents)."""
 from decimal import Decimal as D, ROUND_CEILING
+from entry_policy import FEE_RESERVE
 
 
 def parse_pairs(value="39:46"):
@@ -239,10 +240,10 @@ def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profi
 
 
 def order_percentage_inventory(fills, entry_orders, exit_orders, held, ticker, untracked, percentage):
-    """Target a percentage increase over each buy order's actual average fill price.
+    """Target a percentage return over fill cost with conservative fee room.
 
-    This is a gross price move; exchange fees are not included. Settlement
-    inventory stays held, and prices above 99c use the saved paired exit.
+    The existing 3c per-contract fee reserve is applied to each leg. It is a
+    cushion rather than a live fee quote. Settlement inventory stays held.
     """
     percentage = D(percentage)
     if not percentage.is_finite() or percentage <= 0:
@@ -258,7 +259,8 @@ def order_percentage_inventory(fills, entry_orders, exit_orders, held, ticker, u
         quantity = sum((lot["quantity"] for lot in members), D(0))
         cost = sum((lot["quantity"] * _outcome_cost(lot["fill"], sign)
                     for lot in members), D(0)) / quantity
-        target = (cost * (D(1) + percentage)).quantize(D("0.01"), rounding=ROUND_CEILING)
+        target = ((cost + FEE_RESERVE) * (D(1) + percentage) + FEE_RESERVE).quantize(
+            D("0.01"), rounding=ROUND_CEILING)
         if target > D("0.99"):
             target = max(lot["target"] for lot in members)
         buckets[target] = buckets.get(target, D(0)) + sign * quantity
@@ -266,5 +268,6 @@ def order_percentage_inventory(fills, entry_orders, exit_orders, held, ticker, u
         plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
                                    for lot in members)
         plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
-                                    "quantity": str(quantity), "gross_price_increase": str(percentage)})
+                                    "quantity": str(quantity), "target_return": str(percentage),
+                                    "fee_reserve_per_leg": str(FEE_RESERVE)})
     return dict(sorted(buckets.items())), plans

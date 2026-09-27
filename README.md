@@ -139,10 +139,11 @@ ambiguous fill accounting pauses new entries until reconciliation succeeds.
 
 ### Take profit follows actual fills
 
-The live worker targets a **5% gross price increase** over each buy order's
-verified average fill cost, rounded up to the next cent. A 55¢ fill targets
-58¢ whether that order filled one or four contracts. Fees are excluded, so a
-5% price move may not be a positive net return. The saved paired target is
+The live worker targets a **5% return with a 3¢ per-contract fee cushion on
+each leg** over each buy order's verified average fill cost, rounded up to the
+next cent. A 55¢ fill targets 64¢ whether that order filled one or four
+contracts. This is a conservative estimate, not an exact net guarantee because
+market fee schedules and fill fees can differ. The saved paired target is
 used if the percentage target would exceed 99¢. Legacy exit accounting still
 reconciles already submitted orders before changing any remaining inventory.
 
