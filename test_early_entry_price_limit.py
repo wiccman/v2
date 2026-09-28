@@ -25,8 +25,8 @@ def test_every_route_blocks_70_or_higher_before_eight_minutes(monkeypatch, side,
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('elapsed,expected', [(0, 0), (180, 0), (479.999, 0), (480, 1), (481, 1), (720, 0)])
-def test_70_cent_tier_opens_at_exactly_eight_minutes(monkeypatch, side, elapsed, expected):
+@pytest.mark.parametrize('elapsed,expected', [(0, 0), (180, 0), (479.999, 0), (480, 0), (481, 0), (720, 0)])
+def test_70_cent_tier_stays_blocked_at_eight_minutes(monkeypatch, side, elapsed, expected):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     fake.held = D('0')
     fake.bias_side = side
@@ -82,9 +82,9 @@ def test_under_70_cent_entries_end_at_six_minutes(monkeypatch, elapsed, expected
         assert fake.entries[0][3]['expiration_time'] == closed.timestamp() - 540
 
 
-@pytest.mark.parametrize('elapsed,expected', [(479.999, 0), (480, 1), (660, 1)])
+@pytest.mark.parametrize('elapsed,expected', [(479.999, 0), (480, 0), (660, 0)])
 @pytest.mark.parametrize('price', ['.70', '.73', '.85'])
-def test_high_price_gateway_respects_eight_minute_boundary(monkeypatch, elapsed, expected, price):
+def test_high_price_gateway_blocks_former_late_window(monkeypatch, elapsed, expected, price):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, elapsed)
     fake.held = D('0')
     market = {**fake.market('TEST'), 'yes_ask_dollars': price, 'no_ask_dollars': '.20'}
@@ -120,3 +120,4 @@ def test_early_entry_ceiling_does_not_block_existing_70_cent_exits(tmp_path, sig
     assert len(exchange.submissions) == 1
     assert exchange.submissions[0]['reduce_only'] is True
     assert exchange.submissions[0]['price'] == ('0.8000' if sign == 1 else '0.2000')
+

@@ -190,3 +190,15 @@ def test_entry_receipt_avoids_cancel_404_and_keeps_partial_fee_reservation(monke
             "fill_count_fp": "1", "maker_fees_dollars": "0", "taker_fees_dollars": ".01"}
         bot.reconcile_entries(restored)
         assert D(item["reserved_dollars"]) == D(".88")
+
+
+
+@pytest.fixture(autouse=True)
+def historical_high_price_policy(monkeypatch):
+    """Recreate pre-block trades for the recovery/side-selection scenarios.
+
+    Production window enforcement is covered by test_blocked_buy_window and
+    the combined/early/eight-minute entry suites.
+    """
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)

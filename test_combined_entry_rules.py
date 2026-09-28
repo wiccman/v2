@@ -49,8 +49,8 @@ def test_new_opening_tier_uses_its_own_two_minute_deadline(monkeypatch, side, el
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-@pytest.mark.parametrize('elapsed,allowed', [(359.999, False), (360, True), (479.999, True), (480, True), (719.999, True), (720, False)])
-def test_75_cent_tier_runs_from_six_until_twelve_minutes(monkeypatch, side, elapsed, allowed):
+@pytest.mark.parametrize('elapsed,allowed', [(359.999, False), (360, False), (479.999, False), (480, False), (719.999, False), (720, False)])
+def test_75_cent_tier_is_blocked_in_former_window(monkeypatch, side, elapsed, allowed):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, '.75', side)
     bot.cycle(state)
     assert bool(fake.entries) == allowed
@@ -168,3 +168,4 @@ def test_new_and_minute_eight_targets_sell_only_when_reached(tmp_path, price, ta
     assert fake.held == 0 and monitor.healthy
     wire_target = D(target) if sign == 1 else 1 - D(target)
     assert all(order['reduce_only'] and D(order['price']) == wire_target for order in fake.submissions)
+

@@ -103,3 +103,15 @@ def test_existing_70_cent_lot_keeps_80_cent_exit_after_upgrade(tmp_path):
     monitor.run_once()
     assert exchange.held == 0 and monitor.healthy
     assert exchange.submissions[0]['price'] == '0.8000'
+
+
+
+@pytest.fixture(autouse=True)
+def historical_high_price_policy(monkeypatch):
+    """Recreate pre-block trades for the recovery/side-selection scenarios.
+
+    Production window enforcement is covered by test_blocked_buy_window and
+    the combined/early/eight-minute entry suites.
+    """
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)

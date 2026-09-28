@@ -26,7 +26,7 @@ def test_regular_entries_obey_price_based_windows(monkeypatch, elapsed):
         market = {**fake.market('TEST'), 'yes_ask_dollars': '.70', 'no_ask_dollars': '.30'}
         monkeypatch.setattr(fake, 'market', lambda ticker: market)
     bot.cycle(state)
-    assert bool(fake.entries) == (0 <= elapsed < 360 or 480 <= elapsed < 720)
+    assert bool(fake.entries) == (0 <= elapsed < 360)
     assert all(item[3]['expiration_time'] == 1000000000 + (120 if elapsed < 120 else 360 if item[2] < D('.70') else 720)
                for item in fake.entries)
     assert all((item[2] < D('.70')) == (elapsed < 360) for item in fake.entries)
@@ -57,3 +57,4 @@ def test_slow_batch_cannot_send_lower_price_order_past_six_minutes(monkeypatch):
     bot.cycle(state)
     assert len(fake.entries) == 1
     assert fake.entries[0][3]['expiration_time'] == 1000000360
+

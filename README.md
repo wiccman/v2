@@ -3,6 +3,17 @@
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
+## 70–85¢ buy restriction
+
+All buy routes reject limits from **70¢ through 85¢ inclusive** during
+**6:00–12:59** of each market (360 <= elapsed seconds < 780). This overrides
+the historical 75¢ minute-six and 70¢/73¢/85¢ late-entry rules listed below.
+Pending bot buys in that band are canceled during reconciliation, including
+orders recovered after restart. Any pre-window order expires by 6:00.
+The existing regular cutoff is 12:00, so this change does not reopen those
+routes at 13:00. The 96¢ settlement route, +9¢ take profits, 98¢ exits, and
+existing settlement switching behavior remain in place.
+
 ## Manual trades on the same account (v2.2.11)
 
 Verified manual fills on the same side no longer block the bot's first buy or
@@ -47,29 +58,27 @@ New entries follow fixed price-based windows within each 15-minute market:
 | 57¢ opening entry | 1:00–2:00 |
 | 45–59¢ regular tiers | 1:00–6:00 |
 | 60–69¢ regular tiers (currently 62¢/64¢/67¢) | 5:00–6:00 |
-| New 75¢→83¢ tier | 6:00–12:00 |
-| 70¢→76¢ tier | 8:00–12:00 |
-| 73¢→79¢ and 85¢→91¢ late tiers | 11:00–12:00 |
+| 75¢ tier | Blocked throughout its former window |
+| 70¢ tier | Blocked throughout its former window |
+| 73¢ and 85¢ late tiers | Blocked throughout their former window |
 | 96¢ settlement limit | 12:00–15:00 |
 
 Eligible early buys start **one minute after contract open**. The opening, regular, optional limit-batch, historical
 and spot routes still enforce their own prices, side rules, funds and deadlines.
-Buy limits of 60¢ or more still wait until minute 5; the 75¢, other 70¢+ and
-settlement routes retain their later windows. The shared gateway blocks buys
+Buy limits of 60¢ or more still wait until minute 5. The 70–85¢ block
+overrides the former high-price scalp windows; settlement keeps its own window. The shared gateway blocks buys
 before contract open, regardless of a caller timestamp or stale start setting.
 Order reconciliation and exit monitoring continue throughout the contract.
 
-The 35¢ buy is retired. The 57¢ rule requires an exact quoted ask; the 75¢ rule
-triggers at an ask of at least 75¢. Neither limit can pay more, although exchange
-price improvement can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
+The 35¢ buy is retired. The 57¢ rule requires an exact quoted ask. Its limit
+cannot pay more, although exchange price improvement can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
 of the 52¢ opening flag. Quote/cash waits can retry before minute 2; an accepted
 or ambiguous attempt cannot be duplicated after restart.
-The 75¢ tier is the only new entry available from 6:00 to 8:00. Other 70¢+
-limits wait until 8:00, and ordinary limits below 70¢ stop at 6:00. The shared
+Ordinary limits below 70¢ stop at 6:00. The 70–85¢ restriction blocks
+the former minute-six, minute-eight and late scalp entries. The shared
 gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
 Every route also blocks buy limits of 60¢ or higher before 5:00, even when the
-current ask is cheaper. The later 75¢, 70¢, 73¢/85¢ and settlement windows still
-apply. Buy logs identify each order's tier and batch separately; the batch number
+current ask is cheaper. The settlement window still applies. Buy logs identify each order's tier and batch separately; the batch number
 is not an order count. Regular batches can repeat after the configured interval
 while allowance remains. The earlier allowance is not replenished by sales.
 Funds, quote checks and existing batch limits still apply. Exit monitoring
@@ -92,10 +101,10 @@ and as a fallback when the active 9¢ increase target would exceed 99¢.
 | 62¢ | 67¢ |
 | 64¢ | 69¢ |
 | 67¢ | 72¢ |
-| 70¢ (from minute 8) | 76¢ |
-| 75¢ (from minute 6) | 83¢ |
-| 73¢ (from minute 11) | 79¢ |
-| 85¢ (from minute 11) | 91¢ |
+| 70¢ (legacy; new buys blocked) | 76¢ |
+| 75¢ (legacy; new buys blocked) | 83¢ |
+| 73¢ (legacy; new buys blocked) | 79¢ |
+| 85¢ (legacy; new buys blocked) | 91¢ |
 
 From minute 1 until 2:00, the bot may submit a directional 52¢ limit
 and an independent 57¢ limit. Each route
@@ -134,11 +143,9 @@ Sales do not replenish filled-entry allowance. Exit fees are separate.
 `MAX_PURCHASES_PER_MARKET` counts individual committed regular orders, including
 unresolved submissions; proven zero-fill orders do not consume this count.
 
-The 75¢ tier triggers from minute 6 when the selected ask is at least 75¢ and
-rests at a maximum purchase price of 75¢ until minute 12. Only one 75¢ order may
-be pending at once; it is canceled if the live strike side changes. The final
+Saved 75¢ resting orders are canceled during the blocked window. The final
 96¢ limit triggers at an ask of at least 96¢ and rests until contract close.
-Both need executable liquidity at or below their limits to fill. Other entry
+It needs executable liquidity at or below its limit to fill. Other entry
 orders remain IOC. Opening and late tiers retry eligible checks until their
 cutoffs, using persisted per-tier intents to prevent duplicate filled or
 ambiguous attempts. Confirmed zero-fill attempts may retry.
@@ -467,3 +474,4 @@ allowance, and confirmed exit fills must appear in history before another exit.
 The $21 cap, $6 settlement reserve, entry rules and profit increments remain.
 
 Receipt semantics: https://docs.kalshi.com/api-reference/orders/create-order-v2
+
