@@ -25,8 +25,8 @@ these records are accounting separation, not separate exchange positions.
 
 ## Signals and timing
 
-**Direction after minute 1:** BTC at least $50 above the fixed strike permits
-YES; at least $50 below permits NO. Inside that band, all new entry routes wait.
+**Direction after minute 1:** BTC at least $25 above the fixed strike permits
+YES; at least $25 below permits NO. Inside that band, all new entry routes wait.
 The exchange reference is rechecked immediately before each buy submission.
 No opening opposite-strike trade or early Boruto bias selects a live buy side.
 Resting 75¢ and 96¢ limits are canceled if BTC leaves the qualifying direction.

@@ -44,7 +44,7 @@ OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
 OPENING_EXTRA_PAIR = parse_pairs("57:62")
 OPENING_EXTRA_WINDOW = 120
 OPENING_OPPOSITE_WINDOW = 120
-MIN_STRIKE_DISTANCE_DOLLARS = Decimal("50")
+MIN_STRIKE_DISTANCE_DOLLARS = Decimal("25")
 DIRECTIONAL_ENTRY_POLICY = True
 LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
 LATE_ENTRY_PAIRS.update(parse_pairs("73:79,85:91"))
@@ -431,7 +431,7 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None, si
         reason = ("boruto_bias_" + kind if allowed else
                   "bias_unavailable" if bias_side is None else "selected_side_opposes_bias")
     elif live_side is None:
-        reason = "btc_within_50_dollars_of_strike"
+        reason = "btc_within_25_dollars_of_strike"
     elif side != live_side:
         reason = "selected_side_opposes_live_strike"
     else:
@@ -1191,7 +1191,7 @@ def settlement_entry(record, state, ticker, closed):
         report("window_closed_during_quote_read")
         return
     if side is None:
-        report("btc_within_50_dollars_of_strike")
+        report("btc_within_25_dollars_of_strike")
         return
     locked_side = record.get("trade_side")
     if locked_side not in ("YES", "NO"):
@@ -1455,7 +1455,7 @@ def main():
     global EXIT_MONITOR
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
-    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entries use live BTC at least $50 beyond strike: above=YES, below=NO", flush=True)
+    print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entries use live BTC at least ${MIN_STRIKE_DISTANCE_DOLLARS} beyond strike: above=YES, below=NO", flush=True)
     print("ENTRY_START_GATE: buys eligible from60s; opening entries run60s..120s; exit monitoring continues", flush=True)
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)

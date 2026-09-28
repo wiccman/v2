@@ -16,12 +16,12 @@ def enable(monkeypatch):
 
 @pytest.mark.parametrize("elapsed,spot,side,allowed", [
     (0, "100060", "YES", False), (59.999, "99940", "NO", False),
-    (60, "100049.99", "YES", False), (60, "99950.01", "NO", False),
-    (60, "100050", "YES", True), (60, "99950", "NO", True),
-    (60, "100050", "NO", False), (60, "99950", "YES", False),
+    (60, "100024.99", "YES", False), (60, "99975.01", "NO", False),
+    (60, "100025", "YES", True), (60, "99975", "NO", True),
+    (60, "100025", "NO", False), (60, "99975", "YES", False),
     (120, "100060", "YES", True), (120, "99940", "NO", True),
 ])
-def test_entry_requires_minute_and_50_dollar_direction(monkeypatch, elapsed, spot, side, allowed):
+def test_entry_requires_minute_and_25_dollar_direction(monkeypatch, elapsed, spot, side, allowed):
     enable(monkeypatch)
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, ".52", side)
     monkeypatch.setattr(fake, "btc_reference_price", lambda: D(spot))
@@ -29,7 +29,7 @@ def test_entry_requires_minute_and_50_dollar_direction(monkeypatch, elapsed, spo
     assert bool(result.get("order_id")) == allowed
 
 
-@pytest.mark.parametrize("side,spot", [("YES", "100050"), ("NO", "99950")])
+@pytest.mark.parametrize("side,spot", [("YES", "100025"), ("NO", "99975")])
 @pytest.mark.parametrize("kind", ["opening_bias", "opening_57", "dual", "historical", "spot"])
 def test_every_opening_route_uses_same_strike_gate(monkeypatch, side, spot, kind):
     enable(monkeypatch)
@@ -41,8 +41,8 @@ def test_every_opening_route_uses_same_strike_gate(monkeypatch, side, spot, kind
 
 
 @pytest.mark.parametrize("side,spot,allowed", [
-    ("YES", "100049.99", False), ("YES", "100050", True),
-    ("NO", "99950.01", False), ("NO", "99950", True),
+    ("YES", "100024.99", False), ("YES", "100025", True),
+    ("NO", "99975.01", False), ("NO", "99975", True),
 ])
 def test_settlement_route_uses_same_distance(monkeypatch, side, spot, allowed):
     enable(monkeypatch)
@@ -61,6 +61,6 @@ def test_resting_settlement_buy_is_canceled_when_btc_reenters_band(monkeypatch):
     bot.settlement_entry(record, state, "TEST", closed)
     assert len(fake.entries) == 1
     order_id = record["entry_intents"][-1]["order_id"]
-    spot[0] = D("100049")
+    spot[0] = D("100024")
     bot.reconcile_entries(state)
     assert order_id in fake.cancelled
