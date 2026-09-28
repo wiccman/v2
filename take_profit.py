@@ -20,6 +20,7 @@ from pathlib import Path
 from kalshi import KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestDeferred, retry_delay
 from price_pairs import paired_inventory, fill_cost_inventory, order_profit_inventory, order_percentage_inventory, owned_position, InventorySyncError
+from price_pairs import order_increment_inventory
 
 TERMINAL = {"executed", "canceled", "expired"}
 
@@ -34,13 +35,18 @@ class TakeProfitMonitor:
     def __init__(self, client, read_entries, path, target=Decimal("0.45"),
                  poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False,
                  per_order_profit=None, no_fill_pause=0.0, quote_gate=False,
-                 per_order_percentage=None):
+                 per_order_percentage=None, per_order_increment=None, force_exit_price=None):
         self.client, self.read_entries = client, read_entries
         self.path, self.target = Path(path), Decimal(target)
         self.pairs = pairs
         self.fill_cost_targets = fill_cost_targets
         self.per_order_profit = Decimal(per_order_profit) if per_order_profit is not None else None
         self.per_order_percentage = Decimal(per_order_percentage) if per_order_percentage is not None else None
+        self.per_order_increment = Decimal(per_order_increment) if per_order_increment is not None else None
+        self.force_exit_price = Decimal(force_exit_price) if force_exit_price is not None else None
+        if self.force_exit_price is not None and (not self.force_exit_price.is_finite()
+                                                 or not 0 < self.force_exit_price < 1):
+            raise ValueError("Forced exit price must be between zero and one")
         self.poll, self.clock = max(1.0, float(poll)), clock
         self.no_fill_pause = max(0.0, float(no_fill_pause))
         self.quote_gate = quote_gate
@@ -266,7 +272,10 @@ class TakeProfitMonitor:
             if observed != Decimal(order["filled"]):
                 raise InventorySyncError("Confirmed exit is not yet consistent with fill history")
         outside = []
-        if self.per_order_percentage is not None:
+        if self.per_order_increment is not None:
+            result = order_increment_inventory(fills, entries, exits, held, ticker, outside,
+                                               self.per_order_increment)
+        elif self.per_order_percentage is not None:
             result = order_percentage_inventory(fills, entries, exits, held, ticker, outside,
                                                 self.per_order_percentage)
         elif self.per_order_profit is not None:
@@ -336,6 +345,21 @@ class TakeProfitMonitor:
             raise ValueError("Invalid position quantity")
         buckets, plans = (self._paired_buckets(ticker, record, ledger, held)
                           if self.pairs is not None else ({self.target: held}, {}))
+        market = None
+        bot_held = Decimal(ledger["ownership"]["bot_held"]) if self.pairs is not None else held
+        if self.force_exit_price is not None and bot_held:
+            market = self.client.market(ticker)
+            side = "yes" if bot_held > 0 else "no"
+            bid = Decimal(str(market[side + "_bid_dollars"]))
+            if not bid.is_finite() or not 0 <= bid <= 1:
+                raise ValueError("Invalid forced-exit bid")
+            if bid >= self.force_exit_price:
+                # Override every target, including hold-to-settlement, using
+                # verified bot allocations rather than the shared position.
+                plan = ({"allocations": ledger["ownership"]["allocations"], "cost_groups": []}
+                        if self.pairs is not None else None)
+                return self._submit(ticker, ledger, close, bot_held, self.force_exit_price,
+                                    paired=False, plan=plan)
         switch = record.get("settlement_switch", {})
         switching = (switch.get("side") in {"YES", "NO"} and switch.get("allow_loss") is True
                      and not any(item.get("kind") == SETTLEMENT_KIND and attempt_committed(item) for item in record.get("entry_intents", []))
@@ -394,7 +418,7 @@ class TakeProfitMonitor:
         if self.quote_gate:
             # A sell cannot fill at its target while the best bid is lower.
             # This read replaces futile order writes and reconciliation reads.
-            market = self.client.market(ticker)
+            market = market if market is not None else self.client.market(ticker)
             side = "yes" if quantity > 0 else "no"
             bid = Decimal(str(market[side + "_bid_dollars"]))
             if not bid.is_finite() or bid < 0 or bid > 1:

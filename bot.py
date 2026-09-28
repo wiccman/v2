@@ -1506,9 +1506,10 @@ def main():
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")), fill_cost_targets=True,
-            per_order_percentage=Decimal("0.05"), no_fill_pause=3.0, quote_gate=True)
+            per_order_increment=Decimal("0.09"), force_exit_price=Decimal("0.98"),
+            no_fill_pause=3.0, quote_gate=True)
         EXIT_MONITOR.start()
-        print("TP_MONITOR_STARTED target_return=5% per buy order with 3c fee cushion on each leg, based on actual fill and rounded up to cents; saved pair target applies if above 99c; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
+        print("TP_MONITOR_STARTED price_increase=9c per contract per buy order, based on actual fill and rounded up to cents; gross before fees; saved pair target applies if above 99c; sell all bot lots including settlement when bid>=98c at a98c limit; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
         diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
             coordinator=REQUEST_COORDINATOR, role="diagnostics")

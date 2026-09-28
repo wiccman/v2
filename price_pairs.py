@@ -248,6 +248,35 @@ def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profi
     return dict(sorted(buckets.items())), plans
 
 
+def order_increment_inventory(fills, entry_orders, exit_orders, held, ticker, untracked, increment):
+    """Price each buy order at its remaining average fill cost plus a fixed move."""
+    increment = D(increment)
+    if not increment.is_finite() or increment <= 0:
+        raise ValueError("Per-order price increment must be positive")
+    lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked)
+    groups, buckets, plans = {}, {}, {}
+    for lot in lots:
+        if lot["target"] == 1:
+            buckets[D(1)] = buckets.get(D(1), D(0)) + lot["sign"] * lot["quantity"]
+        else:
+            groups.setdefault((lot["sign"], lot["fill"]["order_id"]), []).append(lot)
+    for (sign, order_id), members in sorted(groups.items()):
+        quantity = sum((lot["quantity"] for lot in members), D(0))
+        cost = sum((lot["quantity"] * _outcome_cost(lot["fill"], sign)
+                    for lot in members), D(0)) / quantity
+        target = (cost + increment).quantize(D("0.01"), rounding=ROUND_CEILING)
+        if target > D("0.99"):
+            # Preserve the existing fallback for legacy lots with too little upside.
+            target = max(lot["target"] for lot in members)
+        buckets[target] = buckets.get(target, D(0)) + sign * quantity
+        plan = plans.setdefault(target, {"allocations": [], "cost_groups": []})
+        plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
+                                   for lot in members)
+        plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
+                                    "quantity": str(quantity), "profit_increment": str(increment)})
+    return dict(sorted(buckets.items())), plans
+
+
 def order_percentage_inventory(fills, entry_orders, exit_orders, held, ticker, untracked, percentage):
     """Target a percentage return over fill cost with conservative fee room.
 
