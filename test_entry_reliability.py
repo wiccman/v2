@@ -243,3 +243,15 @@ def test_fractional_fill_refund_keeps_verified_rounded_fees(monkeypatch, fees, r
         remote["taker_fees_dollars"] = fees
     bot.reconcile_entries(state)
     assert D(record["entry_intents"][0]["reserved_dollars"]) == D(remaining)
+
+
+
+@pytest.fixture(autouse=True)
+def historical_high_price_policy(monkeypatch):
+    """Recreate pre-block trades for the recovery/side-selection scenarios.
+
+    Production window enforcement is covered by test_blocked_buy_window and
+    the combined/early/eight-minute entry suites.
+    """
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)

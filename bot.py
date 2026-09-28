@@ -71,6 +71,10 @@ HIGH_PRICE_ENTRY_START = 480
 SIX_MINUTE_ENTRY_PRICE = Decimal("0.75")
 SIX_MINUTE_ENTRY_START = 360
 LOW_PRICE_ENTRY_END = 360
+BLOCKED_BUY_MIN_PRICE = Decimal("0.70")
+BLOCKED_BUY_MAX_PRICE = Decimal("0.85")
+BLOCKED_BUY_START = 360
+BLOCKED_BUY_END = 780
 ENTRY_EXECUTION_VERSION = 10
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
@@ -496,6 +500,12 @@ def scalp_entry_limit(record, held, price, kind, closed):
     return max(Decimal("0"), min(room, MAX_AVERAGE_CONTRACTS, affordable)), True, None
 
 
+def blocked_buy_window(price, closed_timestamp, now_timestamp):
+    """The 70–85c restriction overrides every route, including saved orders."""
+    return (BLOCKED_BUY_MIN_PRICE <= Decimal(str(price)) <= BLOCKED_BUY_MAX_PRICE
+            and BLOCKED_BUY_START <= now_timestamp - (closed_timestamp - 900) < BLOCKED_BUY_END)
+
+
 def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp=None, submit_before=None, order_budget=None, cancel_at=None):
     def skip(reason, **details):
         write_log("ENTRY_SKIP", ticker, prediction=side, price=str(price), details=json.dumps({
@@ -507,6 +517,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     # configuration. Opening and optional trigger routes share this minimum.
     if time.time() < closed.timestamp() - 900 + ENTRY_START_DELAY:
         return skip("market_not_started", minimum_elapsed_seconds=ENTRY_START_DELAY)
+    if blocked_buy_window(price, closed.timestamp(), time.time()):
+        return skip("70_85_cent_window_blocked")
     if kind == "regular" and committed_regular_orders(record) >= MAX_BUYS:
         return skip("regular_order_limit_reached", committed_orders=committed_regular_orders(record))
     # Gate the submitted limit on every route. A 62c/67c limit can otherwise
@@ -575,6 +587,11 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return skip("outside_settlement_window")
         policy_cutoff = closed.timestamp()
     cutoff = min(policy_cutoff, float(submit_before) if submit_before is not None else policy_cutoff)
+    # Expire any eligible pre-window order at 6:00. This also keeps a slow
+    # quote/funding request from crossing the boundary before HTTP dispatch.
+    if (BLOCKED_BUY_MIN_PRICE <= Decimal(str(price)) <= BLOCKED_BUY_MAX_PRICE
+            and time.time() < closed.timestamp() - 900 + BLOCKED_BUY_START):
+        cutoff = min(cutoff, closed.timestamp() - 900 + BLOCKED_BUY_START)
     if max(now_timestamp, time.time()) >= cutoff:
         return skip("entry_window_closed", cutoff=cutoff)
     # Enforce on every route, using the actual clock rather than a caller's
@@ -700,6 +717,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             return skip("settlement_not_ready_before_post")
     if time.time() >= cutoff:
         return skip("deadline_reached_before_reservation")
+    if blocked_buy_window(price, closed.timestamp(), time.time()):
+        return skip("70_85_cent_window_blocked_before_post")
     if account_held != held:
         write_log("ENTRY_MANUAL_INVENTORY_EXCLUDED", ticker, prediction=side,
                   details=json.dumps({"account_held": str(account_held), "bot_held": str(held),
@@ -879,6 +898,9 @@ def reconcile_entries(state, now_timestamp=None):
             ids = {i["order_id"] for i in pending if i.get("order_id") and (
                 i.get("entry_execution_version") != ENTRY_EXECUTION_VERSION
                 or not tracked_entry_price_allowed(i)
+                or blocked_buy_window(i.get("price", "0"),
+                    record.get("close_timestamp", record["entry_cancel_at"] + SETTLEMENT_WINDOW),
+                    max(now_timestamp, time.time()))
                 or now_timestamp >= i.get("cancel_at", record["entry_cancel_at"])
                 or record.get("entry_budget_legacy")
                 or (record.get("settlement_switch") and i.get("kind") != SETTLEMENT_KIND))}
@@ -1462,7 +1484,7 @@ def main():
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
     print("SETTLEMENT_ENTRY window=720s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
     print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
-    print(f"SIX_MINUTE_ENTRY window=360s..{END}s; trigger_ask>=75c and <100c; limit=75c GTC until {END}s; target=83c at limit fill; quantity<=3; shared earlier allowance=${MARKET_BUDGET - SETTLEMENT_BUDGET}", flush=True)
+    print("BUY_BLOCK limits 70c through 85c inclusive blocked from 6:00 through 12:59; pending bot buys canceled; 96c settlement route retained", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
     print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)

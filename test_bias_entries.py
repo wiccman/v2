@@ -108,3 +108,15 @@ def test_slow_history_cannot_extend_early_entry_window(monkeypatch):
     monkeypatch.setattr(fake, "markets", slow)
     assert bot.funded_entry(record, state, "TEST", "YES", D(".59"), closed, "regular") == ({}, 0)
     assert not fake.entries and not record["entry_intents"]
+
+
+
+@pytest.fixture(autouse=True)
+def historical_high_price_policy(monkeypatch):
+    """Recreate pre-block trades for the recovery/side-selection scenarios.
+
+    Production window enforcement is covered by test_blocked_buy_window and
+    the combined/early/eight-minute entry suites.
+    """
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
+    monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)
