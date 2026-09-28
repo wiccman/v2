@@ -79,7 +79,7 @@ continues until market close.
 
 All routes use these default entry limits, configurable through
 `ENTRY_EXIT_PAIRS_CENTS`. The paired exit column is retained for legacy lots
-and as a fallback when the active 5% target would exceed 99¢.
+and as a fallback when the active 9¢ increase target would exceed 99¢.
 
 | Entry limit | Exit if filled at the limit |
 | --- | --- |
@@ -159,17 +159,24 @@ ambiguous fill accounting pauses new entries until reconciliation succeeds.
 
 ### Take profit follows actual fills
 
-The live worker targets a **5% return with a 3¢ per-contract fee cushion on
-each leg** over each buy order's verified average fill cost, rounded up to the
-next cent. A 55¢ fill targets 64¢ whether that order filled one or four
-contracts. This is a conservative estimate, not an exact net guarantee because
-market fee schedules and fill fees can differ. The saved paired target is
-used if the percentage target would exceed 99¢. Legacy exit accounting still
-reconciles already submitted orders before changing any remaining inventory.
+The live worker targets **9¢ above each buy order's actual average fill price**,
+rounded up to the next whole cent. A 50¢ fill targets 59¢, a 75¢ fill targets 84¢,
+and an 85¢ fill targets 94¢. The price target is the same for one or five
+contracts. This is a gross price increase before fees; no percentage or fee
+cushion is added. The saved paired target remains the fallback for legacy scalp
+inventory whose calculated target would exceed 99¢.
 
 Each consistent fill/position snapshot recalculates the remaining quantity for
-each buy order. Different buy orders keep separate 5% targets. The settlement
-position remains held to settlement.
+each buy order. Different buy orders keep separate +9¢ targets, including an
+additional average-down buy. Partial fills of the same order share their
+weighted average fill cost. The 96¢ settlement position is held unless its sellable bid reaches 98¢.
+
+**98¢ override:** whenever the YES or NO bid for the held side is at least 98¢,
+the worker submits a reduce-only sell for all verified bot-owned inventory at a
+98¢ minimum limit, including settlement lots. This takes priority over the +9¢
+target and hold-to-settlement flag. A 98¢ ask or last-traded price alone does
+not trigger it. Manual inventory stays excluded. Partial fills and lost
+acknowledgements reconcile before retrying only the remaining bot quantity.
 
 Before submitting an exit, the worker saves the exact entry fill IDs and quantities
 it covers. Partial exits consume those allocations FIFO; sold shares are removed
@@ -178,11 +185,11 @@ must reconcile before another exit can use that inventory. This survives partial
 fills, lost acknowledgements and restarts without selling a share twice.
 
 On upgrade, existing recorded exit orders replay against their original fixed
-targets. Remaining verified scalp inventory then adopts the 5% fill-based target.
+targets. Remaining verified scalp inventory then adopts the +9¢ fill-based target.
 Missing,
 inconsistent or over-limit fill prices pause the worker instead of substituting
 a quote, buy limit or displayed account average. `TP_ARMED` logs include the
-average fill cost, target percentage, quantity and rounded target.
+average fill cost, price increment, quantity and rounded target.
 
 Price inputs follow Kalshi's [fill payload](https://docs.kalshi.com/api-reference/portfolio/get-fills).
 Whole-cent rounding uses prices valid across the documented
