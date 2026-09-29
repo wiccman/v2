@@ -1,4 +1,5 @@
 """Durable, conservative spending reservations shared by every entry route."""
+import os
 import uuid
 from decimal import Decimal as D
 
@@ -25,9 +26,10 @@ def settlement_entry_price_allowed(price):
 
 
 def market_budget():
-    # Fixed requested allowance; stale Railway budget settings must not keep
-    # this release at an older cap.
-    return D("30")
+    value = D(os.getenv("MARKET_BUDGET_DOLLARS", "25"))
+    if not value.is_finite() or value <= SETTLEMENT_BUDGET:
+        raise ValueError("MARKET_BUDGET_DOLLARS must be finite and greater than settlement reserve")
+    return value
 
 
 def initialize(record):
