@@ -1487,7 +1487,7 @@ def main():
     print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; no fixed regular purchase-count cap", flush=True)
     print(f"POSITION_CAP bot_owned_maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3; verified manual fills excluded; opposing manual inventory pauses entries and settlement switches", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
-    ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
+    ignored = ("ENTRY_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
                "FINAL_ENTRY_START_MINUTE", "FINAL_ENTRY_END_MINUTE", "FINAL_CONFIDENCE_MIN_PERCENT")
     for name in ignored:
