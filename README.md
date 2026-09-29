@@ -11,7 +11,7 @@ the historical 75¢ minute-six and 70¢/73¢/85¢ late-entry rules listed below.
 Pending bot buys in that band are canceled during reconciliation, including
 orders recovered after restart. Any pre-window order expires by 6:00.
 The existing regular cutoff is 12:00, so this change does not reopen those
-routes at 13:00. The 96¢ settlement route, +25¢ take profits, 98¢ exits, and
+routes at 13:00. The 96¢ settlement route, +20¢ take profits, 98¢ exits, and
 existing settlement switching behavior remain in place.
 
 ## Manual trades on the same account (v2.2.11)
@@ -88,19 +88,19 @@ continues until market close.
 
 All routes use these default entry limits, configurable through
 `ENTRY_EXIT_PAIRS_CENTS`. The paired exit column is retained for legacy lots
-and as a fallback when the active 25¢ increase target would exceed 99¢.
+and as a fallback when the active 20¢ increase target would exceed 99¢.
 
 | Entry limit | Exit if filled at the limit |
 | --- | --- |
-| 45¢ | 70¢ |
-| 48¢ | 73¢ |
-| 51¢ | 76¢ |
-| 53¢ | 78¢ |
-| 56¢ | 81¢ |
-| 59¢ | 84¢ |
-| 62¢ | 87¢ |
-| 64¢ | 89¢ |
-| 67¢ | 92¢ |
+| 45¢ | 65¢ |
+| 48¢ | 68¢ |
+| 51¢ | 71¢ |
+| 53¢ | 73¢ |
+| 56¢ | 76¢ |
+| 59¢ | 79¢ |
+| 62¢ | 82¢ |
+| 64¢ | 84¢ |
+| 67¢ | 87¢ |
 | 70¢ (legacy; new buys blocked) | 76¢ |
 | 75¢ (legacy; new buys blocked) | 83¢ |
 | 73¢ (legacy; new buys blocked) | 79¢ |
@@ -167,19 +167,19 @@ ambiguous fill accounting pauses new entries until reconciliation succeeds.
 ### Take profit follows actual fills
 
 The live worker targets **25¢ above each buy order's actual average fill price**,
-rounded up to the next whole cent. A 50¢ fill targets 75¢ and a 60¢ fill targets
-85¢. Targets that would exceed 99¢ use the saved paired target for that legacy
+rounded up to the next whole cent. A 50¢ fill targets 70¢ and a 60¢ fill targets
+80¢. Targets that would exceed 99¢ use the saved paired target for that legacy
 inventory. The price target is the same for one or five contracts. This is a gross
 price increase before fees; no percentage or fee cushion is added.
 
 Each consistent fill/position snapshot recalculates the remaining quantity for
-each buy order. Different buy orders keep separate +25¢ targets, including an
+each buy order. Different buy orders keep separate +20¢ targets, including an
 additional average-down buy. Partial fills of the same order share their
 weighted average fill cost. The 96¢ settlement position is held unless its sellable bid reaches 98¢.
 
 **98¢ override:** whenever the YES or NO bid for the held side is at least 98¢,
 the worker submits a reduce-only sell for all verified bot-owned inventory at a
-98¢ minimum limit, including settlement lots. This takes priority over the +25¢
+98¢ minimum limit, including settlement lots. This takes priority over the +20¢
 target and hold-to-settlement flag. A 98¢ ask or last-traded price alone does
 not trigger it. Manual inventory stays excluded. Partial fills and lost
 acknowledgements reconcile before retrying only the remaining bot quantity.
@@ -191,7 +191,7 @@ must reconcile before another exit can use that inventory. This survives partial
 fills, lost acknowledgements and restarts without selling a share twice.
 
 On upgrade, existing recorded exit orders replay against their original fixed
-targets. Remaining verified scalp inventory then adopts the +25¢ fill-based target.
+targets. Remaining verified scalp inventory then adopts the +20¢ fill-based target.
 Missing,
 inconsistent or over-limit fill prices pause the worker instead of substituting
 a quote, buy limit or displayed account average. `TP_ARMED` logs include the
