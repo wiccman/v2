@@ -45,6 +45,6 @@ def test_full_cycle_can_place_opening_order_immediately(monkeypatch):
 
 
 def test_production_start_is_one_minute_independent_of_old_environment():
-    result = subprocess.run([sys.executable, "-c", "import bot; assert bot.START == bot.ENTRY_START_DELAY == 60 and bot.DIRECTIONAL_ENTRY_POLICY"],
+    result = subprocess.run([sys.executable, "-c", "import bot; assert bot.START == bot.ENTRY_START_DELAY == 180 and bot.DIRECTIONAL_ENTRY_POLICY and bot.MINUTE3_POLICY"],
                             env={**os.environ, "ENTRY_START_MINUTE": "0"}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
