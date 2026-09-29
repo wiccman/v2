@@ -80,7 +80,6 @@ MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
-MAX_BUYS = 15  # Stale Railway overrides cannot restore the previous seven-order cap.
 MAX_OPEN_CONTRACTS = Decimal("8")
 INITIAL_OPEN_CONTRACTS = Decimal("5")
 MAX_AVERAGE_CONTRACTS = Decimal("3")
@@ -519,8 +518,6 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         return skip("market_not_started", minimum_elapsed_seconds=ENTRY_START_DELAY)
     if blocked_buy_window(price, closed.timestamp(), time.time()):
         return skip("70_85_cent_window_blocked")
-    if kind == "regular" and committed_regular_orders(record) >= MAX_BUYS:
-        return skip("regular_order_limit_reached", committed_orders=committed_regular_orders(record))
     # Gate the submitted limit on every route. A 62c/67c limit can otherwise
     # execute at a 60c ask even when a lower tier would have waited.
     if Decimal(str(price)) >= MID_PRICE_ENTRY_FLOOR and time.time() < closed.timestamp() - 900 + MID_PRICE_ENTRY_START:
@@ -1414,7 +1411,7 @@ def cycle(state):
     reconcile_entries(state)
     # Only the independent paired monitor owns exits. Never fall back to a
     # single-price exit path when both entry tiers can hold inventory.
-    can_buy = START <= elapsed < END and selected_side in ("YES", "NO") and committed_regular_orders(record) < MAX_BUYS and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = START <= elapsed < END and selected_side in ("YES", "NO") and time.time() - record["last_buy"] >= INTERVAL
     if can_buy:
         ask, _ = quotes(current, selected_side)
         counted = False
@@ -1424,7 +1421,7 @@ def cycle(state):
                     record["buys"] += 1; record["last_buy"] = time.time()
                     counted = True
                 record["orders"].append(result["order_id"])
-                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"batch {record['buys']}; committed regular orders {committed_regular_orders(record)} of {MAX_BUYS}; tier {price}; order {result['order_id']}")
+                write_log("BUY_LIMIT", ticker, prediction=signal["prediction"], confidence=signal.get("live_confidence", ""), price=str(price), quantity=str(quantity), details=f"batch {record['buys']}; committed regular orders {committed_regular_orders(record)}; tier {price}; order {result['order_id']}")
                 save_state(state)
     late_start = started.timestamp() + LATE_ENTRY_START
     late_end = started.timestamp() + LATE_ENTRY_END
@@ -1487,7 +1484,7 @@ def main():
     print("BUY_BLOCK limits 70c through 85c inclusive blocked from 6:00 through 12:59; pending bot buys canceled; 96c settlement route retained", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
     print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
-    print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; regular purchase cap={MAX_BUYS}", flush=True)
+    print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; no fixed regular purchase-count cap", flush=True)
     print(f"POSITION_CAP bot_owned_maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3; verified manual fills excluded; opposing manual inventory pauses entries and settlement switches", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "MARKET_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
