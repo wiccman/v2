@@ -8,6 +8,7 @@ import bot
 
 @pytest.fixture(autouse=True)
 def original_entry_policy_for_historical_tests(monkeypatch):
+    monkeypatch.setattr(bot, "MINUTE3_POLICY", False)
     monkeypatch.setattr(bot, "DIRECTIONAL_ENTRY_POLICY", False)
     monkeypatch.setattr(bot, "ENTRY_START_DELAY", 0)
     monkeypatch.setattr(bot, "START", 0)

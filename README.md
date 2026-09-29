@@ -3,6 +3,27 @@
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
 
+## Minute-three confirmation (v2.2.14)
+
+New buys require the 2.6 research rule: the finalized BTC benchmark at exactly
+T−30 below this contract's strike means YES; above means NO. At 3:00, sample
+the live BTC direction once, allowing up to 3:30 for the loop to observe it.
+The existing $25 live-strike distance defines a qualifying YES/NO; inside
+that band is neutral. Agreement confirms the T−30 side. Conflict or neutral
+skips the entire contract. A missed sample, unavailable data or failed save
+blocks entries. The decision survives restarts and is never replaced by a
+later favorable signal. The bot logs the actual price, gap and sample time.
+
+All buy routes, including the final 96¢ route, obey this confirmation. A
+confirmed side still needs a qualifying current live direction at submission;
+it cannot switch to the opposite side. The former first-two-minute routes
+expire before entries are eligible. Budgets, position limits, quote gates,
+take profits and independent exit monitoring retain their existing behavior.
+Older resting buys are reconciled/canceled on upgrade; existing filled lots
+keep their exits. A restart after 3:30 without a saved confirmation waits for
+the next contract. Historical entry descriptions below are superseded by this
+gate. Confirmation sampling does not depend on available trading cash.
+
 ## 70–85¢ buy restriction
 
 All buy routes reject limits from **70¢ through 85¢ inclusive** during
@@ -474,4 +495,3 @@ allowance, and confirmed exit fills must appear in history before another exit.
 The $21 cap, $6 settlement reserve, entry rules and profit increments remain.
 
 Receipt semantics: https://docs.kalshi.com/api-reference/orders/create-order-v2
-

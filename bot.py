@@ -46,6 +46,10 @@ OPENING_EXTRA_WINDOW = 120
 OPENING_OPPOSITE_WINDOW = 120
 MIN_STRIKE_DISTANCE_DOLLARS = Decimal("25")
 DIRECTIONAL_ENTRY_POLICY = True
+MINUTE3_POLICY = True
+CONFIRMATION_BUILD = "2.6 Boruto T-30 Minute-3 Confirmation"
+CONFIRMATION_START = 180
+CONFIRMATION_END = 210
 LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
 LATE_ENTRY_PAIRS.update(parse_pairs("73:79,85:91"))
 LATE_ENTRY_PAIRS = {price: target for price, target in LATE_ENTRY_PAIRS.items()
@@ -75,7 +79,7 @@ BLOCKED_BUY_MIN_PRICE = Decimal("0.70")
 BLOCKED_BUY_MAX_PRICE = Decimal("0.85")
 BLOCKED_BUY_START = 360
 BLOCKED_BUY_END = 780
-ENTRY_EXECUTION_VERSION = 10
+ENTRY_EXECUTION_VERSION = 11
 MARKET_BUDGET = market_budget()
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
@@ -87,7 +91,7 @@ MAX_AVERAGE_CONTRACTS = Decimal("3")
 MAX_AVERAGE_DOLLARS = Decimal("2.50")
 AVERAGE_DOWN_CUTOFF = 180
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
-ENTRY_START_DELAY = 60  # Wait for the first minute of each market.
+ENTRY_START_DELAY = 180  # Wait for the minute-three confirmation.
 START = ENTRY_START_DELAY
 END = 900 - SETTLEMENT_WINDOW  # Final three minutes belong to the settlement route.
 PREDICTION_MINUTES = (2, 4, 6)
@@ -218,6 +222,78 @@ def strike_side(market, spot, minimum_distance=Decimal("0")):
     if distance == 0:
         return "YES" if spot > strike else "NO" if spot < strike else None
     return "YES" if spot - strike >= distance else "NO" if strike - spot >= distance else None
+
+def minute3_confirmation(record, state, ticker, market, closed):
+    """Persist one confirmation; never retry a neutral/conflict/missed sample."""
+    if not MINUTE3_POLICY:
+        return None
+    started = closed - timedelta(minutes=15)
+    saved = record.get("minute3_confirmation")
+    if saved is not None:
+        if (saved.get("build") != CONFIRMATION_BUILD or saved.get("ticker") != ticker
+                or saved.get("open_time") != started.isoformat()
+                or Decimal(saved["strike"]) != Decimal(str(market["floor_strike"]))):
+            raise RuntimeError("Saved minute-three confirmation does not match market")
+        return saved
+    elapsed = time.time() - started.timestamp()
+    if elapsed < CONFIRMATION_START:
+        return {"status": "WAITING_CONFIRMATION", "side": None}
+    decision = {"build": CONFIRMATION_BUILD, "ticker": ticker,
+                "open_time": started.isoformat(), "strike": str(market["floor_strike"]),
+                "status": "DATA_UNAVAILABLE", "side": None,
+                "reason": "MINUTE3_DATA_UNAVAILABLE"}
+    if elapsed < CONFIRMATION_END:
+        try:
+            lookback = completed_values(started, "expiration_value", 1, last_offset=2)[0]
+            strike = Decimal(str(market["floor_strike"]))
+            raw = "YES" if lookback < strike else "NO" if lookback > strike else None
+            spot = client.btc_reference_price()
+            observed = time.time()
+            live = strike_side(market, spot, MIN_STRIKE_DISTANCE_DOLLARS)
+            decision.update(t30=str(lookback), raw_side=raw, live_side=live,
+                            btc_reference=str(spot), gap=str(Decimal(str(spot)) - strike),
+                            observed_at=datetime.fromtimestamp(observed, timezone.utc).isoformat(),
+                            elapsed_seconds=observed - started.timestamp(),
+                            minimum_distance=str(MIN_STRIKE_DISTANCE_DOLLARS))
+            if observed < started.timestamp() + CONFIRMATION_END:
+                if raw is None:
+                    decision.update(status="SKIP", reason="T30_EQUAL")
+                elif live is None:
+                    decision.update(status="SKIP", reason="MINUTE3_NEUTRAL")
+                elif raw != live:
+                    decision.update(status="SKIP", reason="MINUTE3_CONFLICT")
+                else:
+                    decision.update(status="CONFIRMED", side=raw, reason="MINUTE3_AGREEMENT")
+        except Exception as error:
+            decision["error_type"] = type(error).__name__
+    record["minute3_confirmation"] = decision
+    try:
+        save_state(state)
+    except Exception:
+        # Keep the observed sample in memory, but fail closed until a later
+        # successful save. Never sample again to replace this decision.
+        record["minute3_save_pending"] = True
+        raise
+    if decision.get("status") in {"CONFIRMED", "SKIP"} and "observed_at" in decision:
+        # Preserve the diagnostic consumed by the research logger, including
+        # skipped contracts. Use the actual observation time, not save time.
+        write_log("ENTRY_SIDE", ticker, time_utc=decision["observed_at"],
+                  prediction=decision["live_side"] or "AT_STRIKE",
+                  details=json.dumps({"side_source": "live_strike", "live_strike_side": decision["live_side"],
+                                      "strike": decision["strike"], "btc_reference": decision["btc_reference"],
+                                      "gap": decision["gap"]}))
+    write_log("MINUTE3_CONFIRMATION", ticker, prediction=decision["side"] or decision["status"],
+              details=json.dumps(decision))
+    return decision
+
+
+def confirmed_entry_side(record, state, ticker, market, closed):
+    decision = minute3_confirmation(record, state, ticker, market, closed)
+    if record.get("minute3_save_pending"):
+        save_state(state)
+        record.pop("minute3_save_pending", None)
+    return decision.get("side") if decision and decision.get("status") == "CONFIRMED" else None
+
 
 def position(ticker):
     for item in client.positions(ticker):
@@ -379,6 +455,10 @@ def entry_side_source(closed, price=Decimal("0"), kind="regular"):
 
 
 def selected_entry_side(record, state, ticker, market, closed, source):
+    if MINUTE3_POLICY:
+        confirmed = confirmed_entry_side(record, state, ticker, market, closed)
+        live = strike_side(market, client.btc_reference_price(), MIN_STRIKE_DISTANCE_DOLLARS)
+        return (confirmed if live == confirmed else None), live, confirmed
     if source == "boruto":
         bias = ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
         return bias, None, bias
@@ -517,6 +597,13 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     # configuration. Opening and optional trigger routes share this minimum.
     if time.time() < closed.timestamp() - 900 + ENTRY_START_DELAY:
         return skip("market_not_started", minimum_elapsed_seconds=ENTRY_START_DELAY)
+    if MINUTE3_POLICY:
+        try:
+            confirmed = confirmed_entry_side(record, state, ticker, client.market(ticker), closed)
+        except Exception as error:
+            return skip("minute3_unavailable", error_type=type(error).__name__)
+        if side != confirmed or confirmed is None:
+            return skip("minute3_not_confirmed")
     if blocked_buy_window(price, closed.timestamp(), time.time()):
         return skip("70_85_cent_window_blocked")
     if kind == "regular" and committed_regular_orders(record) >= MAX_BUYS:
@@ -1203,9 +1290,17 @@ def settlement_entry(record, state, ticker, closed):
         report("attempt_already_recorded")
         return  # Persisted intent prevents repeats after partial fills or lost ACKs.
     market = client.market(ticker)
+    if MINUTE3_POLICY:
+        confirmed = confirmed_entry_side(record, state, ticker, market, closed)
+        if confirmed is None:
+            report("minute3_not_confirmed")
+            return
     spot = client.btc_reference_price()
     side = strike_side(market, spot,
                        MIN_STRIKE_DISTANCE_DOLLARS if DIRECTIONAL_ENTRY_POLICY else Decimal("0"))
+    if MINUTE3_POLICY and side != confirmed:
+        report("minute3_side_conflict")
+        return
     asks = {outcome: quotes(market, outcome)[0] for outcome in ("YES", "NO")}
     observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]),
                     btc_reference=str(spot), strike=str(market["floor_strike"]))
@@ -1355,8 +1450,15 @@ def cycle(state):
     reconcile_entries(state)
     reconcile_sale_allowance(state, ticker, record)
     if time.time() < started.timestamp() + ENTRY_START_DELAY:
-        write_log("ENTRY_START_WAIT", ticker, details="Buys begin one minute after market open")
+        write_log("ENTRY_START_WAIT", ticker, details="Buys require minute-three T-30 confirmation")
         return  # Preserve all entry opportunities while reconciliation continues.
+    if MINUTE3_POLICY:
+        try:
+            if confirmed_entry_side(record, state, ticker, market, closed) is None:
+                return
+        except Exception as error:
+            write_log("MINUTE3_UNAVAILABLE", ticker, details=type(error).__name__)
+            return
     if closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
         settlement_entry(record, state, ticker, closed)
         return
@@ -1478,7 +1580,7 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entries use live BTC at least ${MIN_STRIKE_DISTANCE_DOLLARS} beyond strike: above=YES, below=NO", flush=True)
-    print("ENTRY_START_GATE: buys eligible from60s; opening entries run60s..120s; exit monitoring continues", flush=True)
+    print("ENTRY_START_GATE: minute3 T-30 agreement required; sample180s..210s; skips locked; exits continue", flush=True)
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
