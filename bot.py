@@ -46,6 +46,7 @@ OPENING_EXTRA_WINDOW = 120
 OPENING_55_PAIR = parse_pairs("55:61")
 OPENING_55_WINDOW = 120
 OPENING_OPPOSITE_WINDOW = 120
+FINAL_TWO_MINUTES_ONLY = True
 MIN_STRIKE_DISTANCE_DOLLARS = Decimal("25")
 DIRECTIONAL_ENTRY_POLICY = True
 LATE_ENTRY_PAIRS = parse_pairs(os.getenv("LATE_ENTRY_PAIRS_CENTS", "73:81,85:92"))
@@ -917,6 +918,7 @@ def reconcile_entries(state, now_timestamp=None):
             pending = [i for i in intents if not i.get("entry_closed")]
             ids = {i["order_id"] for i in pending if i.get("order_id") and (
                 i.get("entry_execution_version") != ENTRY_EXECUTION_VERSION
+                or (FINAL_TWO_MINUTES_ONLY and i.get("kind") != SETTLEMENT_KIND)
                 or not tracked_entry_price_allowed(i)
                 or blocked_buy_window(i.get("price", "0"),
                     record.get("close_timestamp", record["entry_cancel_at"] + (900 - CANCEL_AFTER)),
@@ -1381,6 +1383,13 @@ def cycle(state):
     if closed.timestamp() - SETTLEMENT_WINDOW <= time.time() < closed.timestamp():
         settlement_entry(record, state, ticker, closed)
         return
+    if FINAL_TWO_MINUTES_ONLY:
+        write_log("ENTRY_FINAL_WINDOW_ONLY_WAIT", ticker, details=json.dumps({
+            "seconds_remaining": max(0, round(closed.timestamp() - time.time(), 3)),
+            "allowed_window_seconds": SETTLEMENT_WINDOW,
+            "only_allowed_entry_kind": SETTLEMENT_KIND,
+        }))
+        return
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
         return
@@ -1544,17 +1553,9 @@ def main():
     parser = argparse.ArgumentParser(); parser.add_argument("--check", action="store_true"); args = parser.parse_args()
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entries use live BTC at least ${MIN_STRIKE_DISTANCE_DOLLARS} beyond strike: above=YES, below=NO", flush=True)
-    print("ENTRY_START_GATE: buys eligible from60s; opening entries run60s..120s; exit monitoring continues", flush=True)
-    print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
-    print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
-    print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
+    print(f"BUY_POLICY: only settlement entries are enabled in the final {SETTLEMENT_WINDOW}s; all opening, regular, historical, spot, dual, and late entry routes are disabled; exits continue", flush=True)
     print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
-    print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
-    print("BUY_BLOCK limits 70c through 85c inclusive blocked from 6:00 through 12:59; pending bot buys canceled; 96c settlement route retained", flush=True)
-    print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
-    print(f"ENTRY_SIZING earlier_quantity<={ENTRY_QUANTITY} whole contracts; per_order_allocation<=${EARLIER_ORDER_BUDGET}; order count limited by remaining earlier allowance; shared market cap=${MARKET_BUDGET}; entry fee reserve included", flush=True)
-    print(f"ENTRY_RECYCLING confirmed bot sale proceeds refill the ${MARKET_BUDGET - SETTLEMENT_BUDGET} earlier allowance up to entry cost; losses remain charged; no fixed regular purchase-count cap", flush=True)
-    print(f"POSITION_CAP bot_owned_maximum_open={MAX_OPEN_CONTRACTS}; first_entry<={INITIAL_OPEN_CONTRACTS}; one_additional_buy<={MAX_AVERAGE_CONTRACTS} contracts and ${MAX_AVERAGE_DOLLARS} before minute 3; verified manual fills excluded; opposing manual inventory pauses entries and settlement switches", flush=True)
+    print("BUY_ORDER_CLEANUP: pending bot entry orders from disabled routes are canceled", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
                "ENTRY_MIN_CENTS", "ENTRY_MAX_CENTS", "ENTRY_PRICE_CENTS", "EXIT_PRICE_CENTS",
@@ -1563,7 +1564,7 @@ def main():
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
-        print(f"CONFIG_IGNORED: fixed windows: early buys from1m; under60c from1m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from1m to2m; settlement from{(900 - SETTLEMENT_WINDOW) // 60}m; 35c retired", flush=True)
+        print(f"CONFIG_IGNORED: fixed entry policy: only settlement buys from{(900 - SETTLEMENT_WINDOW) // 60}m through market close", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:
