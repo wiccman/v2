@@ -78,10 +78,10 @@ or ambiguous attempt cannot be duplicated after restart.
 From 1:00 through 1:59, a separate unbiased route checks both YES and NO asks
 and submits a 55¢ IOC on the qualifying side closest to 55¢, with a fixed 61¢
 take-profit. A tied quote is skipped. When this route submits, it takes priority
-over the overlapping 52¢ and regular tiers for that cycle; the 57¢ exact-ask
-route remains available when its separate trigger is met. The global live-strike
-direction check is bypassed only for this route, while opposing inventory and
-open-contract limits still apply.
+over the 52¢, exact-57¢ and regular tiers for that cycle, avoiding a duplicate
+opening buy. Those routes remain available on cycles when the 55¢ order is not
+submitted. The global live-strike direction check is bypassed only for this route,
+while opposing inventory and open-contract limits still apply.
 Ordinary limits below 70¢ stop at 6:00. The 70–85¢ restriction blocks
 the former minute-six, minute-eight and late scalp entries. The shared
 gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
