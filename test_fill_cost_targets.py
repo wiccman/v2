@@ -133,7 +133,6 @@ def test_distinct_profit_increments_and_settlement_hold_stay_separate(tmp_path, 
     assert all(order["count"] == "5" for order in e.submissions)
 
 
-@pytest.mark.parametrize("pending", [False, True])
 def test_opening_55_fixed_pair_waits_for_61c_even_with_20c_order_profit_goal(tmp_path):
     e = PairExchange(bid="0.59")
     buy(e, "0.55", "0.55")
