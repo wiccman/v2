@@ -234,17 +234,6 @@ def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profi
         quantity = sum((lot["quantity"] for lot in members), D(0))
         cost = sum((lot["quantity"] * _outcome_cost(lot["fill"], sign)
                     for lot in members), D(0)) / quantity
-        if all(lot["entry"].get("fixed_exit_target") for lot in members):
-            target = D(members[0]["target"])
-            if any(D(lot["target"]) != target for lot in members):
-                raise ValueError("Fixed exit target changed within one entry order")
-            buckets[target] = buckets.get(target, D(0)) + sign * quantity
-            plan = plans.setdefault(target, {"allocations": [], "cost_groups": []})
-            plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
-                                       for lot in members)
-            plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
-                                        "quantity": str(quantity), "fixed_exit_target": str(target)})
-            continue
         target = (cost + profit / quantity).quantize(D("0.01"), rounding=ROUND_CEILING)
         if target > D("0.99"):
             # This buy cannot earn the requested amount before settlement.

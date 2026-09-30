@@ -13,7 +13,6 @@ orders recovered after restart. Any pre-window order expires by 6:00.
 The existing regular cutoff is 12:00, so this change does not reopen those
 routes at 13:00. The 96¢ settlement route, $0.20 per-order profit target, 98¢ exits, and
 existing settlement switching behavior remain in place.
-The settlement route opens only during the final **two minutes** (13:00–15:00); the regular scalp cutoff stays at 12:00.
 
 ## Manual trades on the same account (v2.2.11)
 
@@ -62,7 +61,7 @@ New entries follow fixed price-based windows within each 15-minute market:
 | 75¢ tier | Blocked throughout its former window |
 | 70¢ tier | Blocked throughout its former window |
 | 73¢ and 85¢ late tiers | Blocked throughout their former window |
-| 96¢ settlement limit | 13:00–15:00 |
+| 96¢ settlement limit | 12:00–15:00 |
 
 Eligible early buys start **one minute after contract open**. The opening, regular, optional limit-batch, historical
 and spot routes still enforce their own prices, side rules, funds and deadlines.
@@ -75,13 +74,6 @@ The 35¢ buy is retired. The 57¢ rule requires an exact quoted ask. Its limit
 cannot pay more, although exchange price improvement can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
 of the 52¢ opening flag. Quote/cash waits can retry before minute 2; an accepted
 or ambiguous attempt cannot be duplicated after restart.
-From 1:00 through 1:59, a separate unbiased route checks both YES and NO asks
-and submits a 55¢ IOC on the qualifying side closest to 55¢, with a fixed 61¢
-take-profit. A tied quote is skipped. When this route submits, it takes priority
-over the 52¢, exact-57¢ and regular tiers for that cycle, avoiding a duplicate
-opening buy. Those routes remain available on cycles when the 55¢ order is not
-submitted. The global live-strike direction check is bypassed only for this route,
-while opposing inventory and open-contract limits still apply.
 Ordinary limits below 70¢ stop at 6:00. The 70–85¢ restriction blocks
 the former minute-six, minute-eight and late scalp entries. The shared
 gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
@@ -115,9 +107,7 @@ and as a fallback when the active $0.20 gross profit goal would require an exit 
 | 85¢ (legacy; new buys blocked) | 91¢ |
 
 From minute 1 until 2:00, the bot may submit a directional 52¢ limit
-and an independent exact-57¢ limit, plus the price-only 55¢ route described
-above. The 55¢ route is the only one with a fixed 61¢ exit; the other opening
-and regular trades retain their existing take-profit rules. Each route
+and an independent 57¢ limit. Each route
 uses the shared allowance and at most $2.80 per order, including entry fee room.
 Opening orders are IOC; an unfilled quantity is canceled immediately, and no
 new opening submission may occur at or after 2:00. Each attempt rechecks direction
@@ -132,7 +122,7 @@ it retains the existing YES-bias requirement there.
 Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
 limit-batch, historical, spot and late routes. All routes share a fixed **$20
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
-reserved for the final-two-minute settlement entry**, leaving **$14 for all
+reserved for the final-three-minute settlement entry**, leaving **$14 for all
 earlier routes combined**. Each earlier order uses at most **$2.80 including fees**,
 subject to the $14 earlier allowance. The final order may shrink further to the
 whole contracts affordable from the remaining allowance. This does not force buys
