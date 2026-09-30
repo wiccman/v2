@@ -39,18 +39,18 @@ def exchange(monkeypatch, elapsed=660, ask=".85", side="YES"):
 
 
 @pytest.mark.parametrize("price", [".45", ".52", ".57", ".59", ".62", ".67", ".70", ".73", ".75", ".85"])
-def test_scalps_plus_six_contract_settlement_fit_thirty(price):
+def test_scalps_plus_seven_contract_settlement_fit_market_budget(price):
     record = {}
     # Caller cap cannot expand the configured cap.
     while policy.reserve(record, "YES", D(price), D("100"), D(30), 720, "regular"):
         pass
     scalp_spend = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert 0 < scalp_spend <= 24
+    assert 0 < scalp_spend <= policy.market_budget() - policy.SETTLEMENT_BUDGET
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80")
                for i in record["entry_intents"])
     final = policy.reserve(record, "YES", D(".96"), D(100), D(30), 900, policy.SETTLEMENT_KIND)
-    assert final["quantity"] == "6"
-    assert scalp_spend + D(final["reserved_dollars"]) <= 30
+    assert final["quantity"] == "7"
+    assert scalp_spend + D(final["reserved_dollars"]) <= policy.market_budget()
 
 
 def test_live_loop_limits_pending_inventory_even_with_spare_market_budget(monkeypatch):
@@ -67,7 +67,7 @@ def test_live_loop_limits_pending_inventory_even_with_spare_market_budget(monkey
     clock[0] = closed.timestamp() - 120
     e.market("TEST")["yes_ask_dollars"] = ".972"
     bot.settlement_entry(record, state, "TEST", closed)
-    assert e.entries[-1][1] <= 6
+    assert e.entries[-1][1] <= 7
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("21")
 
 
