@@ -195,7 +195,7 @@ def test_exact_settlement_limit_and_fee_budget(monkeypatch, side, ask):
     bot.settlement_entry(record, state, 'TEST', closed)
     assert len(fake.entries) == 1
     wire, qty, price, kwargs = fake.entries[0]
-    assert qty == 6 and kwargs.get('ioc', False) is False
+    assert qty == 10 and kwargs.get('ioc', False) is False
     assert price == (D('.96') if side == 'YES' else D('.04'))
     intent = record['entry_intents'][0]
     assert D(intent['price']) == D('.96') and intent['exit_target'] == '1'
