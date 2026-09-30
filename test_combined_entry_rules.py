@@ -123,18 +123,18 @@ def test_minute_six_keeps_live_strike_and_higher_ask_requirements(monkeypatch, s
     assert not fake.entries and not record['entry_intents']
 
 
-def test_30_cap_preserves_saved_spending_and_six_dollar_settlement_reserve():
+def test_30_cap_preserves_saved_spending_and_ten_dollar_settlement_reserve():
     record = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '25', 'entry_closed': True}]}
     before = copy.deepcopy(record)
     assert policy.market_budget() == 30
     assert policy.reserve(record, 'YES', D('.75'), D('.77'), D(30), 720, 'regular') is None
     assert policy.reserve(record, 'YES', D('.96'), D('.77'), D(30), 900, policy.SETTLEMENT_KIND) is None
     assert record == before
-    restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '24', 'entry_closed': True}]}
+    restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '20', 'entry_closed': True}]}
     assert policy.reserve(restored, 'YES', D('.45'), D('.77'), D(30), 720, 'regular') is None
     settlement = policy.reserve(restored, 'YES', D('.96'), D('.77'), D(30), 900, policy.SETTLEMENT_KIND)
-    assert D(settlement['quantity']) == 6
-    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('29.94')
+    assert D(settlement['quantity']) == 10
+    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('29.90')
 
 
 def test_stale_configuration_cannot_restore_35_or_regular_57():
