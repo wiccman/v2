@@ -49,7 +49,7 @@ def test_averaging_closes_at_minute_three_and_legacy_position_waits_until_flat(m
     assert bot.funded_entry(record, state, "TEST", "YES", D("0.53"), closed, "regular") == ({}, D(0))
 
 
-def test_settlement_order_respects_eight_contract_position_cap():
+def test_settlement_order_respects_explicit_contract_cap():
     record = {"entry_intents": [], "entry_budget_legacy": False}
     assert entry_policy.entry_quantity(D("0.96"), entry_policy.SETTLEMENT_KIND,
                                        record, max_quantity=D(3)) == 3
