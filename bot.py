@@ -88,6 +88,7 @@ CANCEL_AFTER = REGULAR_ENTRY_END
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
 MAX_OPEN_CONTRACTS = Decimal("8")
+SETTLEMENT_MAX_CONTRACTS = entry_quantity(SETTLEMENT_PRICE, SETTLEMENT_KIND)
 INITIAL_OPEN_CONTRACTS = Decimal("5")
 MAX_AVERAGE_CONTRACTS = Decimal("3")
 MAX_AVERAGE_DOLLARS = Decimal("2.50")
@@ -489,9 +490,10 @@ def pending_entry_contracts(record):
 
 def scalp_entry_limit(record, held, price, kind, closed):
     pending = pending_entry_contracts(record)
-    room = MAX_OPEN_CONTRACTS - abs(held) - pending
     if kind == SETTLEMENT_KIND:
-        return max(Decimal("0"), room), False, None
+        settlement_room = SETTLEMENT_MAX_CONTRACTS - abs(held) - pending
+        return max(Decimal("0"), settlement_room), False, None
+    room = MAX_OPEN_CONTRACTS - abs(held) - pending
     if held == 0 and pending == 0:
         # A fully closed position starts a new episode. A sale during an open
         # position cannot reset the one-average-down allowance.
@@ -724,8 +726,9 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         held = EXIT_MONITOR.bot_inventory(ticker, record, account_held)
     except Exception as error:
         return skip("bot_inventory_pending_before_post", account_held=str(account_held), detail=str(error))
-    if abs(held) + pending_entry_contracts(record) + quantity > MAX_OPEN_CONTRACTS:
-        return skip("open_contract_limit_before_post", held=str(held), quantity=str(quantity))
+    contract_cap = SETTLEMENT_MAX_CONTRACTS if kind == SETTLEMENT_KIND else MAX_OPEN_CONTRACTS
+    if abs(held) + pending_entry_contracts(record) + quantity > contract_cap:
+        return skip("open_contract_limit_before_post", held=str(held), quantity=str(quantity), cap=str(contract_cap))
     if switch:
         latest_account_held = settlement_position(ticker)
         if latest_account_held != account_held:
@@ -1557,7 +1560,7 @@ def main():
     version = Path(__file__).with_name("VERSION").read_text().strip()
     print(f"Strike Ruler bot v{version}; execution={EXECUTION_STRATEGY}; entries use live BTC at least ${MIN_STRIKE_DISTANCE_DOLLARS} beyond strike: above=YES, below=NO", flush=True)
     print(f"BUY_POLICY: only settlement entries are enabled in the final {SETTLEMENT_WINDOW}s; all opening, regular, historical, spot, dual, and late entry routes are disabled; exits continue", flush=True)
-    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=$6 reserved; quantity=6; confirm opposite close even at loss before buying; hold to settlement", flush=True)
+    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=${SETTLEMENT_BUDGET:.2f} reserved; max_contracts={SETTLEMENT_MAX_CONTRACTS}; confirm opposite close even at loss before buying; hold to settlement", flush=True)
     print("BUY_ORDER_CLEANUP: pending bot entry orders from disabled routes are canceled", flush=True)
     print("ENTRY_FUNDING market exchange_index cash required; insufficient funds retry after 30s; no automatic transfers", flush=True)
     ignored = ("ENTRY_BUDGET_DOLLARS", "TAKE_PROFIT_CENTS", "TAKE_PROFIT_PERCENT", "STOP_EXIT_CENTS",
