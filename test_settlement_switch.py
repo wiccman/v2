@@ -57,7 +57,7 @@ class SwitchExchange(PairExchange):
 
 
 def setup_switch(tmp_path, monkeypatch, desired='YES', liquidity='100', manual=False):
-    _, record, state, clock, closed = cycle_setup(monkeypatch, 720)
+    _, record, state, clock, closed = cycle_setup(monkeypatch, 780)
     monkeypatch.setattr(bot, 'END', 720)
     monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
     exchange = SwitchExchange(desired, liquidity)

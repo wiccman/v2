@@ -10,7 +10,7 @@ EARLIER_ORDER_BUDGET = D("2.80")  # Per-order ceiling, also constrained by remai
 SETTLEMENT_BUDGET = D("6")
 SETTLEMENT_PRICE = D("0.96")
 SETTLEMENT_KIND = "settlement_97"  # Durable identifier for existing intents across upgrades.
-SETTLEMENT_WINDOW = 180
+SETTLEMENT_WINDOW = 120  # Only the final two minutes of each market.
 
 
 def settlement_price_allowed(price):

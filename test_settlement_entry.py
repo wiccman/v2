@@ -22,7 +22,7 @@ def setup(monkeypatch, elapsed=780, side='YES'):
     return fake, record, state, clock, closed
 
 
-@pytest.mark.parametrize('elapsed,expected', [(719,0),(720,1),(779,1),(780,1),(899,1),(900,0)])
+@pytest.mark.parametrize('elapsed,expected', [(719,0),(720,0),(779,0),(780,1),(899,1),(900,0)])
 @pytest.mark.parametrize('side', ['YES','NO'])
 def test_boundary_side_and_six_contract_resting_limit(monkeypatch, elapsed, expected, side):
     fake, record, state, clock, closed = setup(monkeypatch, elapsed, side)
@@ -38,6 +38,13 @@ def test_boundary_side_and_six_contract_resting_limit(monkeypatch, elapsed, expe
         assert D(intent['reserved_dollars']) == D('5.94')
         bot.settlement_entry(copy.deepcopy(record), state, 'TEST', closed)
         assert len(fake.entries) == 1
+
+
+def test_final_three_minutes_no_longer_accept_new_settlement_entries(monkeypatch):
+    for elapsed in (720, 750, 779):
+        fake, record, state, clock, closed = setup(monkeypatch, elapsed)
+        bot.settlement_entry(record, state, 'TEST', closed)
+        assert not fake.entries
 
 
 @pytest.mark.parametrize('ask,expected', [
@@ -239,3 +246,25 @@ def test_existing_settlement_intents_stay_recognized(price):
     intent = dict(kind=policy.SETTLEMENT_KIND, price=price,
                   hold_to_settlement=True, exit_target='1')
     assert bot.tracked_entry_price_allowed(intent)
+
+
+def test_pre_window_resting_settlement_order_is_cancelled(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch, 750)
+    record['close_timestamp'] = closed.timestamp()
+    record['entry_cancel_at'] = closed.timestamp() - 180
+    order_id = 'old-settlement-order'
+    record['entry_intents'] = [dict(
+        order_id=order_id, client_id='old-settlement-client', side='YES', price='0.96',
+        quantity='6', reserved_dollars='5.94', reservation_initial_dollars='5.94',
+        cancel_at=closed.timestamp(), kind=policy.SETTLEMENT_KIND, entry_closed=False,
+        resting_entry=True, entry_execution_version=bot.ENTRY_EXECUTION_VERSION,
+        hold_to_settlement=True, exit_target='1')]
+    cancelled = []
+    monkeypatch.setattr(bot, 'cancel_confirmed', lambda oid, ticker: cancelled.append(oid) or True)
+    monkeypatch.setattr(fake, 'order', lambda oid, ticker: {
+        'order_id': oid, 'status': 'canceled', 'fill_count_fp': '0'})
+
+    bot.reconcile_entries(state, now_timestamp=closed.timestamp() - 150)
+
+    assert cancelled == [order_id]
+    assert record['entry_intents'][0]['entry_closed']

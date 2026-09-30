@@ -13,6 +13,7 @@ orders recovered after restart. Any pre-window order expires by 6:00.
 The existing regular cutoff is 12:00, so this change does not reopen those
 routes at 13:00. The 96¢ settlement route, $0.20 per-order profit target, 98¢ exits, and
 existing settlement switching behavior remain in place.
+The settlement route opens only during the final **two minutes** (13:00–15:00); the regular scalp cutoff stays at 12:00.
 
 ## Manual trades on the same account (v2.2.11)
 
@@ -61,7 +62,7 @@ New entries follow fixed price-based windows within each 15-minute market:
 | 75¢ tier | Blocked throughout its former window |
 | 70¢ tier | Blocked throughout its former window |
 | 73¢ and 85¢ late tiers | Blocked throughout their former window |
-| 96¢ settlement limit | 12:00–15:00 |
+| 96¢ settlement limit | 13:00–15:00 |
 
 Eligible early buys start **one minute after contract open**. The opening, regular, optional limit-batch, historical
 and spot routes still enforce their own prices, side rules, funds and deadlines.
@@ -122,7 +123,7 @@ it retains the existing YES-bias requirement there.
 Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
 limit-batch, historical, spot and late routes. All routes share a fixed **$20
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
-reserved for the final-three-minute settlement entry**, leaving **$14 for all
+reserved for the final-two-minute settlement entry**, leaving **$14 for all
 earlier routes combined**. Each earlier order uses at most **$2.80 including fees**,
 subject to the $14 earlier allowance. The final order may shrink further to the
 whole contracts affordable from the remaining allowance. This does not force buys
