@@ -133,6 +133,19 @@ def test_distinct_profit_increments_and_settlement_hold_stay_separate(tmp_path, 
     assert all(order["count"] == "5" for order in e.submissions)
 
 
+def test_opening_55_fixed_pair_waits_for_61c_even_with_20c_order_profit_goal(tmp_path):
+    e = PairExchange(bid="0.59")
+    buy(e, "0.55", "0.55")
+    e.intents[-1]["fixed_exit_target"] = True
+    m, _ = monitor(tmp_path, e)
+    m.run_once()
+    assert m.healthy and e.held == 5 and not e.submissions
+    e.bid = D("0.61")
+    m.run_once()
+    assert m.healthy and e.held == 0
+    assert e.submissions[-1]["price"] == "0.6100"
+
+
 @pytest.mark.parametrize("pending", [False, True])
 def test_upgrade_replays_original_fixed_exit_before_repricing_remaining(tmp_path, pending):
     e = PairExchange(bid="0.61")

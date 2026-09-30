@@ -43,6 +43,8 @@ OPENING_BIAS_PAIR = parse_pairs(os.getenv("OPENING_BIAS_PAIR_CENTS", "52:60"))
 OPENING_WINDOW = seconds_from_minutes(os.getenv("OPENING_WINDOW_MINUTES", "2"))
 OPENING_EXTRA_PAIR = parse_pairs("57:62")
 OPENING_EXTRA_WINDOW = 120
+OPENING_55_PAIR = parse_pairs("55:61")
+OPENING_55_WINDOW = 120
 OPENING_OPPOSITE_WINDOW = 120
 MIN_STRIKE_DISTANCE_DOLLARS = Decimal("25")
 DIRECTIONAL_ENTRY_POLICY = True
@@ -56,7 +58,7 @@ if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
     raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
 # Preserve exits and reconciliation for inventory opened under retired tiers.
 LEGACY_EXIT_PAIRS = parse_pairs("35:42,38:43,39:46")
-NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS, **OPENING_EXTRA_PAIR}.items()))
+NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS, **OPENING_EXTRA_PAIR, **OPENING_55_PAIR}.items()))
 NEW_ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
 ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **NEW_ENTRY_EXIT_PAIRS}.items()))
 NEW_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")
@@ -374,6 +376,8 @@ def uses_entry_bias(price, kind):
 
 
 def entry_side_source(closed, price=Decimal("0"), kind="regular"):
+    if kind == "opening_55":
+        return "price_only"
     if not DIRECTIONAL_ENTRY_POLICY:
         elapsed = time.time() - (closed.timestamp() - 900)
         if uses_entry_bias(price, kind) and elapsed < LOW_PRICE_ENTRY_END:
@@ -382,6 +386,8 @@ def entry_side_source(closed, price=Decimal("0"), kind="regular"):
 
 
 def selected_entry_side(record, state, ticker, market, closed, source):
+    if source == "price_only":
+        return None, None, None
     if source == "boruto":
         bias = ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
         return bias, None, bias
@@ -420,7 +426,10 @@ def ensure_entry_bias(record, state, ticker, market, closed):
 
 def entry_decision(record, side, price, kind, live_side=None, bias_side=None, side_source="live_strike"):
     allowed = live_side in ("YES", "NO") and side == live_side
-    if kind == SETTLEMENT_KIND:
+    if kind == "opening_55" and side_source == "price_only":
+        allowed = side in ("YES", "NO")
+        reason = "opening_55_price_only"
+    elif kind == SETTLEMENT_KIND:
         allowed = side in ("YES", "NO") and side == live_side and Decimal(str(price)) == SETTLEMENT_PRICE
         reason = "live_strike_97_cent_limit"
         switch = record.get("settlement_switch", {})
@@ -536,7 +545,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
         for i in record.get("entry_intents", [])
     ):
         return skip("opening_attempt_already_committed")
-    if kind in {"opening_bias", "late_bias"} and any(
+    if kind in {"opening_bias", "late_bias", "opening_55"} and any(
         i.get("kind") == kind and Decimal(str(i.get("price", "-1"))) == Decimal(str(price))
         and attempt_committed(i) for i in record.get("entry_intents", [])
     ):
@@ -577,6 +586,11 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     now_timestamp = time.time() if now_timestamp is None else now_timestamp
     policy_cutoff = closed.timestamp() - 900 + (LOW_PRICE_ENTRY_END
         if Decimal(str(price)) < EARLY_ENTRY_PRICE_CEILING else END)
+    if kind == "opening_55":
+        opening_cutoff = closed.timestamp() - 900 + OPENING_55_WINDOW
+        if not closed.timestamp() - 900 + ENTRY_START_DELAY <= time.time() < opening_cutoff:
+            return skip("outside_opening_55_window")
+        policy_cutoff = min(policy_cutoff, opening_cutoff)
     if side_source == "opposite_strike":
         policy_cutoff = min(policy_cutoff, closed.timestamp() - 900 + OPENING_OPPOSITE_WINDOW)
     if Decimal(str(price)) in OPENING_EXTRA_PAIR:
@@ -662,7 +676,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     try:
         fresh_market = client.market(ticker)
         fresh_side, _, _ = selected_entry_side(record, state, ticker, fresh_market, closed, side_source)
-        if fresh_side != side:
+        if side_source != "price_only" and fresh_side != side:
             return skip("entry_side_changed_before_post")
         ask, _ = quotes(fresh_market, side)
         if kind != SETTLEMENT_KIND and Decimal(str(price)) >= EARLY_ENTRY_PRICE_CEILING:
@@ -737,6 +751,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     if side_source == "boruto":
         intent["bias_build"] = SIGNAL_BUILD
     intent["exit_target"] = "1" if kind == SETTLEMENT_KIND else str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
+    if kind == "opening_55":
+        intent["fixed_exit_target"] = True
     intent["resting_entry"] = resting
     if kind == SETTLEMENT_KIND:
         intent["hold_to_settlement"] = True
@@ -1380,19 +1396,59 @@ def cycle(state):
                 save_state(state)
     current = client.market(ticker)
     side_source = entry_side_source(closed)
+    elapsed = time.time() - started.timestamp()
     try:
         selected_side, live_side, _ = selected_entry_side(record, state, ticker, current, closed, side_source)
     except Exception as error:
         write_log("ENTRY_SIDE_UNAVAILABLE", ticker, details=repr(error))
-        return
+        if ENTRY_START_DELAY <= elapsed < OPENING_55_WINDOW:
+            selected_side, live_side = None, None
+        else:
+            return
     signal = (record["entry_bias"] if side_source == "boruto" else
               {"prediction": selected_side, "base_confidence": side_source.upper()})
     write_log("ENTRY_SIDE", ticker, prediction=selected_side or "AT_STRIKE",
               details=json.dumps({"side_source": side_source, "live_strike_side": live_side,
                                   "strike": str(current["floor_strike"])}))
-    elapsed = time.time() - started.timestamp()
+    opening_55_submitted = False
+    if ENTRY_START_DELAY <= elapsed < OPENING_55_WINDOW:
+        candidates = []
+        for side in ("YES", "NO"):
+            ask, _ = quotes(current, side)
+            if ask.is_finite() and MIN_ENTRY_PRICE <= ask <= Decimal("0.55"):
+                candidates.append((ask, side))
+        if candidates:
+            # Price alone selects the side: prefer the qualifying ask closest
+            # to 55c. If both books are identical, wait instead of inventing
+            # a directional tie-break.
+            best_ask = max(ask for ask, _ in candidates)
+            best = [(ask, side) for ask, side in candidates if ask == best_ask]
+            if len(best) == 1:
+                ask, side = best[0]
+                price, target = next(iter(OPENING_55_PAIR.items()))
+                result, quantity = funded_entry(
+                    record, state, ticker, side, price, closed, "opening_55",
+                    submit_before=started.timestamp() + OPENING_55_WINDOW,
+                    cancel_at=started.timestamp() + OPENING_55_WINDOW,
+                )
+                if result.get("order_id"):
+                    opening_55_submitted = True
+                    record["orders"].append(result["order_id"])
+                write_log("OPENING_55_LIMIT", ticker, prediction=side, price=str(price),
+                          quantity=str(quantity), details=json.dumps({
+                              "observed_ask": str(ask), "exit_target": str(target),
+                              "entry_cutoff": started.timestamp() + OPENING_55_WINDOW,
+                              "order": result,
+                          }))
+                save_state(state)
+            else:
+                write_log("OPENING_55_AMBIGUOUS", ticker, details=json.dumps({
+                    "qualifying_asks": {side: str(ask) for ask, side in candidates},
+                    "action": "skip_tie",
+                }))
     # Every opening route follows the opposite live strike side until 2:00.
-    if OPENING_BIAS_ENABLED and ENTRY_START_DELAY <= elapsed < OPENING_WINDOW and signal["prediction"] in ("YES", "NO"):
+    if (not opening_55_submitted and OPENING_BIAS_ENABLED
+            and ENTRY_START_DELAY <= elapsed < OPENING_WINDOW and signal["prediction"] in ("YES", "NO")):
         price, target = next(iter(OPENING_BIAS_PAIR.items()))
         result, quantity = funded_entry(record, state, ticker, selected_side, price, closed, "opening_bias",
             submit_before=started.timestamp() + OPENING_WINDOW, cancel_at=started.timestamp() + OPENING_WINDOW)
@@ -1405,7 +1461,9 @@ def cycle(state):
     # An independent opening attempt is required: the legacy 52c attempt flag
     # must not consume the 57c opportunity. A quote/cash wait creates no intent,
     # so this route can try again while its two-minute window remains open.
-    if ENTRY_START_DELAY <= time.time() - started.timestamp() < OPENING_EXTRA_WINDOW and selected_side in ("YES", "NO"):
+    if (not opening_55_submitted
+            and ENTRY_START_DELAY <= time.time() - started.timestamp() < OPENING_EXTRA_WINDOW
+            and selected_side in ("YES", "NO")):
         for price, target in OPENING_EXTRA_PAIR.items():
             result, quantity = funded_entry(record, state, ticker, selected_side, price, closed, "opening_57",
                 submit_before=started.timestamp() + OPENING_EXTRA_WINDOW,
@@ -1415,11 +1473,14 @@ def cycle(state):
                 write_log("OPENING_57_LIMIT", ticker, prediction=selected_side, price=str(price), quantity=str(quantity),
                           details=json.dumps({"exit_target": str(target), "entry_cutoff": started.timestamp() + OPENING_EXTRA_WINDOW, "order": result}))
                 save_state(state)
-    if update_prediction(record, ticker, current, elapsed, selected_side): save_state(state)
+    if selected_side in ("YES", "NO") and update_prediction(record, ticker, current, elapsed, selected_side):
+        save_state(state)
     reconcile_entries(state)
     # Only the independent paired monitor owns exits. Never fall back to a
     # single-price exit path when both entry tiers can hold inventory.
-    can_buy = START <= elapsed < END and selected_side in ("YES", "NO") and time.time() - record["last_buy"] >= INTERVAL
+    can_buy = (not opening_55_submitted and START <= elapsed < END
+               and selected_side in ("YES", "NO")
+               and time.time() - record["last_buy"] >= INTERVAL)
     if can_buy:
         ask, _ = quotes(current, selected_side)
         counted = False

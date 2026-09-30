@@ -75,6 +75,13 @@ The 35¢ buy is retired. The 57¢ rule requires an exact quoted ask. Its limit
 cannot pay more, although exchange price improvement can produce a cheaper fill. The 57¢ rule has its own persisted attempt, independent
 of the 52¢ opening flag. Quote/cash waits can retry before minute 2; an accepted
 or ambiguous attempt cannot be duplicated after restart.
+From 1:00 through 1:59, a separate unbiased route checks both YES and NO asks
+and submits a 55¢ IOC on the qualifying side closest to 55¢, with a fixed 61¢
+take-profit. A tied quote is skipped. When this route submits, it takes priority
+over the 52¢, exact-57¢ and regular tiers for that cycle, avoiding a duplicate
+opening buy. Those routes remain available on cycles when the 55¢ order is not
+submitted. The global live-strike direction check is bypassed only for this route,
+while opposing inventory and open-contract limits still apply.
 Ordinary limits below 70¢ stop at 6:00. The 70–85¢ restriction blocks
 the former minute-six, minute-eight and late scalp entries. The shared
 gateway caps the 57¢ route at 2:00 on every path. Slow calls cannot extend a deadline.
@@ -108,7 +115,9 @@ and as a fallback when the active $0.20 gross profit goal would require an exit 
 | 85¢ (legacy; new buys blocked) | 91¢ |
 
 From minute 1 until 2:00, the bot may submit a directional 52¢ limit
-and an independent 57¢ limit. Each route
+and an independent exact-57¢ limit, plus the price-only 55¢ route described
+above. The 55¢ route is the only one with a fixed 61¢ exit; the other opening
+and regular trades retain their existing take-profit rules. Each route
 uses the shared allowance and at most $2.80 per order, including entry fee room.
 Opening orders are IOC; an unfilled quantity is canceled immediately, and no
 new opening submission may occur at or after 2:00. Each attempt rechecks direction

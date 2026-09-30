@@ -103,6 +103,41 @@ def test_exact_minute_two_resumes_bias_even_when_strike_opposes_opening_rule(mon
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
+def test_opening_55_uses_price_only_side_and_fixed_61_exit(monkeypatch, side):
+    fake, record, state, clock, closed = setup(monkeypatch, 60, ".55", side)
+    monkeypatch.setattr(fake, "btc_reference_price", lambda: pytest.fail("No BTC signal for price-only entry"))
+    record["entry_bias"] = {"prediction": "NO" if side == "YES" else "YES", "build": "old"}
+    result, quantity = bot.funded_entry(record, state, "TEST", side, D(".55"), closed, "opening_55")
+    assert result["order_id"] and quantity == 5
+    intent = record["entry_intents"][-1]
+    assert intent["side"] == side and intent["side_source"] == "price_only"
+    assert D(intent["exit_target"]) == D(".61") and intent["fixed_exit_target"] is True
+    assert intent["cancel_at"] == closed.timestamp() - 780
+    assert fake.entries[-1][3]["ioc"] is True
+
+
+@pytest.mark.parametrize("elapsed,allowed", [(59.999, False), (60, True), (119.999, True), (120, False)])
+def test_opening_55_has_first_two_minute_window(monkeypatch, elapsed, allowed):
+    fake, record, state, clock, closed = setup(monkeypatch, elapsed, ".55")
+    result, _ = bot.funded_entry(record, state, "TEST", "YES", D(".55"), closed, "opening_55")
+    assert bool(result.get("order_id")) == allowed
+
+
+def test_cycle_prioritizes_unbiased_55_rule_over_overlapping_openers(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch, 60, ".55", "YES")
+    market = fake.market("TEST")
+    market["yes_ask_dollars"] = ".55"
+    market["no_ask_dollars"] = ".48"
+    monkeypatch.setattr(fake, "market", lambda ticker: market)
+    monkeypatch.setattr(fake, "btc_reference_price", lambda: pytest.fail("No BTC signal for price-only entry"))
+    monkeypatch.setattr(bot, "DUAL_LIMIT_BUYS_ENABLED", False)
+    monkeypatch.setattr(bot, "HISTORICAL_STRIKE_ENABLED", False)
+    bot.cycle(state)
+    assert len(fake.entries) == 1
+    assert record["entry_intents"][-1]["kind"] == "opening_55"
+    assert record["entry_intents"][-1]["side"] == "YES"
+
+
 def test_opposing_inventory_still_blocks_opening(monkeypatch, side):
     fake, record, state, clock, closed = setup(monkeypatch, 60, ".52", side)
     fake.held = D(-3 if side == "YES" else 3)
