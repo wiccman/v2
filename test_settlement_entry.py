@@ -35,7 +35,7 @@ def test_boundary_side_and_ten_contract_resting_limit(monkeypatch, elapsed, expe
         assert (wire, price) == (('bid', D('.96')) if side == 'YES' else ('ask', D('.04')))
         intent = record['entry_intents'][-1]
         assert intent['hold_to_settlement'] and intent['exit_target'] == '1'
-        assert D(intent['reserved_dollars']) == D('5.94')
+        assert D(intent['reserved_dollars']) == D('9.90')
         bot.settlement_entry(copy.deepcopy(record), state, 'TEST', closed)
         assert len(fake.entries) == 1
 
