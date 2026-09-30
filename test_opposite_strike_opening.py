@@ -123,7 +123,6 @@ def test_opening_55_has_first_two_minute_window(monkeypatch, elapsed, allowed):
     assert bool(result.get("order_id")) == allowed
 
 
-@pytest.mark.parametrize("side", ["YES", "NO"])
 def test_cycle_prioritizes_unbiased_55_rule_over_overlapping_openers(monkeypatch):
     fake, record, state, clock, closed = setup(monkeypatch, 60, ".55", "YES")
     market = fake.market("TEST")
