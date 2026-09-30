@@ -268,3 +268,47 @@ def test_pre_window_resting_settlement_order_is_cancelled(monkeypatch):
 
     assert cancelled == [order_id]
     assert record['entry_intents'][0]['entry_closed']
+
+
+@pytest.mark.parametrize('elapsed,expected', [
+    (0, 0), (60, 0), (720, 0), (779, 0), (780, 1), (899, 1), (900, 0),
+])
+def test_live_policy_allows_buys_only_during_final_two_minutes(monkeypatch, elapsed, expected):
+    fake, record, state, clock, closed = setup(monkeypatch, elapsed)
+    monkeypatch.setattr(bot, 'FINAL_TWO_MINUTES_ONLY', True)
+    fake.market('TEST').update(yes_ask_dollars='0.96', no_ask_dollars='0.05')
+    bot.cycle(state)
+    assert len(fake.entries) == expected
+    if expected:
+        assert record['entry_intents'][-1]['kind'] == bot.SETTLEMENT_KIND
+
+
+def test_final_two_minute_only_policy_cancels_old_non_settlement_buy(monkeypatch):
+    fake, record, state, clock, closed = setup(monkeypatch, 300)
+    monkeypatch.setattr(bot, 'FINAL_TWO_MINUTES_ONLY', True)
+    record['close_timestamp'] = closed.timestamp()
+    record['entry_intents'] = [dict(
+        order_id='old-regular', client_id='old-regular', kind='regular', side='YES',
+        price='0.53', quantity='4', reserved_dollars='2.24', cancel_at=closed.timestamp(),
+        entry_execution_version=bot.ENTRY_EXECUTION_VERSION, resting_entry=True,
+        entry_closed=False,
+    )]
+    cancelled = []
+    monkeypatch.setattr(bot, 'cancel_confirmed', lambda oid, ticker: cancelled.append(oid) or True)
+    monkeypatch.setattr(fake, 'order', lambda oid, ticker: {
+        'order_id': oid, 'status': 'resting', 'fill_count_fp': '0'})
+    bot.reconcile_entries(state)
+    assert cancelled == ['old-regular']
+    assert record['entry_intents'][0]['entry_closed'] is True
+
+
+@pytest.mark.parametrize('kind,price', [
+    ('regular', '.53'), ('opening_55', '.55'), ('opening_57', '.57'),
+    ('late_bias', '.73'), ('historical', '.45'), ('spot', '.45'), ('dual', '.45'),
+])
+def test_non_settlement_buy_routes_are_blocked_at_entry_helper(monkeypatch, kind, price):
+    fake, record, state, clock, closed = setup(monkeypatch, 300)
+    monkeypatch.setattr(bot, 'FINAL_TWO_MINUTES_ONLY', True)
+    result = bot.funded_entry(record, state, 'TEST', 'YES', D(price), closed, kind)
+    assert result == ({}, D('0'))
+    assert not fake.entries
