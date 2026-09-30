@@ -7,10 +7,10 @@ FEE_RESERVE = D("0.03")  # per contract, including fractional-fill rounding cush
 ZERO = D("0")
 ENTRY_QUANTITY = D("5")
 EARLIER_ORDER_BUDGET = D("2.80")  # Per-order ceiling, also constrained by remaining market allowance.
-SETTLEMENT_BUDGET = D("10")
+SETTLEMENT_BUDGET = D("6")
 SETTLEMENT_PRICE = D("0.96")
 SETTLEMENT_KIND = "settlement_97"  # Durable identifier for existing intents across upgrades.
-SETTLEMENT_WINDOW = 120  # Only the final two minutes of each market.
+SETTLEMENT_WINDOW = 180
 
 
 def settlement_price_allowed(price):

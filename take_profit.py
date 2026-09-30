@@ -251,8 +251,7 @@ class TakeProfitMonitor:
                     item.get("entry_execution_version", 3) < 4):
                     raise ValueError("Saved entry target conflicts with configured pair")
                 entries[order_id] = {"side": item["side"], "target": str(saved_target),
-                                     "price": str(price),
-                                     "fixed_exit_target": item.get("fixed_exit_target") is True}
+                                     "price": str(price)}
         exits = ledger.get("exit_orders", {})
         # An order status can update before its fills endpoint. Do not reuse the
         # inventory until all previously confirmed exits appear in fill history.
