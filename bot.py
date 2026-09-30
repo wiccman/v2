@@ -80,7 +80,8 @@ MARKET_BUDGET = market_budget()
 PER_ORDER_PROFIT_DOLLARS = Decimal(os.getenv("PER_ORDER_PROFIT_DOLLARS", "0.20"))
 if not PER_ORDER_PROFIT_DOLLARS.is_finite() or PER_ORDER_PROFIT_DOLLARS <= 0:
     raise ValueError("PER_ORDER_PROFIT_DOLLARS must be finite and positive")
-CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
+REGULAR_ENTRY_END = 720  # Keep regular and resting scalp entries closed at minute 12.
+CANCEL_AFTER = REGULAR_ENTRY_END
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
 MAX_OPEN_CONTRACTS = Decimal("8")
@@ -91,7 +92,7 @@ AVERAGE_DOWN_CUTOFF = 180
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 ENTRY_START_DELAY = 60  # Wait for the first minute of each market.
 START = ENTRY_START_DELAY
-END = 900 - SETTLEMENT_WINDOW  # Final three minutes belong to the settlement route.
+END = REGULAR_ENTRY_END  # Regular scalp entries keep their existing minute-12 cutoff.
 PREDICTION_MINUTES = (2, 4, 6)
 PREDICTION_GRACE_SECONDS = 15
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
@@ -846,6 +847,9 @@ def reconcile_entries(state, now_timestamp=None):
                     save_state(state)
             intents = record.get("entry_intents", [])
             tracked = {i["order_id"] for i in intents if i.get("order_id")}
+            settlement_window_start = record.get(
+                "close_timestamp", record["entry_cancel_at"] + (900 - CANCEL_AFTER)
+            ) - SETTLEMENT_WINDOW
             def complete(item, order):
                 item["entry_closed"] = True
                 try:
@@ -899,9 +903,10 @@ def reconcile_entries(state, now_timestamp=None):
                 i.get("entry_execution_version") != ENTRY_EXECUTION_VERSION
                 or not tracked_entry_price_allowed(i)
                 or blocked_buy_window(i.get("price", "0"),
-                    record.get("close_timestamp", record["entry_cancel_at"] + SETTLEMENT_WINDOW),
+                    record.get("close_timestamp", record["entry_cancel_at"] + (900 - CANCEL_AFTER)),
                     max(now_timestamp, time.time()))
                 or now_timestamp >= i.get("cancel_at", record["entry_cancel_at"])
+                or (i.get("kind") == SETTLEMENT_KIND and now_timestamp < settlement_window_start)
                 or record.get("entry_budget_legacy")
                 or (record.get("settlement_switch") and i.get("kind") != SETTLEMENT_KIND))}
             # A resting buy cannot remain eligible after BTC leaves the
