@@ -526,6 +526,9 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
             "elapsed_seconds": round(time.time() - (closed.timestamp() - 900), 3), **details}))
         return {}, Decimal("0")
 
+    if FINAL_TWO_MINUTES_ONLY and kind != SETTLEMENT_KIND:
+        return skip("final_two_minutes_only")
+
     # Use the actual clock, not a caller-supplied timestamp or stale Railway
     # configuration. Opening and optional trigger routes share this minimum.
     if time.time() < closed.timestamp() - 900 + ENTRY_START_DELAY:
