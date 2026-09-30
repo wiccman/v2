@@ -300,3 +300,15 @@ def test_final_two_minute_only_policy_cancels_old_non_settlement_buy(monkeypatch
     bot.reconcile_entries(state)
     assert cancelled == ['old-regular']
     assert record['entry_intents'][0]['entry_closed'] is True
+
+
+@pytest.mark.parametrize('kind,price', [
+    ('regular', '.53'), ('opening_55', '.55'), ('opening_57', '.57'),
+    ('late_bias', '.73'), ('historical', '.45'), ('spot', '.45'), ('dual', '.45'),
+])
+def test_non_settlement_buy_routes_are_blocked_at_entry_helper(monkeypatch, kind, price):
+    fake, record, state, clock, closed = setup(monkeypatch, 300)
+    monkeypatch.setattr(bot, 'FINAL_TWO_MINUTES_ONLY', True)
+    result = bot.funded_entry(record, state, 'TEST', 'YES', D(price), closed, kind)
+    assert result == ({}, D('0'))
+    assert not fake.entries
