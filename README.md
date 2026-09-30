@@ -11,14 +11,14 @@ the historical 75¢ minute-six and 70¢/73¢/85¢ late-entry rules listed below.
 Pending bot buys in that band are canceled during reconciliation, including
 orders recovered after restart. Any pre-window order expires by 6:00.
 The existing regular cutoff is 12:00, so this change does not reopen those
-routes at 13:00. The 96¢ settlement route, +20¢ take profits, 98¢ exits, and
+routes at 13:00. The 96¢ settlement route, $0.20 per-order profit target, 98¢ exits, and
 existing settlement switching behavior remain in place.
 
 ## Manual trades on the same account (v2.2.11)
 
 Verified manual fills on the same side no longer block the bot's first buy or
 consume its eight-contract position cap. The cap, five-contract first entry,
-one average-down allowance, $10 market budget and take-profit sizing apply to
+one average-down allowance, $20 market budget and take-profit sizing apply to
 bot-owned inventory. All orders still require sufficient available account cash.
 
 The exit worker replays fills using saved bot order IDs, reconciles them to the
@@ -88,19 +88,19 @@ continues until market close.
 
 All routes use these default entry limits, configurable through
 `ENTRY_EXIT_PAIRS_CENTS`. The paired exit column is retained for legacy lots
-and as a fallback when the active 20¢ increase target would exceed 99¢.
+and as a fallback when the active $0.20 gross profit goal would require an exit above 99¢.
 
-| Entry limit | Exit if filled at the limit |
+| Entry limit | Saved paired fallback |
 | --- | --- |
-| 45¢ | 65¢ |
-| 48¢ | 68¢ |
-| 51¢ | 71¢ |
-| 53¢ | 73¢ |
-| 56¢ | 76¢ |
-| 59¢ | 79¢ |
-| 62¢ | 82¢ |
-| 64¢ | 84¢ |
-| 67¢ | 87¢ |
+| 45¢ | 55¢ |
+| 48¢ | 53¢ |
+| 51¢ | 56¢ |
+| 53¢ | 58¢ |
+| 56¢ | 61¢ |
+| 59¢ | 64¢ |
+| 62¢ | 67¢ |
+| 64¢ | 69¢ |
+| 67¢ | 72¢ |
 | 70¢ (legacy; new buys blocked) | 76¢ |
 | 75¢ (legacy; new buys blocked) | 83¢ |
 | 73¢ (legacy; new buys blocked) | 79¢ |
@@ -120,16 +120,15 @@ it buys NO during the opening window. If configured to extend beyond minute 2,
 it retains the existing YES-bias requirement there.
 
 Earlier entry orders request **up to 5 whole contracts**, on opening, regular,
-limit-batch, historical, spot and late routes. All routes share a fixed **$10
+limit-batch, historical, spot and late routes. All routes share a fixed **$20
 allowance per 15-minute market**, including entry fee reserves. Of that, **$6 is
-reserved for the final-three-minute settlement entry**, leaving **$4 for all
+reserved for the final-three-minute settlement entry**, leaving **$14 for all
 earlier routes combined**. Each earlier order uses at most **$2.80 including fees**,
-subject to the $24 earlier allowance. For example, an initial 57¢ or 67¢ order requests
-4 contracts, and a 75¢ or 85¢ order requests 3. The final order may shrink further
-to the whole contracts affordable from the remaining allowance. The earlier allowance covers six maximum $2.80 order allocations plus remaining room; it does not force buys
-outside their price/time rules or guarantee fills. Exchange partial fills remain possible, and exits sell only
-verified filled inventory.
-Legacy `ENTRY_BUDGET_DOLLARS` and `MARKET_BUDGET_DOLLARS` settings are ignored.
+subject to the $14 earlier allowance. The final order may shrink further to the
+whole contracts affordable from the remaining allowance. This does not force buys
+outside their price/time rules or guarantee fills. Exchange partial fills remain
+possible, and exits sell only verified filled inventory.
+Legacy `ENTRY_BUDGET_DOLLARS` is ignored; `MARKET_BUDGET_DOLLARS` sets the shared cap.
 Existing reservations survive upgrades and restarts until reconciled.
 
 Reservations include a conservative 3¢ per-contract entry fee cushion and are
@@ -166,21 +165,22 @@ ambiguous fill accounting pauses new entries until reconciliation succeeds.
 
 ### Take profit follows actual fills
 
-The live worker targets **25¢ above each buy order's actual average fill price**,
-rounded up to the next whole cent. A 50¢ fill targets 70¢ and a 60¢ fill targets
-80¢. Targets that would exceed 99¢ use the saved paired target for that legacy
-inventory. The price target is the same for one or five contracts. This is a gross
-price increase before fees; no percentage or fee cushion is added.
+The live worker targets **$0.20 gross profit per buy order total**, across all
+remaining contracts. It calculates the exit from verified average fill cost plus
+$0.20 divided by the order's remaining quantity, rounded up to the next cent.
+For example, 4 remaining contracts need a 5¢ price increase each; 5 need 4¢.
+Fees reduce net profit, so this is a gross target. If the calculated exit would
+exceed 99¢, the saved paired target is used for that legacy inventory.
 
 Each consistent fill/position snapshot recalculates the remaining quantity for
-each buy order. Different buy orders keep separate +20¢ targets, including an
+each buy order. Different buy orders keep separate $0.20 gross profit goals, including an
 additional average-down buy. Partial fills of the same order share their
 weighted average fill cost. The 96¢ settlement position is held unless its sellable bid reaches 98¢.
 
 **98¢ override:** whenever the YES or NO bid for the held side is at least 98¢,
 the worker submits a reduce-only sell for all verified bot-owned inventory at a
-98¢ minimum limit, including settlement lots. This takes priority over the +20¢
-target and hold-to-settlement flag. A 98¢ ask or last-traded price alone does
+98¢ minimum limit, including settlement lots. This takes priority over the $0.20
+gross profit goal and hold-to-settlement flag. A 98¢ ask or last-traded price alone does
 not trigger it. Manual inventory stays excluded. Partial fills and lost
 acknowledgements reconcile before retrying only the remaining bot quantity.
 
@@ -191,11 +191,11 @@ must reconcile before another exit can use that inventory. This survives partial
 fills, lost acknowledgements and restarts without selling a share twice.
 
 On upgrade, existing recorded exit orders replay against their original fixed
-targets. Remaining verified scalp inventory then adopts the +20¢ fill-based target.
+targets. Remaining verified scalp inventory then adopts the $0.20 per-order gross profit target.
 Missing,
 inconsistent or over-limit fill prices pause the worker instead of substituting
 a quote, buy limit or displayed account average. `TP_ARMED` logs include the
-average fill cost, price increment, quantity and rounded target.
+average fill cost, gross profit goal, quantity and rounded target.
 
 Price inputs follow Kalshi's [fill payload](https://docs.kalshi.com/api-reference/portfolio/get-fills).
 Whole-cent rounding uses prices valid across the documented
@@ -213,12 +213,12 @@ Important defaults:
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `ENTRY_EXIT_PAIRS_CENTS` | `45:50,47:52,49:59,55:62,56:61,61:70` | Entry limits and corresponding exits |
+| `ENTRY_EXIT_PAIRS_CENTS` | `45:50,47:52,49:59,55:62,56:61,61:70` | Legacy paired exits and fallback targets |
 | `ENTRY_BUDGET_DOLLARS` | Ignored | Earlier entries use up to $2.80 and 5 contracts; 96¢ settlement requests 6 |
 | `OPENING_BIAS_PAIR_CENTS` | `52:60` | Existing opening entry; independent 57:62 rule is fixed in code |
 | `OPENING_WINDOW_MINUTES` | `2` | Opening order cutoff and cancellation time |
-| `MARKET_BUDGET_DOLLARS` | `10` | Per-market allowance; $6 is reserved for settlement and $4 for earlier entries |
-| `MAX_PURCHASES_PER_MARKET` | `7` | Maximum committed regular orders; proven zero-fill attempts excluded |
+| `MARKET_BUDGET_DOLLARS` | `20` | Per-market allowance; $6 is reserved for settlement and $14 for earlier entries |
+| `PER_ORDER_PROFIT_DOLLARS` | `0.20` | Gross profit goal for each buy order across all its contracts, before fees |
 | `ENTRY_INTERVAL_SECONDS` | `7` | Minimum interval between regular batches |
 | `ENTRY_START_MINUTE` | `1` (fixed) | Early buys are eligible after 60 seconds |
 | `ENTRY_END_MINUTE` | Ignored | Fixed price-based windows listed above |

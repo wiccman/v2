@@ -77,6 +77,9 @@ BLOCKED_BUY_START = 360
 BLOCKED_BUY_END = 780
 ENTRY_EXECUTION_VERSION = 10
 MARKET_BUDGET = market_budget()
+PER_ORDER_PROFIT_DOLLARS = Decimal(os.getenv("PER_ORDER_PROFIT_DOLLARS", "0.20"))
+if not PER_ORDER_PROFIT_DOLLARS.is_finite() or PER_ORDER_PROFIT_DOLLARS <= 0:
+    raise ValueError("PER_ORDER_PROFIT_DOLLARS must be finite and positive")
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
@@ -1525,10 +1528,10 @@ def main():
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")), fill_cost_targets=True,
-            per_order_increment=Decimal("0.20"), force_exit_price=Decimal("0.98"),
+            per_order_profit=PER_ORDER_PROFIT_DOLLARS, force_exit_price=Decimal("0.98"),
             no_fill_pause=3.0, quote_gate=True)
         EXIT_MONITOR.start()
-        print("TP_MONITOR_STARTED price_increase=20c per contract per buy order, based on actual fill and rounded up to cents; gross before fees; saved pair target applies if above 99c; sell all bot lots including settlement when bid>=98c at a98c limit; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
+        print(f"TP_MONITOR_STARTED gross_profit_goal=${PER_ORDER_PROFIT_DOLLARS:.2f} per buy order total, target price=actual average fill cost + goal/remaining contracts rounded up; before fees; saved pair fallback if above 99c; 98c sell override; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
         diagnostics_client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""), timeout=5,
             coordinator=REQUEST_COORDINATOR, role="diagnostics")

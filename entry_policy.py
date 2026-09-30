@@ -26,7 +26,7 @@ def settlement_entry_price_allowed(price):
 
 
 def market_budget():
-    value = D(os.getenv("MARKET_BUDGET_DOLLARS", "25"))
+    value = D(os.getenv("MARKET_BUDGET_DOLLARS", "20"))
     if not value.is_finite() or value <= SETTLEMENT_BUDGET:
         raise ValueError("MARKET_BUDGET_DOLLARS must be finite and greater than settlement reserve")
     return value
