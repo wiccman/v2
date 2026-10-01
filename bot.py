@@ -1365,6 +1365,9 @@ def cycle(state):
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
         return
+    # Final-minutes-only mode: outside the settlement window, no buy route may submit.
+    write_log("ENTRY_FINAL_MINUTES_ONLY_WAIT", ticker, details="All non-settlement buy routes disabled; waiting for final 3 minutes")
+    return
     if HISTORICAL_STRIKE_ENABLED and "historical_strikes" not in record:
         try:
             record["historical_strikes"] = [str(value) for value in prior_strikes(started)]
