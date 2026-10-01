@@ -6,8 +6,8 @@ from decimal import Decimal as D
 FEE_RESERVE = D("0.03")  # per contract, including fractional-fill rounding cushion
 ZERO = D("0")
 ENTRY_QUANTITY = D("5")
-TARGET_EXPOSURE = D("10")  # Dollars of contract exposure targeted per new position.
-EARLIER_ORDER_BUDGET = D("12.00")  # Per-order ceiling (target exposure plus fee reserve), also constrained by remaining market allowance.
+TARGET_EXPOSURE = D("15")  # Dollars of contract exposure targeted per new position.
+EARLIER_ORDER_BUDGET = D("17.00")  # Per-order ceiling (target exposure plus fee reserve), also constrained by remaining market allowance.
 SETTLEMENT_BUDGET = D("20.00")
 SETTLEMENT_PRICE = D("0.96")
 SETTLEMENT_KIND = "settlement_97"  # Durable identifier for existing intents across upgrades.
@@ -62,14 +62,14 @@ def entry_quantity(price, kind, record=None, cap=None, max_quantity=None):
     price = D(price)
     target_quantity = (TARGET_EXPOSURE / price).to_integral_value(rounding="ROUND_DOWN")
     if kind == SETTLEMENT_KIND:
-        # Final-3-minute settlement entries target the same ~$10 contract exposure
+        # Final-3-minute settlement entries target the same ~$15 contract exposure
         # while retaining the existing $20 settlement/market cap as a hard ceiling.
         quantity = min(target_quantity, (SETTLEMENT_BUDGET / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
     else:
         available = EARLIER_ORDER_BUDGET
         if record is not None:
             available = min(available, remaining_allowance(record, market_budget() if cap is None else cap, kind))
-        # Target ~$10 of contract exposure and still respect the remaining budget
+        # Target ~$15 of contract exposure and still respect the remaining budget
         # after the per-contract fee reserve.
         quantity = min(target_quantity, (available / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
     return quantity if max_quantity is None else min(quantity, max(ZERO, D(max_quantity)))
