@@ -61,7 +61,7 @@ def remaining_allowance(record, cap, kind):
 def entry_quantity(price, kind, record=None, cap=None, max_quantity=None):
     price = D(price)
     if kind == SETTLEMENT_KIND:
-        quantity = (SETTLEMENT_BUDGET / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
+        quantity = (TARGET_EXPOSURE / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN")
     else:
         available = EARLIER_ORDER_BUDGET
         if record is not None:
