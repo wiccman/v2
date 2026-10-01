@@ -33,6 +33,8 @@ ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.57"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.38"), None)
 ENTRY_EXIT_PAIRS.pop(Decimal("0.39"), None)
+# Retire the 64c regular-entry tier that produced the unwanted live-strike buy.
+ENTRY_EXIT_PAIRS.pop(Decimal("0.64"), None)
 ENTRY_EXIT_PAIRS = dict(sorted(ENTRY_EXIT_PAIRS.items()))
 # Retire the old entry even when an existing environment still lists it.
 ENTRY_EXIT_PAIRS.pop(Decimal("0.32"), None)
