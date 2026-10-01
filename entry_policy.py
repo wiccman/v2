@@ -64,7 +64,8 @@ def entry_quantity(price, kind, record=None, cap=None, max_quantity=None):
         available = EARLIER_ORDER_BUDGET
         if record is not None:
             available = min(available, remaining_allowance(record, market_budget() if cap is None else cap, kind))
-        quantity = min(ENTRY_QUANTITY, (available / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
+        target_quantity = (D(10) / D(price)).to_integral_value(rounding="ROUND_DOWN")  # ~$10 of exposure
+        quantity = min(target_quantity, (available / (D(price) + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
     return quantity if max_quantity is None else min(quantity, max(ZERO, D(max_quantity)))
 
 
