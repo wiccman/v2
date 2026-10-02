@@ -20,3 +20,14 @@ This file is the reference point for retired and active entry behavior. Retired 
 
 ### Notes
 The retired rules above are retained only as historical reference. They must not be re-enabled merely because stale Railway environment variables still exist.
+
+## 2026-10-02 — Stable pre-fill-change snapshot
+
+- Git commit before settlement fill adjustment: `12b73148539e6da768d69a42a4ec4ea383cebc1f` / stable deployed lineage.
+- Final 3-minute settlement route: 96c-or-higher trigger, 96c resting limit, 11-contract max, $20 settlement budget.
+- This snapshot is the rollback/reference build before changing fill behavior.
+
+## 2026-10-02 — Exact-96 fill behavior
+
+- Preserve the same final 3-minute window, live-strike direction, 11-contract cap, $20 settlement budget, and hold-to-settlement behavior.
+- Change the settlement trigger to **live ask exactly 96c** and submit the existing **96c limit** at that moment. This avoids triggering at 97–99c and leaving a 96c order behind the market.
