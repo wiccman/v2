@@ -21,6 +21,8 @@ from two_rule_policy import (D, ZERO, FEE_RESERVE, BUILD, RULES, FINAL, BY_NAME,
                              candidate, direction, number, unique_fills, receipt,
                              target, config)
 
+from manual_trade_guard import ManualTradeGuard
+
 TERMINAL = {'executed', 'canceled', 'expired'}
 PREFIX = '53523200-'  # UUID-format marker for recovery; the remaining UUID stays random.
 
@@ -87,6 +89,7 @@ class TwoRuleBot:
         self.deferred_errors = deferred_errors
         self.notice_cache: dict[str, Any] = {}
         self.last_heartbeat = float('-inf')
+        self.manual_guard = ManualTradeGuard(self, Pending)
 
     def notice(self, event: str, ticker: str, **details: Any) -> None:
         key = event + ':' + ticker
@@ -110,6 +113,7 @@ class TwoRuleBot:
         return remote
 
     def reconcile(self, ticker: str, record: dict[str, Any]) -> tuple[dict[str, Any], D, list[Any]]:
+        self.manual_guard.require_active(record)
         # Resolve requests before reading fills. Never discard an unknown ACK.
         for trade in record['trades']:
             for order in trade['orders']:
@@ -135,6 +139,7 @@ class TwoRuleBot:
                 raise Pending('Fill history and order receipt disagree')
             if visible > number(order['quantity'], 'saved quantity'):
                 raise Pending('Visible fills exceed saved order size')
+        self.manual_guard.inspect(ticker, record, fills, known)
         observations = {t['id']: receipt(t, fills) for t in record['trades']}
         own = sum((r.remaining * (1 if t['side'] == 'YES' else -1)
                    for t in record['trades'] for r in (observations[t['id']],)), ZERO)
@@ -146,21 +151,8 @@ class TwoRuleBot:
             raise Pending('Ambiguous position rows')
         account = number(rows[0].get('position_fp'), 'account position') if rows else ZERO
         if own and (own * account <= 0 or abs(account) < abs(own)):
-            raise Pending('Manual reduction or inconsistent position; no unowned sale')
-        # An untracked opposite fill after a bot entry can change lot ownership.
-        # Freeze this market rather than sell a manual replacement by accident.
-        entry_times = [number(f.get('ts'), 'fill timestamp') if f.get('ts') is not None
-                       else D(str(timestamp(f['created_time'])))
-                       for f in fills if f.get('order_id') in known
-                       and known[f['order_id']]['role'] == 'entry']
-        if own and entry_times:
-            expected_opposite = 'ask' if own > 0 else 'bid'
-            for f in fills:
-                if f.get('order_id') in known or str(f.get('book_side', '')).lower() != expected_opposite:
-                    continue
-                stamp = number(f.get('ts'), 'fill timestamp') if f.get('ts') is not None else D(str(timestamp(f['created_time'])))
-                if stamp >= min(entry_times):
-                    raise Pending('Manual opposite fill changed ownership; market paused')
+            self.manual_guard.pause(ticker, record, 'ownership_or_position_mismatch',
+                                    bot_quantity=str(own), account_quantity=str(account))
         self._audit_fills(ticker, record, observations)
         return observations, account, fills
 
@@ -243,6 +235,7 @@ class TwoRuleBot:
         return changed
 
     def exits_for_market(self, ticker: str, record: dict[str, Any], observations: dict[str, Any]) -> bool:
+        self.manual_guard.require_active(record)
         did_submit = False
         for trade in record['trades']:
             observed = observations[trade['id']]
@@ -276,7 +269,15 @@ class TwoRuleBot:
                 continue  # Confirm cancellation/fills on the next pass.
             if self.clock() >= record['close']:
                 continue
+            # Manual fills can occur during a quote read, including close/rebuy
+            # that leaves the same net size. Reconcile again before authorizing
+            # a sell; never resize into untracked/manual replacement inventory.
+            latest = self.manual_guard.before_submit(ticker, record, observations)
             signed = observed.remaining * (1 if trade['side'] == 'YES' else -1)
+            if signed * latest <= 0 or abs(signed) > abs(latest):
+                self.manual_guard.pause(ticker, record, 'exit_exceeds_verified_position')
+            if self.clock() >= record['close']:
+                continue
             order = self._save_request(trade, 'exit', observed.remaining, wanted)
             trade['exit_retry_at'] = self.clock() + 3
             self.store.save()
@@ -298,6 +299,7 @@ class TwoRuleBot:
 
     def attempt(self, ticker: str, record: dict[str, Any], rule: Any,
                 observations: dict[str, Any], account: D) -> bool:
+        self.manual_guard.require_active(record)
         for trade in record['trades']:
             if trade['rule'] != rule.name:
                 continue
@@ -318,10 +320,11 @@ class TwoRuleBot:
         selected = candidate(rule, market, spot, record['close'] - self.clock())
         if selected is None:
             return False
-        rows = [p for p in self.exits.positions(ticker) if p.get('ticker') == ticker]
-        latest = number(rows[0]['position_fp'], 'position') if len(rows) == 1 else ZERO
-        if len(rows) > 1 or latest != account:
-            raise Pending('Position changed before entry')
+        try:
+            self.manual_guard.before_submit(ticker, record, observations, account)
+        except Exception:
+            self.manual_guard.cancel_bot_entries(ticker, record)
+            raise
         if account and ((account > 0) != (selected.side == 'YES')):
             return False  # Do not net/close an opposing manual or bot position.
         if any(t['side'] != selected.side and any(not o.get('terminal') for o in t['orders'])
@@ -384,6 +387,7 @@ class TwoRuleBot:
                 snapshots[ticker] = (observed, account)
             except Exception as error:
                 paused.add(ticker)
+                self.manual_guard.cancel_bot_entries(ticker, record)
                 self.notice('TWO_RULE_RECONCILE_WAIT', ticker, error=repr(error))
         for market in self.client.markets(series_ticker='KXBTC15M', status='open', limit=100):
             ticker, close = market['ticker'], timestamp(market['close_time'])
@@ -429,6 +433,7 @@ def main() -> None:
     load_dotenv()
     if os.getenv('TRADING_ENABLED', 'false').lower() != 'true':
         default_emit('TWO_RULE_CONFIG', **config(), trading_enabled=False,
+                     manual_guard=ManualTradeGuard.VERSION,
                      commit=os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unavailable'))
         default_emit('TWO_RULE_LOCKED', message='Live order routing is disabled')
         while True:
@@ -473,6 +478,7 @@ def main() -> None:
                             legacy_blocked=lambda ticker: blocked.get(ticker, 0) > time.time(),
                             deferred_errors=(RequestDeferred,))
         default_emit('TWO_RULE_CONFIG', **config(), market_budget=str(runner.budget),
+                     manual_guard=ManualTradeGuard.VERSION,
                      commit=os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unavailable'))
         def stop(signum: int, frame: Any) -> None:
             raise KeyboardInterrupt
