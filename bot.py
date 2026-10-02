@@ -1428,7 +1428,7 @@ def main():
         EXIT_MONITOR = TakeProfitMonitor(exit_client, load_state,
             STATE.with_name(STATE.stem + "_take_profit.json"), pairs=ALL_ENTRY_EXIT_PAIRS,
             poll=float(os.getenv("EXIT_POLL_SECONDS", "1")), fill_cost_targets=True,
-            per_order_profit=PER_ORDER_PROFIT_DOLLARS, force_exit_price=Decimal("0.98"),
+            per_order_profit=PER_ORDER_PROFIT_DOLLARS, force_exit_price=Decimal("0.99"),
             no_fill_pause=3.0, quote_gate=True)
         EXIT_MONITOR.start()
         print(f"TP_MONITOR_STARTED gross_profit_goal=${PER_ORDER_PROFIT_DOLLARS:.2f} per buy order total, target price=actual average fill cost + goal/remaining contracts rounded up; before fees; saved pair fallback if above 99c; 98c sell override; quote-gated reduce-only IOC exits; 3s pause after zero fill", flush=True)
