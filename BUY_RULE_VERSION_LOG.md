@@ -31,3 +31,8 @@ The retired rules above are retained only as historical reference. They must not
 
 - Preserve the same final 3-minute window, live-strike direction, 11-contract cap, $20 settlement budget, and hold-to-settlement behavior.
 - Change the settlement trigger to **live ask exactly 96c** and submit the existing **96c limit** at that moment. This avoids triggering at 97–99c and leaving a 96c order behind the market.
+
+## 2026-10-02 — Final 2-minute settlement window
+
+- Settlement buy window changed from the final 3 minutes (180 seconds) to the final 2 minutes (120 seconds).
+- Settlement entry price/direction, contract cap, budget, and other execution behavior are otherwise unchanged.
