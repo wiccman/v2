@@ -679,8 +679,8 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
                       details=json.dumps({"ask": str(ask), "minimum": str(minimum_ask)}))
             return skip("ask_outside_entry_bounds", ask=str(ask))
         resting = kind == SETTLEMENT_KIND or Decimal(str(price)) == SIX_MINUTE_ENTRY_PRICE
-        if kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask):
-            return skip("settlement_ask_below_97", ask=str(ask))
+        if kind == SETTLEMENT_KIND and ask != SETTLEMENT_PRICE:
+            return skip("settlement_ask_not_exactly_96", ask=str(ask))
         if not resting and ask > Decimal(str(price)):
             return skip("ask_above_limit", ask=str(ask), limit=str(price))
         if Decimal(str(price)) == SIX_MINUTE_ENTRY_PRICE and ask < Decimal(str(price)):
@@ -1220,7 +1220,7 @@ def settlement_entry(record, state, ticker, closed):
     locked_side = record.get("trade_side")
     if locked_side not in ("YES", "NO"):
         locked_side = (record.get("signal") or {}).get("prediction")
-    if not settlement_entry_price_allowed(asks[side]):
+    if asks[side] != SETTLEMENT_PRICE:
         report("selected_side_not_at_or_above_96", side=side, selected_ask=str(asks[side]))
         return
     held = settlement_position(ticker)
@@ -1382,7 +1382,7 @@ def main():
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=${SETTLEMENT_BUDGET:.2f} reserved; quantity<={entry_quantity(SETTLEMENT_PRICE, SETTLEMENT_KIND)}; confirm opposite close even at loss before buying; hold to settlement", flush=True)
+    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; trigger_ask=96c exactly; limit=96c GTC until close; budget=${SETTLEMENT_BUDGET:.2f} reserved; quantity<={entry_quantity(SETTLEMENT_PRICE, SETTLEMENT_KIND)}; confirm opposite close even at loss before buying; hold to settlement", flush=True)
     print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
     print("BUY_BLOCK limits 70c through 85c inclusive blocked from 6:00 through 12:59; pending bot buys canceled; 96c settlement route retained", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
