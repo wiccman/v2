@@ -85,7 +85,7 @@ if not PER_ORDER_PROFIT_DOLLARS.is_finite() or PER_ORDER_PROFIT_DOLLARS <= 0:
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
-MAX_OPEN_CONTRACTS = Decimal("10")
+MAX_OPEN_CONTRACTS = Decimal("11")
 INITIAL_OPEN_CONTRACTS = Decimal("5")
 MAX_AVERAGE_CONTRACTS = Decimal("3")
 MAX_AVERAGE_DOLLARS = Decimal("2.50")
