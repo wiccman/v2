@@ -161,7 +161,35 @@ class TwoRuleBot:
                 stamp = number(f.get('ts'), 'fill timestamp') if f.get('ts') is not None else D(str(timestamp(f['created_time'])))
                 if stamp >= min(entry_times):
                     raise Pending('Manual opposite fill changed ownership; market paused')
+        self._audit_fills(ticker, record, observations)
         return observations, account, fills
+
+    def _audit_fills(self, ticker: str, record: dict[str, Any],
+                     observations: dict[str, Any]) -> None:
+        """Log fill-backed changes only after receipt/position checks succeed."""
+        for trade in record['trades']:
+            observed = observations[trade['id']]
+            if observed.entered == 0 and observed.sold == 0:
+                continue
+            snapshot = {
+                'entry_quantity': str(observed.entered),
+                'exit_quantity': str(observed.sold),
+                'remaining_quantity': str(observed.remaining),
+                'verified_entry_cost': str(observed.cost),
+                'verified_sale_proceeds': str(observed.proceeds),
+                # Open inventory value is not realized profit. Partial exits
+                # retain their original trade-level goal in target().
+                'gross_profit_when_flat': (str(observed.proceeds - observed.cost)
+                                           if observed.remaining == 0 else None),
+                'fees_included': False,
+            }
+            if trade.get('verified_fill_snapshot') == snapshot:
+                continue
+            trade['verified_fill_snapshot'] = snapshot
+            self.store.save()
+            self.emit('TWO_RULE_FILL_VERIFIED', ticker=ticker, trade_id=trade['id'],
+                      rule=trade['rule'], side=trade['side'], fill_confirmed=True,
+                      **snapshot)
 
     def exposure(self, record: dict[str, Any], observations: dict[str, Any]) -> D:
         used = ZERO
@@ -379,8 +407,13 @@ class TwoRuleBot:
             if observed is None:
                 observed, account, _ = self.reconcile(ticker, record)
             for rule in RULES:  # Final rule wins a simultaneous funding conflict.
-                if self.attempt(ticker, record, rule, observed, account):
-                    break  # Reconcile this request before another risk decision.
+                previous_trade_count = len(record['trades'])
+                submitted = self.attempt(ticker, record, rule, observed, account)
+                if submitted or len(record['trades']) != previous_trade_count:
+                    # Even a proven local deferral appends a durable zero-fill
+                    # intent. Reconcile it before the next rule: observations
+                    # predates that intent and cannot price its reservation yet.
+                    break
 
 
 def main() -> None:
