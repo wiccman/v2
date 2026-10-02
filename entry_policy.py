@@ -21,7 +21,7 @@ def settlement_price_allowed(price):
 
 
 def settlement_entry_price_allowed(price):
-    """Trigger at 96c or higher; the submitted buy limit remains exactly 96c."""
+    """Trigger only when the live ask is exactly 96c; submitted buy limit is 96c."""
     price = D(str(price))
     return price.is_finite() and SETTLEMENT_PRICE <= price < D("1")
 
