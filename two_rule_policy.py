@@ -1,4 +1,8 @@
-"""Two requested entry rules and gross-dollar exits. No exchange I/O."""
+"""Rule A only: final 120 seconds, exactly 96c, no strike dependency.
+
+Pure selection and fill-backed gross-profit math; no exchange I/O.
+Historical trade receipts retain their saved profit targets.
+"""
 from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
@@ -7,7 +11,7 @@ from typing import Any, Mapping, Sequence
 D = Decimal
 ZERO, ONE = D(0), D(1)
 FEE_RESERVE = D('0.03')
-BUILD = 'two-rules-2026-10-02-r2'
+BUILD = 'rule-a-only-2026-10-03-r1'
 
 def number(value: Any, name: str) -> Decimal:
     try:
@@ -28,8 +32,7 @@ class Rule:
     exact_ask: Decimal | None = None
 
 FINAL = Rule('final_2m_96c', D('0'), 9, D('0.30'), 120, D('0.96'))
-DIRECTIONAL = Rule('directional_100', D('100'), 9, D('1.00'))
-RULES = (FINAL, DIRECTIONAL)
+RULES = (FINAL,)
 BY_NAME = {rule.name: rule for rule in RULES}
 
 @dataclass(frozen=True)
@@ -40,36 +43,34 @@ class Signal:
     contracts: int
     profit: Decimal
 
-def direction(spot: Any, strike: Any, threshold: Decimal) -> str | None:
-    spot, strike = number(spot, 'spot'), number(strike, 'strike')
-    if min(spot, strike) <= 0:
-        raise ValueError('Reference prices must be positive')
-    gap = spot - strike
-    return 'YES' if gap >= threshold else 'NO' if gap <= -threshold else None
+def evaluate_final(market: Mapping[str, Any],
+                   seconds_remaining: Any) -> tuple[Signal | None, str]:
+    """Select exactly one 96c side during the last two minutes."""
+    left = number(seconds_remaining, 'seconds_remaining')
+    if not ZERO < left <= D('120'):
+        return None, 'outside_final_120_seconds'
+    yes_ask = number(market['yes_ask_dollars'], 'yes ask')
+    no_ask = number(market['no_ask_dollars'], 'no ask')
+    if not all(ZERO <= ask <= ONE for ask in (yes_ask, no_ask)):
+        raise ValueError('Ask outside valid price range')
+    matches = [side for side, ask in (('YES', yes_ask), ('NO', no_ask))
+               if ask == FINAL.exact_ask]
+    if not matches:
+        return None, 'no_96c_ask'
+    if len(matches) != 1:
+        return None, 'ambiguous_96c_asks'
+    return Signal(FINAL.name, matches[0], FINAL.exact_ask,
+                  FINAL.contracts, FINAL.profit), 'eligible'
+
 
 def candidate(rule: Rule, market: Mapping[str, Any], spot: Any,
               seconds_remaining: Any) -> Signal | None:
-    left = number(seconds_remaining, 'seconds_remaining')
-    if not ZERO < left <= D('900'):
+    # Keep the call signature for integrations; spot is deliberately unused.
+    # Other rules cannot generate entries, even if called directly.
+    if rule != FINAL:
         return None
-    if rule is FINAL:
-        if left > D('120'):
-            return None
-        yes_ask = number(market['yes_ask_dollars'], 'yes ask')
-        no_ask = number(market['no_ask_dollars'], 'no ask')
-        yes_matches = yes_ask == D('0.96')
-        no_matches = no_ask == D('0.96')
-        if yes_matches == no_matches:
-            return None
-        side = 'YES' if yes_matches else 'NO'
-        return Signal(rule.name, side, D('0.96'), rule.contracts, rule.profit)
-    side = direction(spot, market['floor_strike'], rule.distance)
-    if side is None:
-        return None
-    ask = number(market[side.lower() + '_ask_dollars'], 'ask')
-    if not ZERO < ask < ONE:
-        return None
-    return Signal(rule.name, side, ask, rule.contracts, rule.profit)
+    return evaluate_final(market, seconds_remaining)[0]
+
 
 def valid_grid(ranges: Any) -> list[tuple[Decimal, Decimal, Decimal]]:
     if not isinstance(ranges, list) or not ranges:
