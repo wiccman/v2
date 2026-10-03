@@ -28,10 +28,10 @@ def market(ask='0.96'):
 GRID = [{'start': '0', 'end': '1', 'step': '.001'}]
 
 
-def test_config_changes_only_sizes():
+def test_config_preserves_sizes_and_sets_final_30c_goal():
     assert config()['rules'] == [
         {'name': 'final_2m_50', 'strike_distance_dollars': '50',
-         'contracts': 9, 'gross_profit_dollars': '0.40',
+         'contracts': 9, 'gross_profit_dollars': '0.30',
          'last_seconds': 120, 'exact_ask': '0.96'},
         {'name': 'directional_100', 'strike_distance_dollars': '100',
          'contracts': 9, 'gross_profit_dollars': '1.00',
@@ -47,7 +47,7 @@ def test_config_changes_only_sizes():
 def test_final_boundary(side, sign, left):
     result = candidate(FINAL, market(), D('100000') + sign * 50, left)
     assert (result.side, result.contracts, result.price, result.profit) == (
-        side, 9, D('.96'), D('.40'))
+        side, 9, D('.96'), D('.30'))
     assert D(result.contracts) * (result.price + FEE_RESERVE) == D('8.91')
 
 
@@ -85,7 +85,7 @@ def test_closed_or_unopened_market_cannot_qualify(rule, left):
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-def test_nine_final_fills_cannot_reach_unchanged_40c_goal(side):
+def test_saved_nine_contract_40c_goal_is_not_rewritten(side):
     observed = Receipt(D(9), D(0), D('8.64'), D(0))
     assert D(9) - observed.cost == D('.36')
     assert target({'side': side, 'profit': '.40'}, observed, GRID) is None
@@ -128,3 +128,44 @@ def test_partial_fill_receipt_does_not_claim_all_nine_filled(side):
     assert (observed.entered, observed.remaining, observed.cost) == (
         D(3), D(3), D('1.80'))
     assert target({'side': side, 'profit': '1.00'}, observed, GRID) == D('.934')
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('step,wanted', [('.001', '.994'), ('.0001', '.9934'), ('.01', None)])
+def test_final_30c_target_rounds_up_to_actual_market_grid(side, step, wanted):
+    observed = Receipt(D(9), D(0), D('8.64'), D(0))
+    grid = [{'start': '0', 'end': '1', 'step': step}]
+    result = target({'side': side, 'profit': str(FINAL.profit)}, observed, grid)
+    assert result == (D(wanted) if wanted is not None else None)
+    if result is not None:
+        assert result * observed.remaining - observed.cost >= D('.30')
+        assert (result - D(step)) * observed.remaining - observed.cost < D('.30')
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+@pytest.mark.parametrize('quantity', range(1, 10))
+def test_final_30c_target_uses_actual_fill_count(side, quantity):
+    observed = Receipt(D(quantity), D(0), D(quantity) * D('.96'), D(0))
+    wanted = target({'side': side, 'profit': str(FINAL.profit)}, observed, GRID)
+    expected = {8: D('.998'), 9: D('.994')}.get(quantity)
+    assert wanted == expected
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+def test_final_partial_exit_retains_total_30c_goal(side):
+    observed = Receipt(D(9), D(4), D('8.64'), D('3.976'))
+    wanted = target({'side': side, 'profit': str(FINAL.profit)}, observed, GRID)
+    assert wanted == D('.993')
+    assert observed.proceeds + wanted * observed.remaining - observed.cost == D('.301')
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+def test_final_30c_goal_uses_price_improved_fill_cost(side):
+    observed = Receipt(D(9), D(0), D('8.595'), D(0))
+    assert target({'side': side, 'profit': str(FINAL.profit)}, observed, GRID) == D('.989')
+
+
+@pytest.mark.parametrize('side', ['YES', 'NO'])
+def test_final_30c_target_does_not_sell_flat_inventory(side):
+    observed = Receipt(D(9), D(9), D('8.64'), D('8.946'))
+    assert target({'side': side, 'profit': str(FINAL.profit)}, observed, GRID) is None
