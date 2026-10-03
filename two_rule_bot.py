@@ -1,4 +1,4 @@
-"""Reviewable two-rule runner for wiccman/v2's existing KalshiClient.
+"""Rule-A-only runner using the existing KalshiClient and persistent ledger.
 
 No live actions occur on import, in --config mode, or in the test suite.
 Use --live AND TRADING_ENABLED=true to enable execution after review.
@@ -17,16 +17,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from two_rule_policy import (D, ZERO, FEE_RESERVE, BUILD, RULES, FINAL, BY_NAME,
-                             candidate, direction, number, unique_fills, receipt,
-                             target, config)
+from two_rule_policy import (D, ZERO, FEE_RESERVE, BUILD, RULES, FINAL,
+                             candidate, evaluate_final, number, unique_fills,
+                             receipt, target, config)
 
 from manual_trade_guard import ManualTradeGuard
 
 TERMINAL = {'executed', 'canceled', 'expired'}
 PREFIX = '53523200-'  # UUID-format marker for recovery; the remaining UUID stays random.
 PARTITION_BUDGET = D('10')
-PARTITION_VERSION = 'ten-per-rule-v1'
+PARTITION_VERSION = 'rule-a-only-preserve-10-v1'
+# Historical identifiers are accounting aliases, never additional entry rules.
+FINAL_NAMES = frozenset({FINAL.name, 'final_2m_50'})
+KNOWN_SAVED_RULES = FINAL_NAMES | {'directional_100'}
 
 
 def budget_config(market_budget: Any = '20') -> dict[str, Any]:
@@ -34,6 +37,7 @@ def budget_config(market_budget: Any = '20') -> dict[str, Any]:
             'budget_partition_version': PARTITION_VERSION,
             'rule_budgets': {r.name: str(PARTITION_BUDGET) for r in RULES},
             'cross_rule_borrowing': False,
+            'unused_budget_dollars': str(max(ZERO, number(market_budget, 'market budget') - PARTITION_BUDGET)),
             'entry_fee_reserve_per_contract': str(FEE_RESERVE)}
 
 
@@ -84,6 +88,7 @@ def default_emit(event: str, **details: Any) -> None:
 
 
 class TwoRuleBot:
+    """Name retained for import compatibility; only Rule A creates entries."""
     def __init__(self, client: Any, store: Any, *, exit_client: Any = None,
                  budget: Any = '20', clock: Callable[[], float] = time.time,
                  emit: Callable[..., None] = default_emit,
@@ -207,21 +212,21 @@ class TwoRuleBot:
 
     def funding_allowed(self, ticker: str, record: dict[str, Any],
                         observations: dict[str, Any], selected: Any, cash: Any) -> bool:
-        """Apply independent $10 partitions before creating any order intent.
+        """Apply Rule A's existing $10 allocation and the overall market cap.
 
         Reuse fill-backed accounting for pending reservations, partial fills and
         released principal. Sales only replenish their own rule; losses remain
         charged. Existing over-cap positions can still exit and are not reset.
         Sizes and profit goals are not silently changed to make a trade fit.
         """
-        if selected.rule not in BY_NAME or any(t.get('rule') not in BY_NAME for t in record['trades']):
+        if selected.rule != FINAL.name or any(t.get('rule') not in KNOWN_SAVED_RULES for t in record['trades']):
             raise Pending('Unknown strategy identity; cannot allocate its budget')
         cash = number(cash, 'market cash')
         if cash < 0:
             raise ValueError('Market cash must be nonnegative')
         required = D(selected.contracts) * (selected.price + FEE_RESERVE)
         market_used = self.exposure(record, observations)
-        partition = {'trades': [t for t in record['trades'] if t['rule'] == selected.rule]}
+        partition = {'trades': [t for t in record['trades'] if t['rule'] in FINAL_NAMES]}
         rule_used = self.exposure(partition, observations)
         reason = ('requested_size_exceeds_partition' if required > PARTITION_BUDGET else
                   'rule_partition_exhausted' if required + rule_used > PARTITION_BUDGET else
@@ -254,28 +259,44 @@ class TwoRuleBot:
         self.store.save()
 
     def cancel_ineligible(self, ticker: str, record: dict[str, Any]) -> bool:
+        """Retire ineligible bot entries; never consult BTC or the strike.
+
+        Old strategy requests remain reserved until exchange reconciliation.
+        Their confirmed fills retain normal saved-target exit management.
+        """
         pending = [(t, o) for t in record['trades'] for o in t['orders']
                    if o['role'] == 'entry' and not o.get('terminal')]
         if not pending:
             return False
-        try:
-            market = self.client.market(ticker)
-            spot = self.client.btc_reference_price()
-        except Exception:
-            # A resting order cannot retain authorization on a missing quote.
-            market = spot = None
-        left = record['close'] - self.clock()
+        selected = None
+        reason = 'outside_final_120_seconds'
+        if 0 < record['close'] - self.clock() <= 120:
+            try:
+                market = self.client.market(ticker)
+                selected, reason = evaluate_final(market, record['close'] - self.clock())
+            except Exception:
+                reason = 'quote_unavailable_or_invalid'
         changed = False
         for trade, order in pending:
-            rule = BY_NAME[trade['rule']]
-            qualifies = (market is not None and 0 < left <= 900 and
-                         (rule.last_seconds is None or left <= rule.last_seconds) and
-                         direction(spot, market['floor_strike'], rule.distance) == trade['side'])
-            if not qualifies and order.get('order_id'):
-                self.client.cancel(order['order_id'], ticker)
-                changed = True
-                self.emit('TWO_RULE_CANCEL_REQUESTED', ticker=ticker, rule=rule.name,
-                          order_id=order['order_id'])
+            qualifies = (trade['rule'] in FINAL_NAMES and selected is not None
+                         and selected.side == trade['side']
+                         and number(order['price'], 'entry limit') == FINAL.exact_ask
+                         and number(order['quantity'], 'entry quantity') <= FINAL.contracts)
+            if qualifies:
+                continue
+            # Resolve unknown acknowledgements and independently verify ownership.
+            remote = self._remote(ticker, order)
+            if ((remote.get('ticker') or remote.get('market_ticker')) != ticker
+                    or remote.get('client_order_id') != order['client_id']):
+                raise Pending('Cannot verify cancellation ownership')
+            if remote.get('status') in TERMINAL:
+                continue  # Next reconcile pass confirms counts and releases reserves.
+            self.client.cancel(order['order_id'], ticker)
+            changed = True
+            self.emit('TWO_RULE_CANCEL_REQUESTED', ticker=ticker, rule=trade['rule'],
+                      order_id=order['order_id'], fill_confirmed=False,
+                      reason=('retired_entry_rule' if trade['rule'] not in FINAL_NAMES
+                              else reason if selected is None else 'entry_no_longer_matches'))
         return changed
 
     def exits_for_market(self, ticker: str, record: dict[str, Any], observations: dict[str, Any]) -> bool:
@@ -341,67 +362,91 @@ class TwoRuleBot:
             return True
         return did_submit
 
+    def entry_candidate(self, ticker: str, record: dict[str, Any],
+                        market: Mapping[str, Any], stage: str) -> Any:
+        left = record['close'] - self.clock()
+        selected, reason = evaluate_final(market, left)
+        self.notice('TWO_RULE_CANDIDATE_DECISION', ticker + ':' + stage,
+                    rule=FINAL.name, stage=stage, eligible=(selected is not None),
+                    reason=reason, seconds_remaining=left,
+                    yes_ask=market.get('yes_ask_dollars'),
+                    no_ask=market.get('no_ask_dollars'),
+                    side=selected.side if selected is not None else None,
+                    selection_basis='exact_96c_ask_only')
+        return selected
+
     def attempt(self, ticker: str, record: dict[str, Any], rule: Any,
                 observations: dict[str, Any], account: D) -> bool:
+        if rule != FINAL:
+            return False
         self.manual_guard.require_active(record)
+        if not 0 < record['close'] - self.clock() <= 120:
+            self.notice('TWO_RULE_ENTRY_WAIT', ticker,
+                        reason='outside_final_120_seconds', rule=FINAL.name)
+            return False
         for trade in record['trades']:
-            if trade['rule'] != rule.name:
+            if trade['rule'] not in FINAL_NAMES:
                 continue
             observed = observations[trade['id']]
             if any(not o.get('terminal') for o in trade['orders']) or observed.remaining > 0:
+                self.notice('TWO_RULE_ENTRY_WAIT', ticker,
+                            reason='existing_entry_or_position', rule=FINAL.name)
                 return False
-            if rule == FINAL and observed.entered > 0:
-                return False  # Preserve existing one filled final entry per market.
+            if observed.entered > 0:
+                self.notice('TWO_RULE_ENTRY_WAIT', ticker,
+                            reason='one_filled_entry_per_market', rule=FINAL.name)
+                return False
         market = self.client.market(ticker)
-        spot = self.client.btc_reference_price()
-        selected = candidate(rule, market, spot, record['close'] - self.clock())
+        selected = self.entry_candidate(ticker, record, market, 'initial')
         if selected is None:
             return False
         cash = number(self.client.market_cash(ticker)['cash_dollars'], 'market cash')
-        # Re-read quotes and BTC after potentially slow funding reads.
-        market = self.client.market(ticker)
-        spot = self.client.btc_reference_price()
-        selected = candidate(rule, market, spot, record['close'] - self.clock())
-        if selected is None:
-            return False
         try:
             self.manual_guard.before_submit(ticker, record, observations, account)
         except Exception:
             self.manual_guard.cancel_bot_entries(ticker, record)
             raise
+        # Refresh the quote after slow cash/ownership reads. No BTC request.
+        market = self.client.market(ticker)
+        selected = self.entry_candidate(ticker, record, market, 'confirm')
+        if selected is None:
+            return False
         if account and ((account > 0) != (selected.side == 'YES')):
-            return False  # Do not net/close an opposing manual or bot position.
+            self.notice('TWO_RULE_ENTRY_WAIT', ticker,
+                        reason='opposing_account_position', rule=FINAL.name)
+            return False
         if any(t['side'] != selected.side and any(not o.get('terminal') for o in t['orders'])
                for t in record['trades']):
+            self.notice('TWO_RULE_ENTRY_WAIT', ticker,
+                        reason='opposing_unresolved_order', rule=FINAL.name)
             return False
         if not self.funding_allowed(ticker, record, observations, selected, cash):
             return False
-        # Check the actual clock immediately before reserving and submitting.
-        if candidate(rule, market, spot, record['close'] - self.clock()) is None:
+        if candidate(FINAL, market, None, record['close'] - self.clock()) is None:
             return False
-        trade = {'id': uuid.uuid4().hex, 'rule': rule.name, 'side': selected.side,
-                 'profit': str(selected.profit), 'orders': []}
+        trade = {'id': uuid.uuid4().hex, 'rule': FINAL.name, 'side': selected.side,
+                 'profit': str(FINAL.profit), 'orders': []}
         record['trades'].append(trade)
-        order = self._save_request(trade, 'entry', D(selected.contracts), selected.price)
-        order['signal'] = {'btc_reference': str(spot), 'strike': str(market['floor_strike']),
-                           'distance_dollars': str(number(spot, 'spot') - number(market['floor_strike'], 'strike')),
+        order = self._save_request(trade, 'entry', D(FINAL.contracts), selected.price)
+        order['signal'] = {'selection_basis': 'exact_96c_ask_only',
+                           'yes_ask': market.get('yes_ask_dollars'),
+                           'no_ask': market.get('no_ask_dollars'),
                            'seconds_remaining': record['close'] - self.clock()}
         self.store.save()
         try:
             response = self.client.place_entry(
-                ticker, selected.side, D(selected.contracts), selected.price, record['close'],
-                submit_before=record['close'], client_order_id=order['client_id'],
-                ioc=(rule != FINAL))
+                ticker, selected.side, D(FINAL.contracts), selected.price, record['close'],
+                submit_before=record['close'], client_order_id=order['client_id'], ioc=False)
         except self.deferred_errors:
             order.update(terminal=True, confirmed='0', unsubmitted=True)
             self.store.save()
             self.emit('TWO_RULE_LOCAL_DEFERRAL', ticker=ticker, role='entry')
             return False
         self._save_ack(order, response)
-        self.emit('TWO_RULE_BUY_SUBMITTED', ticker=ticker, rule=rule.name,
-                  side=selected.side, quantity=selected.contracts, limit=str(selected.price),
+        self.emit('TWO_RULE_BUY_SUBMITTED', ticker=ticker, rule=FINAL.name,
+                  side=selected.side, quantity=FINAL.contracts, limit=str(selected.price),
                   seconds_remaining=record['close'] - self.clock(),
-                  profit_goal=str(selected.profit), signal=order['signal'], fill_confirmed=False)
+                  profit_goal=str(FINAL.profit), signal=order['signal'], fill_confirmed=False)
         return True
 
     def cycle(self) -> None:
@@ -451,14 +496,8 @@ class TwoRuleBot:
             observed, account = snapshots.get(ticker, (None, None))
             if observed is None:
                 observed, account, _ = self.reconcile(ticker, record)
-            for rule in RULES:  # Independent partitions; preserve deterministic evaluation order.
-                previous_trade_count = len(record['trades'])
-                submitted = self.attempt(ticker, record, rule, observed, account)
-                if submitted or len(record['trades']) != previous_trade_count:
-                    # Even a proven local deferral appends a durable zero-fill
-                    # intent. Reconcile it before the next rule: observations
-                    # predates that intent and cannot price its reservation yet.
-                    break
+            self.attempt(ticker, record, FINAL, observed, account)
+
 
 
 def main() -> None:
