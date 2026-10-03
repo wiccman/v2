@@ -35,7 +35,7 @@ class Rule:
     exact_ask: Decimal | None = None
 
 
-FINAL = Rule('final_2m_50', D('50'), 9, D('0.40'), 120, D('0.96'))
+FINAL = Rule('final_2m_50', D('50'), 9, D('0.30'), 120, D('0.96'))
 DIRECTIONAL = Rule('directional_100', D('100'), 9, D('1.00'))
 RULES = (FINAL, DIRECTIONAL)
 BY_NAME = {rule.name: rule for rule in RULES}
