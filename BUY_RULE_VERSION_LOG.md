@@ -36,3 +36,21 @@ The retired rules above are retained only as historical reference. They must not
 
 - Settlement buy window changed from the final 3 minutes (180 seconds) to the final 2 minutes (120 seconds).
 - Settlement entry price/direction, contract cap, budget, and other execution behavior are otherwise unchanged.
+
+## 2026-10-02 — Manual flip-selling protection (PR #77, not deployed)
+
+The user enabled flip selling for manual trades and requested bot-specific protections, without changing the manual setting.
+
+- Added `manual_trade_guard.py`, version `manual-priority-v1`, and integrated it into the two-rule runner.
+- Bot exits retain the existing explicit `reduce_only=True` and immediate-or-cancel wire parameters. No ordinary sell or side-switch fallback was introduced.
+- Fresh bot-fill ownership, account-position and open-order checks precede buys and sells. An unresolved exit cannot fund a second order against the same inventory.
+- A newly observed untracked/manual fill in a watched market, or incompatible bot/account ownership, persists a market-local manual-control pause until that contract closes. Both bot entries AND take-profit management stop for that market; the user must manage any remaining position. Restarting does not clear the pause. Other market records are not paused.
+- Pre-existing manual same-side holdings are excluded from bot exit sizing. Close-and-rebuy at the same net quantity is detected from fill identities, not quantity alone.
+- Untracked open orders cause a temporary wait and are left untouched. An order canceled without filling can clear that wait. A confirmed new manual fill instead latches the pause.
+- On a pause or reconciliation failure, request cancellation only for bot-owned pending entries whose ticker, order ID and client ID are verified. Cancellations are retried and never reported as confirmed solely from the cancellation request; allowances are not reset.
+- The two requested strategy thresholds, entry sizes, profit goals and shared $20 market budget were not changed. `two_rule_policy.py` remains blob `238bdb4f49200ce7d9fe7c2402ad2290b027b9a3`.
+- Runtime change: `fb868c3c28d8e7c5c627a44617607480ddfe84f8`; new guard tests committed in `f806138207a426ada2939f871d92f33822949a25`.
+- Local isolated verification: 146 tests passed (123 original offline cases from the earlier package plus 23 new manual-guard cases); Python compilation passed. Network was blocked in test fixtures. The two adapter methods were exercised with a recording transport, not a real exchange. Runner, guard and new test Git blob hashes match the tested local files.
+- New tests are included as `test_manual_trade_guard.py`. The older `test_two_rules.py` is still not published in this PR. This is not a full-repository CI result or production verification.
+- Limits: polling cannot atomically coordinate with simultaneous manual orders. An order already dispatched can race a manual trade, and cancel requests can fail or arrive after a fill. Reduce-only is the exchange-level defense against exit reversals, not a guarantee of perfect manual/bot lot isolation. Legacy cutover positions retain their previous monitor; this new guard applies to the two-rule runner's markets.
+- No merge, deployment, live order, account-setting change, state reset or `TRADING_ENABLED` change was performed while adding these protections.
