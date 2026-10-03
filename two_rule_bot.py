@@ -25,6 +25,16 @@ from manual_trade_guard import ManualTradeGuard
 
 TERMINAL = {'executed', 'canceled', 'expired'}
 PREFIX = '53523200-'  # UUID-format marker for recovery; the remaining UUID stays random.
+PARTITION_BUDGET = D('10')
+PARTITION_VERSION = 'ten-per-rule-v1'
+
+
+def budget_config(market_budget: Any = '20') -> dict[str, Any]:
+    return {'market_budget': str(number(market_budget, 'market budget')),
+            'budget_partition_version': PARTITION_VERSION,
+            'rule_budgets': {r.name: str(PARTITION_BUDGET) for r in RULES},
+            'cross_rule_borrowing': False,
+            'entry_fee_reserve_per_contract': str(FEE_RESERVE)}
 
 
 class Pending(RuntimeError):
@@ -195,6 +205,40 @@ class TwoRuleBot:
                     used += left * (number(order['price'], 'price') + FEE_RESERVE)
         return used
 
+    def funding_allowed(self, ticker: str, record: dict[str, Any],
+                        observations: dict[str, Any], selected: Any, cash: Any) -> bool:
+        """Apply independent $10 partitions before creating any order intent.
+
+        Reuse fill-backed accounting for pending reservations, partial fills and
+        released principal. Sales only replenish their own rule; losses remain
+        charged. Existing over-cap positions can still exit and are not reset.
+        Sizes and profit goals are not silently changed to make a trade fit.
+        """
+        if selected.rule not in BY_NAME or any(t.get('rule') not in BY_NAME for t in record['trades']):
+            raise Pending('Unknown strategy identity; cannot allocate its budget')
+        cash = number(cash, 'market cash')
+        if cash < 0:
+            raise ValueError('Market cash must be nonnegative')
+        required = D(selected.contracts) * (selected.price + FEE_RESERVE)
+        market_used = self.exposure(record, observations)
+        partition = {'trades': [t for t in record['trades'] if t['rule'] == selected.rule]}
+        rule_used = self.exposure(partition, observations)
+        reason = ('requested_size_exceeds_partition' if required > PARTITION_BUDGET else
+                  'rule_partition_exhausted' if required + rule_used > PARTITION_BUDGET else
+                  'shared_market_budget_exhausted' if required + market_used > self.budget else
+                  'insufficient_market_cash' if required > cash else None)
+        if reason is None:
+            return True
+        self.notice('TWO_RULE_BUDGET_SIZE_CONFLICT' if required > PARTITION_BUDGET
+                    else 'TWO_RULE_BUDGET_WAIT', ticker + ':' + selected.rule,
+                    rule=selected.rule, reason=reason, requested_quantity=selected.contracts,
+                    selected_ask=str(selected.price), required=str(required),
+                    rule_budget=str(PARTITION_BUDGET), rule_used=str(rule_used),
+                    market_budget=str(self.budget), market_used=str(market_used),
+                    cash_available=str(cash), fee_reserve_per_contract=str(FEE_RESERVE),
+                    cross_rule_borrowing=False)
+        return False
+
     def _save_request(self, trade: dict[str, Any], role: str, quantity: D, price: D) -> dict[str, Any]:
         order = {'client_id': PREFIX + str(uuid.uuid4())[9:], 'role': role,
                  'quantity': str(quantity), 'price': str(price), 'confirmed': '0',
@@ -330,10 +374,7 @@ class TwoRuleBot:
         if any(t['side'] != selected.side and any(not o.get('terminal') for o in t['orders'])
                for t in record['trades']):
             return False
-        required = D(selected.contracts) * (selected.price + FEE_RESERVE)
-        if required > cash or required + self.exposure(record, observations) > self.budget:
-            self.notice('TWO_RULE_BUDGET_WAIT', ticker + ':' + rule.name,
-                        required=str(required), market_budget=str(self.budget))
+        if not self.funding_allowed(ticker, record, observations, selected, cash):
             return False
         # Check the actual clock immediately before reserving and submitting.
         if candidate(rule, market, spot, record['close'] - self.clock()) is None:
@@ -410,7 +451,7 @@ class TwoRuleBot:
             observed, account = snapshots.get(ticker, (None, None))
             if observed is None:
                 observed, account, _ = self.reconcile(ticker, record)
-            for rule in RULES:  # Final rule wins a simultaneous funding conflict.
+            for rule in RULES:  # Independent partitions; preserve deterministic evaluation order.
                 previous_trade_count = len(record['trades'])
                 submitted = self.attempt(ticker, record, rule, observed, account)
                 if submitted or len(record['trades']) != previous_trade_count:
@@ -426,13 +467,15 @@ def main() -> None:
     parser.add_argument('--config', action='store_true')
     args = parser.parse_args()
     if args.config or not args.live:
-        print(json.dumps(config(), indent=2))
+        print(json.dumps({**config(), **budget_config()}, indent=2))
         return
     # Import the existing execution adapter only after explicit live selection.
     from dotenv import load_dotenv
     load_dotenv()
     if os.getenv('TRADING_ENABLED', 'false').lower() != 'true':
-        default_emit('TWO_RULE_CONFIG', **config(), trading_enabled=False,
+        default_emit('TWO_RULE_CONFIG', **config(),
+                     **budget_config(os.getenv('MARKET_BUDGET_DOLLARS', '20')),
+                     trading_enabled=False,
                      manual_guard=ManualTradeGuard.VERSION,
                      commit=os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unavailable'))
         default_emit('TWO_RULE_LOCKED', message='Live order routing is disabled')
@@ -477,7 +520,7 @@ def main() -> None:
                             budget=os.getenv('MARKET_BUDGET_DOLLARS', '20'),
                             legacy_blocked=lambda ticker: blocked.get(ticker, 0) > time.time(),
                             deferred_errors=(RequestDeferred,))
-        default_emit('TWO_RULE_CONFIG', **config(), market_budget=str(runner.budget),
+        default_emit('TWO_RULE_CONFIG', **config(), **budget_config(runner.budget),
                      manual_guard=ManualTradeGuard.VERSION,
                      commit=os.getenv('RAILWAY_GIT_COMMIT_SHA', 'unavailable'))
         def stop(signum: int, frame: Any) -> None:
