@@ -27,6 +27,20 @@ def settlement_entry_price_allowed(price):
     return price.is_finite() and SETTLEMENT_PRICE <= price < D("1")
 
 
+def settlement_intent_allowed(intent):
+    """Accept the current profit intent or an explicitly saved legacy hold."""
+    try:
+        if not settlement_price_allowed(intent.get("price", "-1")):
+            return False
+        target = D(str(intent.get("exit_target", "-1")))
+        if target == 1:
+            return intent.get("hold_to_settlement") is True
+        return (target == D("0.99") and intent.get("hold_to_settlement") is not True
+                and D(str(intent.get("settlement_profit_dollars", "-1"))) == D("0.30"))
+    except (ArithmeticError, ValueError, TypeError):
+        return False
+
+
 def market_budget():
     value = D(os.getenv("MARKET_BUDGET_DOLLARS", "20"))
     if not value.is_finite() or value < SETTLEMENT_BUDGET:

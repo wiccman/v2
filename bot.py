@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestCoordinator, RequestDeferred
+from entry_policy import settlement_intent_allowed
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, TARGET_EXPOSURE, EARLIER_ORDER_BUDGET, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, SETTLEMENT_QUANTITY, settlement_price_allowed, settlement_entry_price_allowed, remaining_allowance, reconcile_reservation, attempt_committed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
@@ -375,6 +376,8 @@ def uses_entry_bias(price, kind):
 
 
 def entry_side_source(closed, price=Decimal("0"), kind="regular"):
+    if kind == SETTLEMENT_KIND:
+        return "settlement_quote"
     if not DIRECTIONAL_ENTRY_POLICY:
         elapsed = time.time() - (closed.timestamp() - 900)
         if uses_entry_bias(price, kind) and elapsed < LOW_PRICE_ENTRY_END:
@@ -382,7 +385,19 @@ def entry_side_source(closed, price=Decimal("0"), kind="regular"):
     return "live_strike"
 
 
+def settlement_quote_side(market):
+    """Select the unique qualifying quote without BTC/strike or bias inputs."""
+    asks = {side: quotes(market, side)[0] for side in ("YES", "NO")}
+    if any(not ask.is_finite() or not 0 <= ask <= 1 for ask in asks.values()):
+        return None
+    sides = [side for side, ask in asks.items() if settlement_entry_price_allowed(ask)]
+    return sides[0] if len(sides) == 1 else None
+
+
 def selected_entry_side(record, state, ticker, market, closed, source):
+    if source == "settlement_quote":
+        side = settlement_quote_side(market)
+        return side, side, None
     if source == "boruto":
         bias = ensure_entry_bias(record, state, ticker, market, closed)["prediction"]
         return bias, None, bias
@@ -423,7 +438,7 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None, si
     allowed = live_side in ("YES", "NO") and side == live_side
     if kind == SETTLEMENT_KIND:
         allowed = side in ("YES", "NO") and side == live_side and Decimal(str(price)) == SETTLEMENT_PRICE
-        reason = "live_strike_97_cent_limit"
+        reason = "settlement_96_cent_quote" if side_source == "settlement_quote" else "live_strike_97_cent_limit"
         switch = record.get("settlement_switch", {})
         if switch.get("side") != side or switch.get("phase") != "ready":
             locked_side = record.get("trade_side")
@@ -449,7 +464,8 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None, si
         reason = "entry_limit_below_45c"
     return allowed, {
         "selected_side": side,
-        "live_strike_side": live_side,
+        "live_strike_side": None if side_source == "settlement_quote" else live_side,
+        "quote_side": live_side if side_source == "settlement_quote" else None,
         "bias_side": bias_side,
         "side_source": side_source,
         "entry_price": str(price),
@@ -460,9 +476,7 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None, si
 
 def tracked_entry_price_allowed(intent):
     if intent.get("kind") == SETTLEMENT_KIND:
-        return (settlement_price_allowed(intent.get("price", "-1"))
-                and intent.get("hold_to_settlement") is True
-                and Decimal(str(intent.get("exit_target", "-1"))) == 1)
+        return settlement_intent_allowed(intent)
     return Decimal(str(intent.get("price", "-1"))) in ALL_ENTRY_EXIT_PAIRS
 
 
@@ -1185,7 +1199,7 @@ def settlement_position(ticker):
 
 
 def settlement_entry(record, state, ticker, closed):
-    """Rest a 96c maximum buy on the live strike side; reconcile side changes."""
+    """Rest a 96c maximum buy on the qualifying quote; reconcile side changes."""
     now = time.time()
     if not closed.timestamp() - SETTLEMENT_WINDOW <= now < closed.timestamp():
         return
@@ -1204,20 +1218,17 @@ def settlement_entry(record, state, ticker, closed):
         report("attempt_already_recorded")
         return  # Persisted intent prevents repeats after partial fills or lost ACKs.
     market = client.market(ticker)
-    spot = client.btc_reference_price()
-    side = strike_side(market, spot, Decimal("0"))
+    side = settlement_quote_side(market)
     asks = {outcome: quotes(market, outcome)[0] for outcome in ("YES", "NO")}
     observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]),
-                    btc_reference=str(spot), strike=str(market["floor_strike"]))
+                    side_source="settlement_quote")
     if time.time() >= closed.timestamp():
         report("window_closed_during_quote_read")
         return
     if side is None:
-        report("btc_exactly_at_strike")
+        report("no_unique_valid_96_cent_quote")
         return
     locked_side = record.get("trade_side")
-    if locked_side not in ("YES", "NO"):
-        locked_side = (record.get("signal") or {}).get("prediction")
     if not asks[side].is_finite():
         report("selected_side_quote_unavailable", side=side)
         return
@@ -1281,7 +1292,8 @@ def settlement_entry(record, state, ticker, closed):
         SETTLEMENT_KIND, submit_before=closed.timestamp(), cancel_at=closed.timestamp())
     if result.get("order_id"):
         write_log("SETTLEMENT_97_ENTRY", ticker, prediction=side, price=str(SETTLEMENT_PRICE), quantity=str(quantity),
-                  details=json.dumps({"budget": str(SETTLEMENT_BUDGET), "hold_to_settlement": True,
+                  details=json.dumps({"budget": str(SETTLEMENT_BUDGET), "hold_to_settlement": False,
+                                      "gross_profit_goal": "0.30", "side_source": "settlement_quote",
                                       "order": result}))
     else:
         report("not_submitted_or_unacknowledged", side=side,
