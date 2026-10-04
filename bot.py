@@ -5,6 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestCoordinator, RequestDeferred
+from entry_policy import settlement_intent_allowed
 from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, TARGET_EXPOSURE, EARLIER_ORDER_BUDGET, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, SETTLEMENT_QUANTITY, settlement_price_allowed, settlement_entry_price_allowed, remaining_allowance, reconcile_reservation, attempt_committed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
@@ -460,9 +461,7 @@ def entry_decision(record, side, price, kind, live_side=None, bias_side=None, si
 
 def tracked_entry_price_allowed(intent):
     if intent.get("kind") == SETTLEMENT_KIND:
-        return (settlement_price_allowed(intent.get("price", "-1"))
-                and intent.get("hold_to_settlement") is True
-                and Decimal(str(intent.get("exit_target", "-1"))) == 1)
+        return settlement_intent_allowed(intent)
     return Decimal(str(intent.get("price", "-1"))) in ALL_ENTRY_EXIT_PAIRS
 
 

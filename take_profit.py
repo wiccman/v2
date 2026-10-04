@@ -1,4 +1,4 @@
-from entry_policy import SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed, attempt_committed
+from entry_policy import SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_intent_allowed, settlement_entry_price_allowed, attempt_committed
 """Independent, durable exit monitor and authorized settlement-side transition.
 
 Kalshi V2 rejects resting reduce-only orders. The worker sends price-protected
@@ -227,16 +227,17 @@ class TakeProfitMonitor:
                     by_client[item["client_id"]] = found["order_id"]
             self.save()
         entries = {}
+        profit_protected_orders = set()
         for item in record.get("entry_intents", []):
             order_id = item.get("order_id") or by_client.get(item.get("client_id"))
             price = Decimal(item.get("price", "-1"))
             target = self.pairs.get(price)
             if item.get("kind") == SETTLEMENT_KIND:
-                if not settlement_price_allowed(price):
-                    raise ValueError("Invalid settlement inventory price")
+                if not settlement_intent_allowed(item):
+                    raise ValueError("Invalid settlement inventory intent")
                 target = Decimal(item.get("exit_target", "-1"))
-                if target != Decimal("0.99"):
-                    raise ValueError("Invalid settlement profit target")
+                if target == Decimal("0.99") and order_id:
+                    profit_protected_orders.add(order_id)
             # Preserve the original target for inventory from the retired tier.
             # New entries use only the current pairs.
             if target is None:
@@ -297,10 +298,14 @@ class TakeProfitMonitor:
             self.emit("TP_OUTSIDE_INVENTORY", ticker=ticker, lots=outside,
                       action="excluded_from_take_profit", position_verified=True)
         bot_held, allocations = owned_position(fills, entries, exits, held, ticker)
+        protected_fills = {f.get("fill_id") or f.get("trade_id") for f in fills
+                           if f.get("order_id") in profit_protected_orders}
         ledger["ownership"] = {
             "checked_at": self.clock(), "entry_fingerprint": entry_fingerprint(record),
             "account_held": str(held), "bot_held": str(bot_held),
             "outside_held": str(held - bot_held), "allocations": allocations,
+            "legacy_force_allocations": [a for a in allocations
+                                          if a["fill_id"] not in protected_fills],
         }
         self.save()
         return result
@@ -349,18 +354,23 @@ class TakeProfitMonitor:
                           if self.pairs is not None else ({self.target: held}, {}))
         market = None
         bot_held = Decimal(ledger["ownership"]["bot_held"]) if self.pairs is not None else held
-        if self.force_exit_price is not None and bot_held:
+        force_allocations = (ledger["ownership"]["legacy_force_allocations"]
+                             if self.pairs is not None else None)
+        force_quantity = (sum((Decimal(a["quantity"]) for a in force_allocations), Decimal(0))
+                          * (1 if bot_held > 0 else -1)
+                          if force_allocations is not None else bot_held)
+        if self.force_exit_price is not None and force_quantity:
             market = self.client.market(ticker)
             side = "yes" if bot_held > 0 else "no"
             bid = Decimal(str(market[side + "_bid_dollars"]))
             if not bid.is_finite() or not 0 <= bid <= 1:
                 raise ValueError("Invalid forced-exit bid")
             if bid >= self.force_exit_price:
-                # Override every target, including hold-to-settlement, using
-                # verified bot allocations rather than the shared position.
-                plan = ({"allocations": ledger["ownership"]["allocations"], "cost_groups": []}
+                # Preserve legacy exits without overriding current per-trade
+                # profit targets or including manual inventory.
+                plan = ({"allocations": force_allocations, "cost_groups": []}
                         if self.pairs is not None else None)
-                return self._submit(ticker, ledger, close, bot_held, self.force_exit_price,
+                return self._submit(ticker, ledger, close, force_quantity, self.force_exit_price,
                                     paired=False, plan=plan)
         switch = record.get("settlement_switch", {})
         switching = (switch.get("side") in {"YES", "NO"} and switch.get("allow_loss") is True
