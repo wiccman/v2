@@ -5,7 +5,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from kalshi import KalshiClient, KalshiAPIError, terminal_ioc_receipt
 from request_coordinator import RequestCoordinator, RequestDeferred
-from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, TARGET_EXPOSURE, EARLIER_ORDER_BUDGET, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, settlement_price_allowed, settlement_entry_price_allowed, remaining_allowance, reconcile_reservation, attempt_committed
+from entry_policy import initialize as initialize_budget, reserve as reserve_entry, market_budget, release_unsubmitted, entry_quantity, FEE_RESERVE, ENTRY_QUANTITY, TARGET_EXPOSURE, EARLIER_ORDER_BUDGET, SETTLEMENT_BUDGET, SETTLEMENT_PRICE, SETTLEMENT_KIND, SETTLEMENT_WINDOW, SETTLEMENT_QUANTITY, settlement_price_allowed, settlement_entry_price_allowed, remaining_allowance, reconcile_reservation, attempt_committed
 from take_profit import TakeProfitMonitor
 from price_pairs import parse_pairs
 from sale_recycling import confirmed_credits
@@ -62,7 +62,7 @@ NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **L
 NEW_ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
 ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **NEW_ENTRY_EXIT_PAIRS}.items()))
 NEW_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")
-ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")  # Hold-to-settlement inventory bucket.
+ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("0.99")  # 10 contracts x 3c = $0.30 gross.
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MIN_ENTRY_PRICE = Decimal("0.45")
@@ -85,7 +85,7 @@ if not PER_ORDER_PROFIT_DOLLARS.is_finite() or PER_ORDER_PROFIT_DOLLARS <= 0:
 CANCEL_AFTER = 900 - SETTLEMENT_WINDOW
 # Compatibility argument only: reserve_entry enforces the shared allocation.
 BUDGET = Decimal("0.77")
-MAX_OPEN_CONTRACTS = Decimal("8")
+MAX_OPEN_CONTRACTS = Decimal("10")
 INITIAL_OPEN_CONTRACTS = Decimal("5")
 MAX_AVERAGE_CONTRACTS = Decimal("3")
 MAX_AVERAGE_DOLLARS = Decimal("2.50")
@@ -93,7 +93,7 @@ AVERAGE_DOWN_CUTOFF = 180
 INTERVAL = int(os.getenv("ENTRY_INTERVAL_SECONDS", "7"))
 ENTRY_START_DELAY = 60  # Wait for the first minute of each market.
 START = ENTRY_START_DELAY
-END = 900 - SETTLEMENT_WINDOW  # Final three minutes belong to the settlement route.
+END = 900 - SETTLEMENT_WINDOW  # Final two minutes belong to the settlement route.
 PREDICTION_MINUTES = (2, 4, 6)
 PREDICTION_GRACE_SECONDS = 15
 PREDICTION_SECONDS = tuple(minute * 60 for minute in PREDICTION_MINUTES)
@@ -679,8 +679,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
                       details=json.dumps({"ask": str(ask), "minimum": str(minimum_ask)}))
             return skip("ask_outside_entry_bounds", ask=str(ask))
         resting = kind == SETTLEMENT_KIND or Decimal(str(price)) == SIX_MINUTE_ENTRY_PRICE
-        if kind == SETTLEMENT_KIND and not settlement_entry_price_allowed(ask):
-            return skip("settlement_ask_below_97", ask=str(ask))
+        # Settlement route always posts its 96c resting limit during the final two minutes.
         if not resting and ask > Decimal(str(price)):
             return skip("ask_above_limit", ask=str(ask), limit=str(price))
         if Decimal(str(price)) == SIX_MINUTE_ENTRY_PRICE and ask < Decimal(str(price)):
@@ -737,10 +736,10 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     intent["side_source"] = decision["side_source"]
     if side_source == "boruto":
         intent["bias_build"] = SIGNAL_BUILD
-    intent["exit_target"] = "1" if kind == SETTLEMENT_KIND else str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
+    intent["exit_target"] = str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
     intent["resting_entry"] = resting
     if kind == SETTLEMENT_KIND:
-        intent["hold_to_settlement"] = True
+        intent["settlement_profit_dollars"] = "0.30"
     save_state(state)  # Persist allowance and client ID before any exchange request.
     quantity = Decimal(intent["quantity"])
     try:
@@ -910,7 +909,7 @@ def reconcile_entries(state, now_timestamp=None):
             # qualifying side. This includes the 96c settlement limit in the
             # directional policy; cancel on an unavailable quote as well.
             scalps = [i for i in pending if i.get("resting_entry") and
-                      (DIRECTIONAL_ENTRY_POLICY or i.get("kind") != SETTLEMENT_KIND)]
+                      i.get("kind") != SETTLEMENT_KIND]
             if scalps:
                 try:
                     live = strike_side(client.market(ticker), client.btc_reference_price(),
@@ -1206,8 +1205,7 @@ def settlement_entry(record, state, ticker, closed):
         return  # Persisted intent prevents repeats after partial fills or lost ACKs.
     market = client.market(ticker)
     spot = client.btc_reference_price()
-    side = strike_side(market, spot,
-                       MIN_STRIKE_DISTANCE_DOLLARS if DIRECTIONAL_ENTRY_POLICY else Decimal("0"))
+    side = strike_side(market, spot, Decimal("0"))
     asks = {outcome: quotes(market, outcome)[0] for outcome in ("YES", "NO")}
     observed.update(yes_ask=str(asks["YES"]), no_ask=str(asks["NO"]),
                     btc_reference=str(spot), strike=str(market["floor_strike"]))
@@ -1215,13 +1213,13 @@ def settlement_entry(record, state, ticker, closed):
         report("window_closed_during_quote_read")
         return
     if side is None:
-        report("btc_within_25_dollars_of_strike")
+        report("btc_exactly_at_strike")
         return
     locked_side = record.get("trade_side")
     if locked_side not in ("YES", "NO"):
         locked_side = (record.get("signal") or {}).get("prediction")
-    if not settlement_entry_price_allowed(asks[side]):
-        report("selected_side_not_at_or_above_96", side=side, selected_ask=str(asks[side]))
+    if not asks[side].is_finite():
+        report("selected_side_quote_unavailable", side=side)
         return
     held = settlement_position(ticker)
     opposite = (side == "YES" and held < 0) or (side == "NO" and held > 0)
@@ -1365,8 +1363,8 @@ def cycle(state):
     if EXIT_MONITOR is not None and not EXIT_MONITOR.healthy:
         write_log("ENTRY_WAIT_TAKE_PROFIT", ticker, details="Exit monitor warming up or recovering")
         return
-    # Only the final-three-minute settlement route is active in this build.
-    write_log("ENTRY_FINAL_MINUTES_ONLY_WAIT", ticker, details="Waiting for final 3 minutes")
+    # Only the final-two-minute settlement route is active in this build.
+    write_log("ENTRY_FINAL_MINUTES_ONLY_WAIT", ticker, details="Waiting for final 2 minutes")
     return
 
 def check():
@@ -1382,7 +1380,7 @@ def main():
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; trigger_ask>=96c and <100c; limit=96c GTC until close; budget=${SETTLEMENT_BUDGET:.2f} reserved; quantity<={entry_quantity(SETTLEMENT_PRICE, SETTLEMENT_KIND)}; confirm opposite close even at loss before buying; hold to settlement", flush=True)
+    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; no $25 distance gate; limit=96c GTC until close; fixed_quantity={SETTLEMENT_QUANTITY}; gross_profit_goal=$0.30; budget=${SETTLEMENT_BUDGET:.2f}", flush=True)
     print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
     print("BUY_BLOCK limits 70c through 85c inclusive blocked from 6:00 through 12:59; pending bot buys canceled; 96c settlement route retained", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
@@ -1397,7 +1395,7 @@ def main():
         if name in os.environ:
             print(f"CONFIG_IGNORED: {name}; fixed entry sizing and paired prices apply; no stop-loss is active", flush=True)
     if "ENTRY_START_MINUTE" in os.environ or "ENTRY_END_MINUTE" in os.environ:
-        print("CONFIG_IGNORED: fixed windows: early buys from1m; under60c from1m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from1m to2m; settlement from12m; 35c retired", flush=True)
+        print("CONFIG_IGNORED: fixed windows: early buys from1m; under60c from1m to6m; 60-69c from5m to6m; 75c from6m; other70c+ from8m; 57c from1m to2m; settlement from13m; 35c retired", flush=True)
     if os.getenv("PREDICTION_UPDATE_MINUTES", "2,4,6") != "2,4,6":
         print("CONFIG_IGNORED: prediction schedule is fixed at 2,4,6 minutes", flush=True)
     if args.check:
