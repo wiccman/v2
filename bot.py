@@ -63,7 +63,7 @@ NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **L
 NEW_ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
 ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **NEW_ENTRY_EXIT_PAIRS}.items()))
 NEW_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("1")
-ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("0.99")  # 10 contracts x 3c = $0.30 gross.
+ALL_ENTRY_EXIT_PAIRS[SETTLEMENT_PRICE] = Decimal("0.99")  # 10 contracts x 3c = $0.25 gross.
 # Compatibility values for the retired synchronous single-tier helpers only.
 ENTRY_PRICE, EXIT_PRICE = Decimal("0.32"), Decimal("0.39")
 MIN_ENTRY_PRICE = Decimal("0.45")
@@ -753,7 +753,7 @@ def funded_entry(record, state, ticker, side, price, closed, kind, now_timestamp
     intent["exit_target"] = str(ALL_ENTRY_EXIT_PAIRS[Decimal(str(price))])
     intent["resting_entry"] = resting
     if kind == SETTLEMENT_KIND:
-        intent["settlement_profit_dollars"] = "0.30"
+        intent["settlement_profit_dollars"] = "0.25"
     save_state(state)  # Persist allowance and client ID before any exchange request.
     quantity = Decimal(intent["quantity"])
     try:
@@ -1293,7 +1293,7 @@ def settlement_entry(record, state, ticker, closed):
     if result.get("order_id"):
         write_log("SETTLEMENT_97_ENTRY", ticker, prediction=side, price=str(SETTLEMENT_PRICE), quantity=str(quantity),
                   details=json.dumps({"budget": str(SETTLEMENT_BUDGET), "hold_to_settlement": False,
-                                      "gross_profit_goal": "0.30", "side_source": "settlement_quote",
+                                      "gross_profit_goal": "0.25", "side_source": "settlement_quote",
                                       "order": result}))
     else:
         report("not_submitted_or_unacknowledged", side=side,
@@ -1392,7 +1392,7 @@ def main():
     print("ENTRY_FIVE_MINUTE_GATE: no buy limit of 60c or more before300s; stricter later windows still apply", flush=True)
     print(f"Entry windows: regular under70c ends360s; 75c starts360s; other 70c+ starts480s; scalp entries end{END}s; market budget=${MARKET_BUDGET}; entry/exit pairs={[(str(p * 100), str(t * 100)) for p, t in ENTRY_EXIT_PAIRS.items()]} cents", flush=True)
     print(f"Late entry window={max(HIGH_PRICE_ENTRY_START, LATE_ENTRY_START)}s..{min(END, LATE_ENTRY_END)}s; late pairs={[(str(p * 100), str(t * 100)) for p, t in LATE_ENTRY_PAIRS.items()]} cents", flush=True)
-    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; no $25 distance gate; limit=96c GTC until close; fixed_quantity={SETTLEMENT_QUANTITY}; gross_profit_goal=$0.30; budget=${SETTLEMENT_BUDGET:.2f}", flush=True)
+    print(f"SETTLEMENT_ENTRY window={900 - SETTLEMENT_WINDOW}s..900s; live strike side; no $25 distance gate; limit=96c GTC until close; fixed_quantity={SETTLEMENT_QUANTITY}; gross_profit_goal=$0.25; budget=${SETTLEMENT_BUDGET:.2f}", flush=True)
     print("OPENING_57_ENTRY window=60s..120s; exact_ask=57c; limit=57c IOC; quantity<=4; independent opening attempt", flush=True)
     print("BUY_BLOCK limits 70c through 85c inclusive blocked from 6:00 through 12:59; pending bot buys canceled; 96c settlement route retained", flush=True)
     print("ENTRY_PRICE_FLOOR minimum_ask=45c; 35c tier retired; fresh quote required; entries IOC except 75c/96c GTC limits; exchange price improvement remains possible", flush=True)
