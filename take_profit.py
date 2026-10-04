@@ -255,6 +255,10 @@ class TakeProfitMonitor:
                     raise ValueError("Saved entry target conflicts with configured pair")
                 entries[order_id] = {"side": item["side"], "target": str(saved_target),
                                      "price": str(price)}
+                if order_id in profit_protected_orders:
+                    # This validated intent carries its own approved trade goal.
+                    # Do not let the legacy monitor default lower its exit.
+                    entries[order_id]["gross_profit_goal"] = item["settlement_profit_dollars"]
         exits = ledger.get("exit_orders", {})
         # An order status can update before its fills endpoint. Do not reuse the
         # inventory until all previously confirmed exits appear in fill history.

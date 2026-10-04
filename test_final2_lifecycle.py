@@ -50,7 +50,8 @@ def test_current_profit_target_survives_legacy_override_and_restart(tmp_path, si
     e.manual(sign, "2")
     def worker():
         m, _ = monitor(tmp_path, e)
-        m.per_order_profit, m.force_exit_price, m.quote_gate = D(".30"), D(".98"), True
+        # Match production's legacy default; the saved trade must override it.
+        m.per_order_profit, m.force_exit_price, m.quote_gate = D(".20"), D(".98"), True
         e.market = lambda ticker: {"yes_bid_dollars": str(e.bid), "no_bid_dollars": str(e.bid)}
         return m
     m = worker()
@@ -78,6 +79,28 @@ def test_legacy_settlement_lot_keeps_its_98_override(tmp_path):
 
 
 @pytest.mark.parametrize("sign", [1, -1])
+def test_saved_goal_uses_actual_fill_cost_with_legacy_default(tmp_path, sign):
+    e = PairExchange(bid=".96")
+    e.market = lambda ticker: {"yes_bid_dollars": str(e.bid), "no_bid_dollars": str(e.bid)}
+    order_id = buy(e, ".96", ".94", "10", sign, target=".99")
+    e.intents[-1].update(kind=SETTLEMENT_KIND, settlement_profit_dollars=".30")
+    m, _ = monitor(tmp_path, e)
+    m.per_order_profit, m.force_exit_price, m.quote_gate = D(".20"), D(".98"), True
+    m.run_once()
+    assert m.healthy and not e.submissions
+    e.bid = D(".97")
+    m.run_once()
+    armed = m.state["markets"]["T"]["armed"]
+    assert D(armed["target"]) == D(".97")
+    assert armed["cost_groups"] == [{"order_id": order_id, "average_fill_cost": "0.94",
+                                    "quantity": "10", "gross_profit_goal": "0.30"}]
+    m.run_once()
+    assert m.healthy and e.held == 0
+    assert len(e.submissions) == 1
+    assert D(e.submissions[0]["price"]) == (D(".97") if sign > 0 else D(".03"))
+
+
+@pytest.mark.parametrize("sign", [1, -1])
 def test_mixed_legacy_current_and_manual_allocations(tmp_path, sign):
     e = PairExchange(bid=".98")
     e.market = lambda ticker: {"yes_bid_dollars": str(e.bid), "no_bid_dollars": str(e.bid)}
@@ -87,7 +110,7 @@ def test_mixed_legacy_current_and_manual_allocations(tmp_path, sign):
     e.intents[-1].update(kind=SETTLEMENT_KIND, settlement_profit_dollars=".30")
     e.manual(sign, "2")
     m, _ = monitor(tmp_path, e)
-    m.per_order_profit, m.force_exit_price, m.quote_gate = D(".30"), D(".98"), True
+    m.per_order_profit, m.force_exit_price, m.quote_gate = D(".20"), D(".98"), True
     m.run_once(); m.run_once()
     assert m.healthy and e.held == 12 * sign
     assert [o["count"] for o in e.submissions] == ["6"]

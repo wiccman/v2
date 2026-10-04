@@ -231,10 +231,13 @@ def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profi
         else:
             groups.setdefault((lot["sign"], lot["fill"]["order_id"]), []).append(lot)
     for (sign, order_id), members in sorted(groups.items()):
+        order_profit = D(entry_orders[order_id].get("gross_profit_goal", profit))
+        if not order_profit.is_finite() or order_profit <= 0:
+            raise ValueError("Saved per-order profit must be positive")
         quantity = sum((lot["quantity"] for lot in members), D(0))
         cost = sum((lot["quantity"] * _outcome_cost(lot["fill"], sign)
                     for lot in members), D(0)) / quantity
-        target = (cost + profit / quantity).quantize(D("0.01"), rounding=ROUND_CEILING)
+        target = (cost + order_profit / quantity).quantize(D("0.01"), rounding=ROUND_CEILING)
         if target > D("0.99"):
             # This buy cannot earn the requested amount before settlement.
             # Preserve its saved scalp exit rather than leave it unmanaged.
@@ -244,7 +247,7 @@ def order_profit_inventory(fills, entry_orders, exit_orders, held, ticker, profi
         plan["allocations"].extend({"fill_id": lot["fill_id"], "quantity": str(lot["quantity"])}
                                    for lot in members)
         plan["cost_groups"].append({"order_id": order_id, "average_fill_cost": str(cost),
-                                    "quantity": str(quantity), "gross_profit_goal": str(profit)})
+                                    "quantity": str(quantity), "gross_profit_goal": str(order_profit)})
     return dict(sorted(buckets.items())), plans
 
 
