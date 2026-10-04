@@ -35,8 +35,9 @@ def settlement_intent_allowed(intent):
         target = D(str(intent.get("exit_target", "-1")))
         if target == 1:
             return intent.get("hold_to_settlement") is True
-        return (target == D("0.99") and intent.get("hold_to_settlement") is not True
-                and D(str(intent.get("settlement_profit_dollars", "-1"))) in (D("0.25"), D("0.30")))
+        return (intent.get("hold_to_settlement") is not True
+                and (target, D(str(intent.get("settlement_profit_dollars", "-1"))))
+                in ((D("0.98"), D("0.20")), (D("0.99"), D("0.25")), (D("0.99"), D("0.30"))))
     except (ArithmeticError, ValueError, TypeError):
         return False
 
