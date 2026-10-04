@@ -231,10 +231,12 @@ class TakeProfitMonitor:
             order_id = item.get("order_id") or by_client.get(item.get("client_id"))
             price = Decimal(item.get("price", "-1"))
             target = self.pairs.get(price)
-            if item.get("hold_to_settlement") is True:
-                if not settlement_price_allowed(price) or Decimal(item.get("exit_target", "-1")) != 1:
-                    raise ValueError("Invalid settlement inventory target")
-                target = Decimal("1")
+            if item.get("kind") == SETTLEMENT_KIND:
+                if not settlement_price_allowed(price):
+                    raise ValueError("Invalid settlement inventory price")
+                target = Decimal(item.get("exit_target", "-1"))
+                if target != Decimal("0.99"):
+                    raise ValueError("Invalid settlement profit target")
             # Preserve the original target for inventory from the retired tier.
             # New entries use only the current pairs.
             if target is None:
