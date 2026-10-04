@@ -11,7 +11,8 @@ EARLIER_ORDER_BUDGET = D("12.00")  # Per-order ceiling (target exposure plus fee
 SETTLEMENT_BUDGET = D("20.00")
 SETTLEMENT_PRICE = D("0.96")
 SETTLEMENT_KIND = "settlement_97"  # Durable identifier for existing intents across upgrades.
-SETTLEMENT_WINDOW = 180
+SETTLEMENT_WINDOW = 120
+SETTLEMENT_QUANTITY = D("10")
 
 
 def settlement_price_allowed(price):
@@ -64,7 +65,7 @@ def entry_quantity(price, kind, record=None, cap=None, max_quantity=None):
     if kind == SETTLEMENT_KIND:
         # Final-3-minute settlement entries target the same ~$10 contract exposure
         # while retaining the existing $20 settlement/market cap as a hard ceiling.
-        quantity = min(target_quantity, (SETTLEMENT_BUDGET / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
+        quantity = min(SETTLEMENT_QUANTITY, (SETTLEMENT_BUDGET / (price + FEE_RESERVE)).to_integral_value(rounding="ROUND_DOWN"))
     else:
         available = EARLIER_ORDER_BUDGET
         if record is not None:
