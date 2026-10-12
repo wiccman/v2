@@ -24,7 +24,8 @@ class InventorySyncError(ValueError):
     """Independent exchange snapshots have not converged yet."""
 
 
-def _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked=None):
+def _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked=None, *,
+                    include_untracked=False, openings=None, reductions=None):
     """Replay verified fills, retaining the identity of every unsold entry lot.
 
     New exits consume their saved fill allocations; historical paired exits
@@ -109,6 +110,9 @@ def _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked=No
             elif targeted and lot["target"] != D(exit_order["target"]):
                 continue
             reduced = min(quantity, available)
+            if reduced and reductions is not None:
+                reductions.append({"entry_fill_id": lot["fill_id"], "exit_fill_id": key,
+                                   "quantity": reduced, "sign": lot["sign"]})
             lot["quantity"] -= reduced
             quantity -= reduced
             if order_id in allocated:
@@ -122,6 +126,8 @@ def _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked=No
             target = D(entry["target"]) if entry else None
             lots.append(dict(fill_id=key, sign=sign, quantity=quantity, target=target,
                              entry=entry, fill=seen[key]))
+            if openings is not None:
+                openings.append(dict(lots[-1]))
     lots = [lot for lot in lots if lot["quantity"]]
     reconstructed = sum((lot["quantity"] * lot["sign"] for lot in lots), D(0))
     if reconstructed != D(held):
@@ -133,7 +139,7 @@ def _remaining_lots(fills, entry_orders, exit_orders, held, ticker, untracked=No
         untracked.extend({"fill_id": lot["fill_id"], "order_id": lot["fill"].get("order_id"),
                           "side": "YES" if lot["sign"] > 0 else "NO",
                           "quantity": str(lot["quantity"])} for lot in outside)
-    return [lot for lot in lots if lot["target"] is not None]
+    return lots if include_untracked else [lot for lot in lots if lot["target"] is not None]
 
 
 def paired_inventory(fills, entry_orders, exit_orders, held, ticker, untracked=None):

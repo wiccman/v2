@@ -35,8 +35,15 @@ class TakeProfitMonitor:
     def __init__(self, client, read_entries, path, target=Decimal("0.45"),
                  poll=1.0, clock=time.time, emit=None, pairs=None, fill_cost_targets=False,
                  per_order_profit=None, no_fill_pause=0.0, quote_gate=False,
-                 per_order_percentage=None, per_order_increment=None, force_exit_price=None):
+                 per_order_percentage=None, per_order_increment=None, force_exit_price=None,
+                 manual_exits=None, execution_lock=None):
         self.client, self.read_entries = client, read_entries
+        self.manual_exits = manual_exits
+        self.execution_lock = execution_lock or threading.RLock()
+        if manual_exits is not None:
+            if pairs is None:
+                raise ValueError("Hybrid exits require fill-attributed automatic inventory")
+            manual_exits.bind(read_entries)
         self.path, self.target = Path(path), Decimal(target)
         self.pairs = pairs
         self.fill_cost_targets = fill_cost_targets
@@ -67,7 +74,8 @@ class TakeProfitMonitor:
 
     def settlement_ready(self, ticker, side):
         """Read an atomic receipt, never mutable state halfway through a pass."""
-        if not self.healthy or not self.path.exists():
+        if (not self.healthy or not self.path.exists()
+                or self.manual_exits is not None and self.manual_exits.pending(ticker)):
             return False
         ledger = json.loads(self.path.read_text()).get("markets", {}).get(ticker, {})
         ready = ledger.get("settlement_ready", {})
@@ -81,7 +89,8 @@ class TakeProfitMonitor:
         No additional fill-history requests are added to the entry loop. A
         changed position, entry ledger, or unresolved exit requires a new pass.
         """
-        if not self.healthy or self.pairs is None or not self.path.exists():
+        if (not self.healthy or self.pairs is None or not self.path.exists()
+                or self.manual_exits is not None and self.manual_exits.pending(ticker)):
             raise InventorySyncError("Ownership monitor not ready")
         ledger = json.loads(self.path.read_text()).get("markets", {}).get(ticker, {})
         receipt = ledger.get("ownership", {})
@@ -260,6 +269,9 @@ class TakeProfitMonitor:
                     # Do not let the legacy monitor default lower its exit.
                     entries[order_id]["gross_profit_goal"] = item["settlement_profit_dollars"]
         exits = ledger.get("exit_orders", {})
+        if self.manual_exits is not None:
+            # Share only explicit fill allocations, never budgets or profit goals.
+            exits = self.manual_exits.combined_exits(ticker, exits)
         # An order status can update before its fills endpoint. Do not reuse the
         # inventory until all previously confirmed exits appear in fill history.
         unique = {f.get("fill_id") or f.get("trade_id"): f for f in fills}
@@ -302,6 +314,8 @@ class TakeProfitMonitor:
             self.emit("TP_OUTSIDE_INVENTORY", ticker=ticker, lots=outside,
                       action="excluded_from_take_profit", position_verified=True)
         bot_held, allocations = owned_position(fills, entries, exits, held, ticker)
+        if self.manual_exits is not None:
+            self.manual_exits.observe(ticker, record, ledger, fills, entries, exits, held)
         protected_fills = {f.get("fill_id") or f.get("trade_id") for f in fills
                            if f.get("order_id") in profit_protected_orders}
         ledger["ownership"] = {
@@ -326,6 +340,8 @@ class TakeProfitMonitor:
             ledger["close_timestamp"] = close
             self.save()
         if self.clock() >= float(close):
+            if self.manual_exits is not None:
+                self.manual_exits.window_closed(ticker, close)
             # An unknown acknowledgement remains recorded for audit. Never send
             # new exits to an expired market or label unsettled inventory sold.
             if ledger.get("armed") and not ledger.get("close_reported"):
@@ -340,15 +356,18 @@ class TakeProfitMonitor:
         switch = record.get("settlement_switch", {})
         urgent_switch = (switch.get("allow_loss") is True and
                          switch.get("phase") in {"requested", "ready"})
-        if not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0) and not ledger.get("pending"):
+        if self.manual_exits is None and not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0) and not ledger.get("pending"):
             return True
         self._clear_legacy(ticker, record, ledger)
+        if self.manual_exits is not None and not self.manual_exits.reconcile(ticker):
+            return False
         if not self._reconcile(ticker, ledger):
             return False
-        if not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0):
+        if self.manual_exits is None and not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0):
             return True
         positions = self.client.positions(ticker)
-        matches = [p for p in positions if p.get("ticker") == ticker]
+        matches = [p for p in positions if p.get("ticker") == ticker
+                   and (self.manual_exits is None or p.get("subaccount_number", 0) == 0)]
         if len(matches) > 1:
             raise RuntimeError("Multiple position rows for ticker; refusing ambiguous exit sizing")
         held = Decimal(str(matches[0]["position_fp"])) if matches else Decimal("0")
@@ -356,6 +375,8 @@ class TakeProfitMonitor:
             raise ValueError("Invalid position quantity")
         buckets, plans = (self._paired_buckets(ticker, record, ledger, held)
                           if self.pairs is not None else ({self.target: held}, {}))
+        if not urgent_switch and self.clock() < ledger.get("next_attempt_at", 0):
+            return True  # Manual ownership was refreshed while automatic exits cool down.
         market = None
         bot_held = Decimal(ledger["ownership"]["bot_held"]) if self.pairs is not None else held
         force_allocations = (ledger["ownership"]["legacy_force_allocations"]
@@ -446,6 +467,8 @@ class TakeProfitMonitor:
                             paired=self.pairs is not None, plan=plans.get(target))
 
     def _submit(self, ticker, ledger, close, quantity, target, *, paired, purpose="take_profit", plan=None):
+        if self.manual_exits is not None:
+            self.manual_exits.verify_snapshot(ticker)
         if self.clock() >= float(close):
             return False
         side = "YES" if quantity > 0 else "NO"
@@ -497,9 +520,17 @@ class TakeProfitMonitor:
         return True
 
     def run_once(self):
+        with self.execution_lock:
+            self._run_once_locked()
+
+    def _run_once_locked(self):
         entries = self.read_entries()  # Atomic entry-state snapshot; never mutate it.
         ok = True
-        for ticker, record in entries.get("markets", {}).items():
+        records = dict(entries.get("markets", {}))
+        if self.manual_exits is not None:
+            for ticker in self.manual_exits.discover():
+                records.setdefault(ticker, {})
+        for ticker, record in records.items():
             if self._stop.is_set():
                 ok = False
                 break
@@ -514,6 +545,9 @@ class TakeProfitMonitor:
                     # from the inconsistent snapshot.
                     fresh = self.read_entries().get("markets", {}).get(ticker, record)
                     market_ok = self._market(ticker, fresh, ledger)
+                if (market_ok and self.manual_exits is not None and not ledger.get("pending")
+                        and self.clock() >= ledger.get("retry_after", 0)):
+                    self.manual_exits.maybe_submit(ticker, record, ledger)
                 ok = market_ok and ok
             except Exception as error:
                 ok = False
