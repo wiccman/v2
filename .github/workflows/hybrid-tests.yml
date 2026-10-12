@@ -1,0 +1,50 @@
+name: Hybrid offline tests
+
+on:
+  push:
+    branches: [feature/manual-limit-exit-worker]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TRADING_ENABLED: "false"
+      MANUAL_EXITS_ENABLED: "false"
+      KALSHI_API_KEY_ID: ""
+      KALSHI_PRIVATE_KEY_PATH: ""
+      KALSHI_PRIVATE_KEY_B64: ""
+      KALSHI_PRIVATE_KEY_PEM: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests without network access
+        run: |
+          python - <<'PY'
+          import socket
+          import sys
+          import pytest
+          def offline_only(*args, **kwargs):
+              raise RuntimeError("Network access is forbidden in offline trading tests")
+          socket.socket.connect = offline_only
+          socket.create_connection = offline_only
+          sys.exit(pytest.main(["-q", "--junitxml=hybrid-test-results.xml"]))
+          PY
+      - name: Archive tested source
+        if: always()
+        run: git archive --format=tar.gz --output=/tmp/hybrid-tested-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hybrid-offline-results
+          retention-days: 7
+          path: |
+            hybrid-test-results.xml
+            /tmp/hybrid-tested-source.tar.gz
