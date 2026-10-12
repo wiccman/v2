@@ -7,6 +7,8 @@ position reservations must be integrated and tested.
 """
 from decimal import Decimal, InvalidOperation
 
+MANUAL_GROSS_PROFIT_GOAL = Decimal("0.25")
+
 
 class AmbiguousManualFill(ValueError):
     pass
