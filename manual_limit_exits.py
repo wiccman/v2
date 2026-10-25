@@ -282,6 +282,11 @@ class ManualLimitExitWorker:
             raise ManualExitBlocked("An exit order cannot belong to both strategies")
         return {**automatic, **manual}
 
+    def owns_resting_order(self, ticker: str, row: dict) -> bool:
+        # IOC workers never own a standing reservation. The resting worker
+        # overrides this only for orders recovered from its durable journal.
+        return False
+
     def observe(self, ticker, record, automatic_ledger, fills, entry_orders, exit_orders, held):
         started = self.clock()
         if self.pending(ticker) or automatic_ledger.get("pending"):
@@ -300,7 +305,7 @@ class ManualLimitExitWorker:
             status = str(row.get("status", "")).lower()
             if status in ACTIVE_ORDER_STATES:
                 count = quantity(row.get("remaining_count_fp", row.get("remaining_count")))
-                if count and held and direction(row) * held < 0:
+                if count and held and direction(row) * held < 0 and not self.owns_resting_order(ticker, row):
                     # A user sell or opposing resting buy could consume these
                     # contracts. Do not cancel it or submit a competing exit.
                     raise ManualExitBlocked("An existing resting order can reduce the shared position")

@@ -1,4 +1,4 @@
-"""Manual buys only: monitor fill price + 5 cents, without starting bot.main.
+"""Manual buys only: post a resting sell at fill price + 5 cents.
 
 Defaults to read-only observation. Production activation is an operator action.
 Existing automatic entry/exit journals are read for ownership, never modified.
@@ -20,6 +20,7 @@ from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, number,
                                position, primary_orders, quantity)
 from request_coordinator import RequestDeferred
+from resting_manual_exits import RestingExitOnlyClient, RestingManualExitWorker
 
 
 def flag(environ, name, default="false"):
@@ -38,19 +39,22 @@ class Settings:
     increment: D
     poll: float
     dry_run: bool
+    execution_mode: str
 
     @classmethod
     def read(cls, env, *, live=False):
         entry = Path(env.get("STATE_PATH", "/data/state.json"))
         automatic = Path(env.get("AUTOMATIC_EXIT_STATE_PATH", str(entry.with_name(entry.stem + "_take_profit.json"))))
-        suffix = "_manual_5c_exits.json" if live else "_manual_5c_preview.json"
+        mode = env.get("MANUAL_EXIT_MODE", "resting_limit")
+        if mode not in {"resting_limit", "monitored_reduce_only"}:
+            raise ValueError("MANUAL_EXIT_MODE must be resting_limit or monitored_reduce_only")
+        prefix = "_manual_5c_resting" if mode == "resting_limit" else "_manual_5c"
+        suffix = prefix + ("_exits.json" if live else "_preview.json")
         manual = Path(env.get("MANUAL_EXIT_STATE_PATH", str(entry.with_name(entry.stem + suffix))))
         if len({p.resolve() for p in (entry, automatic, manual)}) != 3:
             raise ValueError("Manual, automatic entry and automatic exit journals must be distinct")
         if flag(env, "TRADING_ENABLED"):
             raise ValueError("Use TRADING_ENABLED=false for the exits-only runner; automatic entries must stay off")
-        if env.get("MANUAL_EXIT_MODE", "monitored_reduce_only") != "monitored_reduce_only":
-            raise ValueError("This runner monitors targets; it does not post standing sells")
         if env.get("KALSHI_ENV", "production") != "production":
             raise ValueError("This runner uses production API URLs; use dry-run for observation")
         increment = number(env.get("MANUAL_EXIT_INCREMENT_CENTS", "5"), "increment cents") / 100
@@ -66,7 +70,7 @@ class Settings:
                      or not flag(env, "MANUAL_EXTERNAL_ORDERS_ARE_MANUAL")):
             raise ValueError("Live mode requires MANUAL_EXITS_ENABLED=true, MANUAL_EXITS_DRY_RUN=false, "
                              "and MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=true")
-        return cls(entry, automatic, manual, series, increment, float(poll), not live)
+        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode)
 
 
 class ExitOnlyClient(KalshiClient):
@@ -154,12 +158,16 @@ class ManualExitService:
             saved = read_journal(settings.manual_state)
             if saved.get("manual_runner_mode") != runner_mode:
                 raise ManualExitBlocked("Use separate journals for live and dry-run activation")
+            if saved.get("execution_mode", "monitored_reduce_only") != settings.execution_mode:
+                raise ManualExitBlocked("Use separate journals for resting and monitored execution")
         options = {"clock": clock} if clock is not None else {}
-        self.worker = ManualLimitExitWorker(client, settings.manual_state,
+        worker = RestingManualExitWorker if settings.execution_mode == "resting_limit" else ManualLimitExitWorker
+        self.worker = worker(client, settings.manual_state,
             price_increment=settings.increment, series=settings.series, dry_run=settings.dry_run,
             emit=self.emit, **options)
         self.worker.bind(self.read_entries)
         self.worker.state["manual_runner_mode"] = runner_mode
+        self.worker.state["execution_mode"] = settings.execution_mode
         self.worker.save()
 
     def read_entries(self):
@@ -167,10 +175,16 @@ class ManualExitService:
 
     def run_once(self):
         # A fresh read detects another writer even if it bypasses the file lock.
-        records = self.read_entries()["markets"]
-        automatic = read_journal(self.settings.automatic_exit_state)["markets"]
+        try:
+            self.read_entries()
+            read_journal(self.settings.automatic_exit_state)
+            tickers = sorted(self.worker.discover())
+        except Exception:
+            for ticker in self.worker.state["markets"]:
+                self.suspend(ticker)
+            raise
         ok = True
-        for ticker in sorted(self.worker.discover()):
+        for ticker in tickers:
             if self.worker.ledger(ticker).get("window_closed"):
                 continue
             try:
@@ -179,29 +193,44 @@ class ManualExitService:
                 if close.tzinfo is None:
                     raise ManualExitBlocked("Market close requires a timezone")
                 if self.worker.clock() >= close.timestamp() or market.get("status") in {"closed", "settled", "finalized"}:
-                    self.worker.window_closed(ticker, close.timestamp())
+                    closed = self.worker.window_closed(ticker, close.timestamp())
+                    if self.settings.execution_mode == "resting_limit" and not closed:
+                        ok = False
                     continue
-                if not self.worker.reconcile(ticker):
-                    ok = False
-                    continue
-                record, ledger = records.get(ticker, {}), automatic.get(ticker, {})
-                if ledger.get("pending"):
-                    raise ManualExitBlocked("Unresolved automatic exit; manual exits paused")
-                orders = primary_orders(self.client.all_orders(ticker), ticker)
-                entries, ownership = automatic_entries(record, ledger, orders)
-                fills = self.client.all_fills(ticker)
-                held = position(self.client.positions(ticker), ticker)
-                exits = self.worker.combined_exits(ticker, ledger.get("exit_orders", {}))
-                verify_exit_fills(exits, fills)
-                self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
-                self.worker.maybe_submit(ticker, record, ownership)
+                # Several partial buy fills can arrive together. Reconcile
+                # after every action, reserving each accepted order's quantity
+                # before posting another. Bound work so other markets get time.
+                limit = 20 if self.settings.execution_mode == "resting_limit" else 1
+                for _ in range(limit):
+                    if not self.worker.reconcile(ticker):
+                        ok = False
+                        self.suspend(ticker)
+                        break
+                    record = self.read_entries()["markets"].get(ticker, {})
+                    ledger = read_journal(self.settings.automatic_exit_state)["markets"].get(ticker, {})
+                    if ledger.get("pending"):
+                        raise ManualExitBlocked("Unresolved automatic exit; manual exits paused")
+                    orders = primary_orders(self.client.all_orders(ticker), ticker)
+                    entries, ownership = automatic_entries(record, ledger, orders)
+                    fills = self.client.all_fills(ticker)
+                    held = position(self.client.positions(ticker), ticker)
+                    exits = self.worker.combined_exits(ticker, ledger.get("exit_orders", {}))
+                    verify_exit_fills(exits, fills)
+                    self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
+                    if not self.worker.maybe_submit(ticker, record, ownership):
+                        break
             except Exception as error:
                 ok = False
                 if isinstance(error, (KalshiAPIError, RequestDeferred)):
                     self.worker.transport.defer(self.worker.ledger(ticker), error)
+                self.suspend(ticker)
                 # Log exception type, not arbitrary server responses or secrets.
                 self.emit("MANUAL_EXIT_PAUSED", ticker=ticker, error_type=type(error).__name__)
         return ok
+
+    def suspend(self, ticker):
+        if isinstance(self.worker, RestingManualExitWorker):
+            self.worker.suspend(ticker)
 
 
 def main(argv=None):
@@ -213,7 +242,7 @@ def main(argv=None):
     from dotenv import load_dotenv
     load_dotenv()
     settings = Settings.read(os.environ, live=args.live)
-    print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": "monitored_reduce_only",
+    print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
                       "increment_cents": str(settings.increment * 100), "series": settings.series,
                       "dry_run": settings.dry_run, "automatic_entries": False}), flush=True)
     if args.check_config:
@@ -227,7 +256,8 @@ def main(argv=None):
     # Same lock as bot.py, so a local automatic-entry process cannot coexist.
     with settings.entry_state.with_suffix(".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        client = ExitOnlyClient(os.getenv("KALSHI_API_KEY_ID", ""),
+        client_class = RestingExitOnlyClient if settings.execution_mode == "resting_limit" else ExitOnlyClient
+        client = client_class(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""),
             timeout=5, role="exit", dry_run=settings.dry_run)
         if not client.key_id or client.private_key is None:

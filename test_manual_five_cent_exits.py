@@ -23,7 +23,7 @@ def setup(tmp_path, *, dry_run=False, series=None, **env):
     state.write_text('{"markets": {}}')
     automatic = tmp_path / "state_take_profit.json"
     automatic.write_text('{"markets": {}}')
-    config = Settings.read({"STATE_PATH": str(state), **env})
+    config = Settings.read({"STATE_PATH": str(state), "MANUAL_EXIT_MODE": "monitored_reduce_only", **env})
     config = replace(config, dry_run=dry_run, series=series or config.series)
     events = []
     service = ManualExitService(e, config, clock=e.clock,
@@ -326,6 +326,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     assert report["automatic_entries"] is False and report["dry_run"] is True
     assert D(report["increment_cents"]) == 5
     assert report["series"] == ["KXBTC15M", "KXETH15M"]
+    assert report["mode"] == "resting_limit"
 
 
 def test_sample_environment_matches_manual_only_preview_defaults():
@@ -334,5 +335,6 @@ def test_sample_environment_matches_manual_only_preview_defaults():
     settings = Settings.read(env)
     assert settings.dry_run and settings.increment == D(".05")
     assert settings.series == ("KXBTC15M", "KXETH15M")
+    assert settings.execution_mode == "resting_limit"
     assert env["TRADING_ENABLED"] == "false"
     assert not {"EXECUTION_STRATEGY", "ENTRY_EXIT_PAIRS_CENTS", "PER_ORDER_PROFIT_DOLLARS"} & env.keys()

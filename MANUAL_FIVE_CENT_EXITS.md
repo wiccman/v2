@@ -1,60 +1,87 @@
-# Manual buys: exit at the fill price plus 5 cents
+# Manual fills: immediately post a resting sell 5 cents higher
 
 `manual_exit_runner.py` is the default Docker and Railway startup on this
-branch. It never imports the legacy bot or hybrid runtime, starts `bot.main()`,
-opens automatic entries, cancels user
-orders, or changes the original entry and automatic-exit journals.
+branch. It never imports the legacy bot or hybrid runtime, opens automatic
+entries, or starts the old automatic-exit worker. Old entry and exit journals
+are read only to identify and exclude bot-owned inventory.
 
-**Prepared code, not activated or exchange-tested.** The runner defaults to
-read-only observation. A human operator must deploy and enable live trading.
+**Prepared code, not activated or exchange-tested.** Default startup is read-only.
+The production service is not changed by editing this branch.
 
-## Behavior
+## Requested behavior
 
-- A manual YES fill at 42c gets a 47c sell target. A NO fill at 42c also gets a
-  47c NO target (53c on the API's YES price axis).
-- The increment is **5c per contract before fees**, not 5c total per order.
-  Ten contracts sold 5c higher produce 50c gross; fees reduce that amount.
-- Each partial fill retains its own target. Fills at 40c and 42c are managed at
-  45c and 47c respectively. Later fills, improved sale prices, manual reductions,
-  and restarts do not lower the target on remaining contracts.
-- The runner monitors bids and sends price-limited, reduce-only IOC exits at the
-  target or better. **It must remain running. It does not post a standing sell
-  after entry.** A brief price move can be missed, or an exit can partially fill.
-- Kalshi V2 supports reduce-only orders with IOC, not GTC. This implementation
-  retains that protection and does not silently fall back to unprotected orders.
-- Targets are rounded upward to the exchange's valid price grid. A 96c fill
-  needs 101c to gain 5c, which is unavailable: it is logged as unreachable and
-  is not automatically lowered to 99c.
-- By default, only new primary-account limit-order exposure in `KXBTC15M` and
-  `KXETH15M` is eligible. Existing exposure from before this journal's first
-  activation remains excluded. Other series and subaccounts are excluded.
-- Old bot order IDs and original targets are read from the existing journals.
-  Missing or inconsistent ownership data, unresolved acknowledgements and
-  conflicting resting orders pause the affected market. User orders are not
-  cancelled to make room for the bot's exit.
+- A manual YES buy fills at 42c: on detecting the fill, post a 47c YES limit
+  sell for the filled quantity. A NO fill at 42c gets a 47c NO sell (a bid at
+  53c on the API's YES price axis).
+- The sell is submitted even when the current bid is below the target. There
+  is no wait-for-price trigger. Kalshi holds the accepted limit order; it can
+  fill while the bot is offline, subject to available matching orders.
+- Use `good_till_canceled` with expiry at the market's close and
+  `cancel_order_on_pause=true`. It remains until filled, canceled, or expired.
+  It may fill immediately if its target is already marketable; post-only is off.
+- Detection uses polling, with a one-second wait between passes by default.
+  API latency, rate limits, reconciliation and other markets add delay. This is
+  not an exchange-native bracket and does not guarantee instantaneous posting.
+  Up to 20 actions per market are reconciled in each pass so multiple detected
+  partial fills can receive their separate orders without waiting for price.
+- Each fill keeps its actual cost plus **5c per contract before fees**. Ten
+  contracts sold 5c higher yield 50c gross. Fills at 40c and 42c produce separate
+  45c and 47c sell orders. Later fills and better sale prices do not lower targets.
+- Targets round upward to the valid exchange grid. If entry plus 5c is not
+  tradable (for example 96c + 5c), log it as unreachable and do not lower it.
+- Only newly filled primary-account limit-buy exposure in `KXBTC15M` and
+  `KXETH15M` is eligible by default. Fills before this live journal's first
+  activation, other series, subaccounts, and old bot-owned inventory are excluded.
+  An order placed earlier can qualify if its fill occurs after activation.
 
-The API data does not prove human origin. No other API trading program should
-create orders in the managed series. The runner takes the same local process
-lock as `bot.py`; this prevents both from running on the same state volume, but
-cannot lock out a separate machine or another API client. Exchange positions
-are netted, so logical lot tracking is not physical custody isolation.
+## Resting-order limitation
 
-## Defaults and configuration check
+Kalshi V2 rejects `reduce_only=true` with GTC. These standing exits therefore
+use `reduce_only=false`. The application verifies ownership and size before
+posting, but **cannot guarantee that a resting order only reduces the position**.
+If another sale or opposing buy consumes the position, the outstanding order
+could instead create opposite exposure. Local process locks do not lock out
+manual trading or another API client, and no local check removes this race.
 
-The runner's defaults are independent of the old bot's profit constants. The
-sample `.env.example` contains only manual-runner settings; legacy buy-rule
-variables left in the environment cannot select or launch the old strategy:
+**Cancel the bot's resting sell before manually closing the same position.**
+Keep the worker online to detect later fills and inventory changes. Stopping it
+leaves already accepted resting orders on the exchange; it cannot resize or
+cancel them while offline. No other trading bot should operate in these series.
+The API does not prove human origin; new external non-bot limit buys are treated
+as manual only under that operating assumption.
+
+The worker journals each intent before posting, recovers acknowledgements by
+client ID, reserves outstanding quantities, and waits for terminal cancellation
+before reusing size. Partial exit fills keep the remaining reservation. A manual
+reduction triggers cancellation of oversized owned exits and replacement only
+for the verified remainder. Conflicting user orders or inconsistent ownership
+pause new exits and trigger best-effort cancellation of the worker's own exits.
+User orders are never canceled. Network failure can prevent these cancellations.
+
+A user cancellation or unexplained exchange cancellation suppresses further
+orders for that same fill instead of undoing the cancellation. New buy fills
+remain eligible. Uncertain submissions/cancellations stay blocked across restarts;
+a missing order or 404 is not proof that an order never existed. Market-close
+records remain unresolved until outstanding orders are confirmed terminal.
+
+## Configuration and preview
+
+The sample `.env.example` contains only manual-runner settings. Legacy buy-rule
+variables cannot select or launch the old strategy. `TRADING_ENABLED=true` is
+rejected by this runner.
 
 ```dotenv
+KALSHI_ENV=production
 TRADING_ENABLED=false
 MANUAL_EXITS_ENABLED=false
 MANUAL_EXITS_DRY_RUN=true
 MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=false
-MANUAL_EXIT_MODE=monitored_reduce_only
+MANUAL_EXIT_MODE=resting_limit
 MANUAL_EXIT_INCREMENT_CENTS=5
 MANUAL_EXIT_SERIES=KXBTC15M,KXETH15M
 MANUAL_EXIT_POLL_SECONDS=1
 STATE_PATH=/data/state.json
+AUTOMATIC_EXIT_STATE_PATH=/data/state_take_profit.json
 ```
 
 Validate without credentials or network calls:
@@ -63,70 +90,72 @@ Validate without credentials or network calls:
 python manual_exit_runner.py --check-config
 ```
 
-The runner requires both existing ownership files, `state.json` and
-`state_take_profit.json`, even for a read-only pass. `AUTOMATIC_EXIT_STATE_PATH`
-can override the second path. Do not replace either with an empty file to bypass
-recovery checks. A genuine new installation needs its own reviewed baseline.
-
-Preview requires privately configured Kalshi credentials, but the client blocks
-every write regardless of the account key's permissions:
+The runner requires the existing `state.json` and `state_take_profit.json`
+ownership files even for preview. Do not replace missing files with empty ones
+just to bypass recovery checks. Configure existing Kalshi credentials privately
+in Railway; never copy them into a commit or chat.
 
 ```bash
 python manual_exit_runner.py --once
 python manual_exit_runner.py
 ```
 
-Without `--live`, these commands remain read-only even if live environment
-variables were accidentally left enabled. The existing automatic bot's
-`TRADING_ENABLED` must be false; the exits-only runner rejects true.
+Without `--live`, these commands are read-only regardless of environment gates.
+Preview reports `MANUAL_DRY_RUN_RESTING_ORDER` as soon as it can verify the fill,
+even below the target price. It never posts or cancels an exchange order.
 
-Default preview journal: `/data/state_manual_5c_preview.json`.
-Default live journal: `/data/state_manual_5c_exits.json`.
-Both derive their directory and prefix from `STATE_PATH`. Live and preview have
-separate activation times, so preview trades are not automatically adopted when
-live mode is first enabled. Once created, retain the live journal across restarts.
-Do not delete a journal to work around an unresolved order acknowledgement.
+Default journal files:
+
+- Preview: `/data/state_manual_5c_resting_preview.json`
+- Live: `/data/state_manual_5c_resting_exits.json`
+
+The directory and prefix derive from `STATE_PATH`. Preview/live and
+resting/monitored modes cannot share a journal. Keep the live journal across
+restarts; deleting it loses reservations, activation time and recovery IDs.
+Preview fills are not automatically adopted on first live activation.
+
+The earlier monitored implementation remains available only by explicitly
+setting `MANUAL_EXIT_MODE=monitored_reduce_only`. It uses different journals,
+waits for the target bid and submits reduce-only IOC exits. That is not the
+requested standing-order flow and is no longer the default.
 
 ## Railway operator handoff
 
-The inspected service is `impartial-prosperity / production / v2`. At the last
-successful inspection it tracked `fix/final2-96-10-30c` and started `python bot.py`.
-Those production settings were not modified by this change. Both `Dockerfile`
-and `railway.toml` on this branch now select `python manual_exit_runner.py`.
-Credentials already exist in Railway and
-must not be copied into the repository or chat.
+At the last verified inspection, `impartial-prosperity / production / v2`
+tracked `fix/final2-96-10-30c` and started `python bot.py`. Those live settings
+were not changed by this PR. `Dockerfile` and `railway.toml` on this branch both
+start `python manual_exit_runner.py` in read-only mode.
 
-For an operator-run preview, stop the old automatic-buy deployment and deploy
-the reviewed revision with the existing `/data` volume. Ensure any service-level
-start-command override uses `python manual_exit_runner.py`. Set the configuration
-above explicitly and keep the manual increment at 5 cents. Review outstanding
-old buy orders separately: stopping the old process does not cancel exchange
-orders, and the manual-only runner will not cancel them or manage their fills.
+Stop the old deployment and review any outstanding old buy orders separately:
+stopping a process does not cancel exchange orders. The manual runner will not
+cancel those orders or manage their filled inventory. Deploy the reviewed
+revision with the existing `/data` volume and ensure any service-level start
+command override uses `python manual_exit_runner.py`. Verify the preview logs
+and the resting-order limitation before live operation.
 
-After reviewing the preview and accepting monitored execution, an operator can
-use `python manual_exit_runner.py --live` with all three manual gates set:
+An operator can choose `python manual_exit_runner.py --live` with
 `MANUAL_EXITS_ENABLED=true`, `MANUAL_EXITS_DRY_RUN=false`, and
-`MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=true`. `TRADING_ENABLED` stays false because
-it controls the old automatic-entry strategy. The live runner creates a new
-activation time only when its live journal does not already exist.
+`MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=true`. Keep `TRADING_ENABLED=false` and
+`MANUAL_EXIT_MODE=resting_limit`. The configuration log reports the execution
+mode, increment, series, dry-run state and `automatic_entries=false`.
 
-The startup log reports the mode, increment, series, dry-run state and absence
-of automatic entries. `MANUAL_FILL_ADOPTED` reports the unrounded target;
-`MANUAL_DRY_RUN_TARGET` reports what would be submitted at an available target;
-`TP_SUBMITTED`/`TP_FILL` prefixed with `MANUAL_` distinguish actual submissions
-from confirmed fills. A paused market is not reported as sold. Close stops new
-submissions and preserves unresolved intent records for later inspection.
+`MANUAL_RESTING_SUBMITTED` confirms an acknowledgement, not a fill.
+`MANUAL_RESTING_FILL` reports cumulative filled quantity after reconciliation.
+`MANUAL_CANCEL_REQUESTED` does not prove cancellation; reservation release waits
+for the terminal exchange status. Paused or closed markets are never assumed sold.
 
 ## Verification
 
 ```bash
-python tools/run_offline_tests.py -q test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
+python tools/run_offline_tests.py -q test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
 ```
 
-The tests block TCP connections and use an exchange simulator. They cover YES/NO,
-fractional quantities, multiple fills, manual reductions, improved partial
-sales, duplicate histories, lost acknowledgements, restarts, target bounds,
-price grids, old bot ownership, conflicting resting sells, closed markets,
-preview/live separation and the client's prohibition on other writes.
+Tests block real TCP access and use exchange simulators. They cover posting
+below the target, YES/NO and fractional sizing, independent partial-fill targets,
+standing reservations, fills without a running worker, restarts, lost responses,
+manual reductions, owned cancellations, user-cancel suppression, stale data,
+market close, journal isolation, ownership exclusion and prohibited client writes.
 
-API reference: https://docs.kalshi.com/api-reference/orders/create-order-v2
+API references:
+- https://docs.kalshi.com/api-reference/orders/create-order-v2
+- https://docs.kalshi.com/api-reference/orders/cancel-order-v2
