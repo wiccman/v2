@@ -187,13 +187,20 @@ class ManualLimitExitWorker:
     """
     def __init__(self, client, path, *, profit_goal=MANUAL_GROSS_PROFIT_GOAL,
                  clock: Callable[[], float] = time.time, emit=None,
-                 series=("KXBTC15M",), discovery_seconds=1.0, dry_run=False):
+                 series=("KXBTC15M",), discovery_seconds=1.0, dry_run=False,
+                 price_increment=None):
         self.client, self.clock = client, clock
         self.dry_run = bool(dry_run)
         self.path = Path(path)
         self.profit_goal = number(profit_goal, "manual gross profit goal")
         if self.profit_goal <= 0:
             raise ValueError("Manual gross profit goal must be positive")
+        self.price_increment = (number(price_increment, "manual price increment")
+                                if price_increment is not None else None)
+        if self.price_increment is not None and not D(0) < self.price_increment < D(1):
+            raise ValueError("Manual price increment must be between zero and one dollar")
+        self.target_policy = ({"mode": "price_increment", "increment": str(self.price_increment.normalize())}
+                              if self.price_increment is not None else {"mode": "order_gross_profit"})
         self.series = tuple(series)
         if not self.series or any(not s or not s.isalnum() for s in self.series):
             raise ValueError("Explicit alphanumeric manual series are required")
@@ -210,10 +217,12 @@ class ManualLimitExitWorker:
                 raise ManualExitBlocked("Manual journal schema/account changed; review before enabling")
             if tuple(self.state.get("series", [])) != self.series:
                 raise ManualExitBlocked("Manual series scope changed; review the existing journal")
+            if self.state.get("target_policy", {"mode": "order_gross_profit"}) != self.target_policy:
+                raise ManualExitBlocked("Manual target policy changed; do not reuse an incompatible journal")
             number(self.state.get("activation_time"), "activation time")
         else:
             self.state.update(schema=SCHEMA, activation_time=str(number(clock(), "activation time")),
-                              key_scope=key_scope, series=list(self.series))
+                              key_scope=key_scope, series=list(self.series), target_policy=self.target_policy)
             self.save()
         self.read_entries = lambda: {"markets": {}}
         self._snapshots: dict[str, dict] = {}
@@ -340,10 +349,14 @@ class ManualLimitExitWorker:
             managed[fid] = {"order_id": oid, "sign": lot["sign"],
                             "cost": str(_outcome_cost(row, lot["sign"])),
                             "timestamp": str(stamp), "opened_quantity": str(lot["quantity"])}
-            goals.setdefault(oid, str(self.profit_goal))
+            if self.price_increment is None:
+                goals.setdefault(oid, str(self.profit_goal))
             changed = True
             self.emit("MANUAL_FILL_ADOPTED", ticker=ticker, fill_id=fid, order_id=oid,
-                      quantity=str(lot["quantity"]), gross_profit_goal=goals[oid])
+                      quantity=str(lot["quantity"]), target_policy=self.target_policy,
+                      gross_profit_goal=goals.get(oid),
+                      raw_target=(str(D(managed[fid]["cost"]) + self.price_increment)
+                                  if self.price_increment is not None else None))
         if set(managed) - {lot["fill_id"] for lot in openings}:
             raise ManualExitBlocked("Previously adopted opening disappeared from fill history")
         # Confirm every managed buy's complete counts, including later partial
@@ -366,7 +379,26 @@ class ManualLimitExitWorker:
                     raise ManualExitBlocked("Manual fill has become automatic inventory")
                 remaining[managed[lot["fill_id"]]["order_id"]].append(lot)
         plans, summaries = [], {}
+        if self.price_increment is not None:
+            # Each fill keeps its own purchase price plus the increment. A better
+            # sale, manual reduction, later fill or restart cannot lower another
+            # fill's target or turn its target into a total-dollar profit goal.
+            for oid, members in remaining.items():
+                summaries[oid] = {"mode": "price_increment", "increment": str(self.price_increment),
+                                  "realized_gross": str(realized[oid]), "fills": []}
+                for lot in members:
+                    fid, qty = lot["fill_id"], lot["quantity"]
+                    entry = D(managed[fid]["cost"])
+                    raw_target = entry + self.price_increment
+                    plans.append({"order_id": oid, "fill_id": fid, "sign": lot["sign"],
+                                  "quantity": qty, "cost": entry * qty, "realized": D(0),
+                                  "goal": qty * self.price_increment, "raw_target": raw_target,
+                                  "allocations": [{"fill_id": fid, "quantity": str(qty)}]})
+                    summaries[oid]["fills"].append({"fill_id": fid, "remaining_quantity": str(qty),
+                                                   "entry_price": str(entry), "raw_target": str(raw_target)})
         for oid, goal_text in goals.items():
+            if self.price_increment is not None:
+                raise ManualExitBlocked("Total-profit goals found in an increment journal")
             goal = number(goal_text, "saved manual profit goal")
             if goal <= 0:
                 raise ManualExitBlocked("Saved manual profit goal must be positive")

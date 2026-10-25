@@ -1,0 +1,246 @@
+"""Manual buys only: monitor fill price + 5 cents, without starting bot.main.
+
+Defaults to read-only observation. Production activation is an operator action.
+Existing automatic entry/exit journals are read for ownership, never modified.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import signal
+import threading
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal as D
+from pathlib import Path
+
+from hybrid_runtime import flag
+from kalshi import KalshiClient, KalshiAPIError
+from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, number,
+                               position, primary_orders, quantity)
+from request_coordinator import RequestDeferred
+
+
+@dataclass(frozen=True)
+class Settings:
+    entry_state: Path
+    automatic_exit_state: Path
+    manual_state: Path
+    series: tuple[str, ...]
+    increment: D
+    poll: float
+    dry_run: bool
+
+    @classmethod
+    def read(cls, env, *, live=False):
+        entry = Path(env.get("STATE_PATH", "/data/state.json"))
+        automatic = Path(env.get("AUTOMATIC_EXIT_STATE_PATH", str(entry.with_name(entry.stem + "_take_profit.json"))))
+        suffix = "_manual_5c_exits.json" if live else "_manual_5c_preview.json"
+        manual = Path(env.get("MANUAL_EXIT_STATE_PATH", str(entry.with_name(entry.stem + suffix))))
+        if len({p.resolve() for p in (entry, automatic, manual)}) != 3:
+            raise ValueError("Manual, automatic entry and automatic exit journals must be distinct")
+        if flag(env, "TRADING_ENABLED"):
+            raise ValueError("Use TRADING_ENABLED=false for the exits-only runner; automatic entries must stay off")
+        if env.get("MANUAL_EXIT_MODE", "monitored_reduce_only") != "monitored_reduce_only":
+            raise ValueError("This runner monitors targets; it does not post standing sells")
+        if env.get("KALSHI_ENV", "production") != "production":
+            raise ValueError("This runner uses production API URLs; use dry-run for observation")
+        increment = number(env.get("MANUAL_EXIT_INCREMENT_CENTS", "5"), "increment cents") / 100
+        if not D(0) < increment < 1 or increment.quantize(D(".0001")) != increment:
+            raise ValueError("Increment must be positive, below 100 cents, with at most 0.01-cent precision")
+        series = tuple(s.strip() for s in env.get("MANUAL_EXIT_SERIES", "KXBTC15M,KXETH15M").split(",") if s.strip())
+        if not series or len(series) != len(set(series)) or any(not s.isalnum() for s in series):
+            raise ValueError("MANUAL_EXIT_SERIES requires distinct explicit series tickers")
+        poll = number(env.get("MANUAL_EXIT_POLL_SECONDS", "1"), "poll seconds")
+        if not D(1) <= poll <= D(60):
+            raise ValueError("Poll interval must be between 1 and 60 seconds")
+        if live and (not flag(env, "MANUAL_EXITS_ENABLED") or flag(env, "MANUAL_EXITS_DRY_RUN", "true")
+                     or not flag(env, "MANUAL_EXTERNAL_ORDERS_ARE_MANUAL")):
+            raise ValueError("Live mode requires MANUAL_EXITS_ENABLED=true, MANUAL_EXITS_DRY_RUN=false, "
+                             "and MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=true")
+        return cls(entry, automatic, manual, series, increment, float(poll), not live)
+
+
+class ExitOnlyClient(KalshiClient):
+    """Deny entries, transfers, cancellations and all writes during dry-run."""
+    def __init__(self, *args, dry_run=True, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dry_run = dry_run
+        self.base = "https://external-api.kalshi.com/trade-api/v2"
+
+    def request(self, method, path, params=None, body=None, auth=False):
+        if method.upper() != "GET":
+            permitted_exit = (not self.dry_run and method.upper() == "POST"
+                              and path == "/portfolio/events/orders" and isinstance(body, dict)
+                              and body.get("reduce_only") is True
+                              and body.get("time_in_force") == "immediate_or_cancel")
+            if not permitted_exit:
+                raise RuntimeError("Exit-only client refused an unauthorized write")
+        return super().request(method, path, params=params, body=body, auth=auth)
+
+
+def read_journal(path):
+    # A missing old ledger must not turn known automated orders into manual ones.
+    data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict) or not isinstance(data.get("markets"), dict):
+        raise ManualExitBlocked("Ownership journal must contain a markets object")
+    if any(not isinstance(v, dict) for v in data["markets"].values()):
+        raise ManualExitBlocked("Ownership journal contains an invalid market record")
+    return data
+
+
+def automatic_entries(record, ledger, orders):
+    """Recover known entry IDs; retain their original side/target for replay."""
+    by_client = {o.get("client_order_id"): o for o in orders if o.get("client_order_id")}
+    entries = {}
+    recovered = dict(ledger.get("entry_order_ids", {}))
+    for intent in record.get("entry_intents", []):
+        cid = intent.get("client_id")
+        oid = intent.get("order_id") or recovered.get(cid)
+        if not oid and cid in by_client:
+            oid = by_client[cid]["order_id"]
+            recovered[cid] = oid
+        if not oid:
+            if not intent.get("entry_closed"):
+                raise ManualExitBlocked("Unresolved automatic buy; manual classification paused")
+            continue
+        side, target = intent.get("side"), intent.get("exit_target")
+        if side not in {"YES", "NO"} or target is None:
+            raise ManualExitBlocked("Automatic entry is missing its original side/target")
+        target = number(target, "automatic target")
+        if not 0 < target <= 1:
+            raise ManualExitBlocked("Invalid automatic target")
+        entry = {"side": side, "target": str(target)}
+        if oid in entries and entries[oid] != entry:
+            raise ManualExitBlocked("Conflicting automatic entry ownership")
+        entries[oid] = entry
+    return entries, {**ledger, "entry_order_ids": recovered}
+
+
+def verify_exit_fills(exits, fills):
+    counts, seen = defaultdict(lambda: D(0)), {}
+    for fill in fills:
+        fid = fill.get("fill_id") or fill.get("trade_id")
+        if not fid:
+            raise ManualExitBlocked("Fill ID missing")
+        if fid in seen:
+            if seen[fid] != fill:
+                raise ManualExitBlocked("Conflicting duplicate fill")
+            continue
+        seen[fid] = fill
+        counts[fill.get("order_id")] += quantity(fill.get("count_fp", fill.get("count")))
+    for oid, order in exits.items():
+        if "filled" not in order or counts[oid] != quantity(order["filled"]):
+            raise ManualExitBlocked("Exit order/fill history has not converged")
+
+
+class ManualExitService:
+    def __init__(self, client, settings, *, clock=None, emit=None):
+        self.client, self.settings = client, settings
+        self.emit = emit or (lambda event, **data: print(json.dumps({"event": event, **data}), flush=True))
+        # Validate both journals before creating the new manual activation time.
+        self.read_entries()
+        read_journal(settings.automatic_exit_state)
+        runner_mode = "dry_run" if settings.dry_run else "live"
+        if settings.manual_state.exists():
+            saved = read_journal(settings.manual_state)
+            if saved.get("manual_runner_mode") != runner_mode:
+                raise ManualExitBlocked("Use separate journals for live and dry-run activation")
+        options = {"clock": clock} if clock is not None else {}
+        self.worker = ManualLimitExitWorker(client, settings.manual_state,
+            price_increment=settings.increment, series=settings.series, dry_run=settings.dry_run,
+            emit=self.emit, **options)
+        self.worker.bind(self.read_entries)
+        self.worker.state["manual_runner_mode"] = runner_mode
+        self.worker.save()
+
+    def read_entries(self):
+        return read_journal(self.settings.entry_state)
+
+    def run_once(self):
+        # A fresh read detects another writer even if it bypasses the file lock.
+        records = self.read_entries()["markets"]
+        automatic = read_journal(self.settings.automatic_exit_state)["markets"]
+        ok = True
+        for ticker in sorted(self.worker.discover()):
+            if self.worker.ledger(ticker).get("window_closed"):
+                continue
+            try:
+                market = self.client.market(ticker)
+                close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
+                if close.tzinfo is None:
+                    raise ManualExitBlocked("Market close requires a timezone")
+                if self.worker.clock() >= close.timestamp() or market.get("status") in {"closed", "settled", "finalized"}:
+                    self.worker.window_closed(ticker, close.timestamp())
+                    continue
+                if not self.worker.reconcile(ticker):
+                    ok = False
+                    continue
+                record, ledger = records.get(ticker, {}), automatic.get(ticker, {})
+                if ledger.get("pending"):
+                    raise ManualExitBlocked("Unresolved automatic exit; manual exits paused")
+                orders = primary_orders(self.client.all_orders(ticker), ticker)
+                entries, ownership = automatic_entries(record, ledger, orders)
+                fills = self.client.all_fills(ticker)
+                held = position(self.client.positions(ticker), ticker)
+                exits = self.worker.combined_exits(ticker, ledger.get("exit_orders", {}))
+                verify_exit_fills(exits, fills)
+                self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
+                self.worker.maybe_submit(ticker, record, ownership)
+            except Exception as error:
+                ok = False
+                if isinstance(error, (KalshiAPIError, RequestDeferred)):
+                    self.worker.transport.defer(self.worker.ledger(ticker), error)
+                # Log exception type, not arbitrary server responses or secrets.
+                self.emit("MANUAL_EXIT_PAUSED", ticker=ticker, error_type=type(error).__name__)
+        return ok
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live", action="store_true", help="Operator opt-in; also requires all live environment gates")
+    parser.add_argument("--once", action="store_true", help="Run one reconciliation pass")
+    parser.add_argument("--check-config", action="store_true", help="Validate settings without credentials or API calls")
+    args = parser.parse_args(argv)
+    from dotenv import load_dotenv
+    load_dotenv()
+    settings = Settings.read(os.environ, live=args.live)
+    print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": "monitored_reduce_only",
+                      "increment_cents": str(settings.increment * 100), "series": settings.series,
+                      "dry_run": settings.dry_run, "automatic_entries": False}), flush=True)
+    if args.check_config:
+        return 0
+    if os.getenv("RAILWAY_ENVIRONMENT_ID"):
+        mount = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/missing-volume"))
+        if not os.path.ismount(mount) or not all(p.resolve().is_relative_to(mount.resolve()) for p in
+                (settings.entry_state, settings.automatic_exit_state, settings.manual_state)):
+            raise RuntimeError("All journals must be on the persistent Railway volume")
+    import fcntl  # The deployed worker runs on Linux.
+    # Same lock as bot.py, so a local automatic-entry process cannot coexist.
+    with settings.entry_state.with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        client = ExitOnlyClient(os.getenv("KALSHI_API_KEY_ID", ""),
+            os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""),
+            timeout=5, role="exit", dry_run=settings.dry_run)
+        if not client.key_id or client.private_key is None:
+            raise RuntimeError("Kalshi credentials are required; configure them privately in the hosting environment")
+        service = ManualExitService(client, settings)
+        stop = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        while not stop.is_set():
+            try:
+                ok = service.run_once()
+            except Exception as error:
+                ok = False
+                service.emit("MANUAL_EXIT_PASS_FAILED", error_type=type(error).__name__)
+            if args.once:
+                return 0 if ok else 1
+            stop.wait(settings.poll)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
