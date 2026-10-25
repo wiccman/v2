@@ -34,6 +34,43 @@ class ManualExitBlocked(InventorySyncError):
     """An external snapshot has not proved that these contracts can be sold."""
 
 
+def failure_context(error: Exception) -> dict:
+    """Report the failed check without logging response bodies or credentials."""
+    result = {"error_type": type(error).__name__}
+    reasons = {
+        "Order direction is missing or contradictory",
+        "Resting exit identity or terms changed",
+        "Resting exit counts/status are inconsistent",
+        "Resting reservation changed during reconciliation",
+        "An existing resting order can reduce the shared position",
+        "Fills and position disagree; waiting for consistent exchange data",
+        "Exit order/fill history has not converged",
+        "Managed entry order/fill counts have not converged",
+        "External order/fill counts have not converged",
+        "Previously adopted fill identity/cost changed",
+        "Previously adopted opening disappeared from fill history",
+        "Manual/automatic ownership snapshot is stale",
+        "Ownership changed before submission; reconcile again",
+        "Resting exits exceed verified owned inventory",
+        "Cancellation ownership could not be verified",
+        "Exit fill exceeds its attributable inventory",
+        "Fill ordering is ambiguous at a shared timestamp",
+    }
+    if str(error) in reasons:
+        result["reason"] = str(error)
+    status = getattr(error, "status_code", None)
+    if type(status) is int and 100 <= status <= 599:
+        result["http_status"] = status
+    trace = error.__traceback__
+    while trace:
+        source = Path(trace.tb_frame.f_code.co_filename).name
+        if source in {"manual_limit_exits.py", "resting_manual_exits.py",
+                      "manual_exit_runner.py", "price_pairs.py", "kalshi.py"}:
+            result.update(check_source=source, check_line=trace.tb_lineno)
+        trace = trace.tb_next
+    return result
+
+
 def number(value: Any, name: str) -> D:
     try:
         result = D(str(value))
@@ -61,17 +98,25 @@ def timestamp(row: dict) -> D:
 
 
 def direction(row: dict) -> int:
-    """Canonical book direction, with validated legacy fallback."""
+    """Canonical book direction; deprecated action/side are fallback only.
+
+    Kalshi's direction migration specifies book_side/outcome_side as the
+    authoritative pair. A stale deprecated representation must not invalidate
+    a correctly identified exit. Conflicting canonical fields still block.
+    """
     sign = {"bid": 1, "ask": -1}.get(str(row.get("book_side", "")).lower())
     outcome = {"yes": 1, "no": -1}.get(str(row.get("outcome_side", "")).lower())
-    action, side = str(row.get("action", "")).lower(), str(row.get("side", "")).lower()
-    legacy = None
-    if action in {"buy", "sell"} and side in {"yes", "no"}:
-        legacy = (1 if side == "yes" else -1) * (1 if action == "buy" else -1)
-    choices = [n for n in (sign, outcome, legacy) if n is not None]
-    if not choices or len(set(choices)) != 1:
+    canonical = [n for n in (sign, outcome) if n is not None]
+    invalid = ((row.get("book_side") is not None and sign is None)
+               or (row.get("outcome_side") is not None and outcome is None))
+    if invalid or len(set(canonical)) > 1:
         raise ManualExitBlocked("Order direction is missing or contradictory")
-    return choices[0]
+    if canonical:
+        return canonical[0]
+    action, side = str(row.get("action", "")).lower(), str(row.get("side", "")).lower()
+    if action in {"buy", "sell"} and side in {"yes", "no"}:
+        return (1 if side == "yes" else -1) * (1 if action == "buy" else -1)
+    raise ManualExitBlocked("Order direction is missing or contradictory")
 
 
 def known_ids(record: Any) -> tuple[set[str], set[str]]:
@@ -359,6 +404,7 @@ class ManualLimitExitWorker:
             changed = True
             self.emit("MANUAL_FILL_ADOPTED", ticker=ticker, fill_id=fid, order_id=oid,
                       quantity=str(lot["quantity"]), target_policy=self.target_policy,
+                      fill_timestamp=str(stamp), detected_timestamp=str(self.clock()),
                       gross_profit_goal=goals.get(oid),
                       raw_target=(str(D(managed[fid]["cost"]) + self.price_increment)
                                   if self.price_increment is not None else None))

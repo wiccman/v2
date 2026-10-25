@@ -8,7 +8,7 @@ import pytest
 
 from kalshi import KalshiClient, KalshiAPIError
 from manual_exit_runner import ManualExitService, Settings
-from manual_limit_exits import ManualExitBlocked
+from manual_limit_exits import ManualExitBlocked, direction, failure_context
 from resting_manual_exits import RestingExitOnlyClient
 from test_manual_limit_exits import Exchange, T, auto_buy
 
@@ -135,13 +135,18 @@ def test_manual_reduction_cancels_old_reservation_before_replacing_only_remainin
 
 
 def test_existing_user_sell_pauses_and_cancels_only_bot_owned_exit(tmp_path):
-    e, s, _, _ = setup(tmp_path)
+    e, s, _, events = setup(tmp_path)
     e.buy(10, ".42")
     assert s.run_once()
     user_sell = e.make_order(count=10, price=".50", action="sell")
     assert not s.run_once()
     assert e.cancelled == exit_ids(e) and user_sell not in e.cancelled
     assert len(e.sent) == 1
+    pause = [data for event, data in events if event == "MANUAL_EXIT_PAUSED"][-1]
+    assert pause["stage"] == "observe_inventory"
+    assert pause["reason"] == "An existing resting order can reduce the shared position"
+    assert pause["check_source"] == "manual_limit_exits.py"
+    assert pause["check_line"] > 0
 
 
 def test_user_cancel_is_respected_but_later_buy_fill_gets_its_own_order(tmp_path):
@@ -378,3 +383,79 @@ def test_cancellation_cannot_target_an_order_with_a_different_owner(tmp_path):
     assert s.run_once()
     e.remote[exit_ids(e)[0]]["client_order_id"] = "user-replaced-order"
     assert not s.run_once() and not e.cancelled and len(e.sent) == 1
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_canonical_exit_direction_survives_deprecated_action_disagreement(tmp_path, sign):
+    e, s, _, events = setup(tmp_path)
+    e.buy(10, ".42", sign)
+    request = e.request
+
+    def with_deprecated_action(method, path, **kwargs):
+        result = request(method, path, **kwargs)
+        rows = result.get("orders", []) + ([result["order"]] if "order" in result else [])
+        for row in rows:
+            if row.get("client_order_id", "").startswith("manual5c-"):
+                row["action"] = "buy"  # Canonical book/outcome fields remain correct.
+        return result
+
+    e.request = with_deprecated_action
+    assert s.run_once(), events
+    assert s.run_once(), events
+    assert len(e.sent) == 1 and not e.cancelled
+    assert e.remote[exit_ids(e)[0]]["status"] == "resting"
+
+
+def test_conflicting_canonical_exit_direction_still_blocks(tmp_path):
+    e, s, _, _ = setup(tmp_path)
+    e.buy(10, ".42")
+    assert s.run_once()
+    e.remote[exit_ids(e)[0]]["outcome_side"] = "yes"
+    assert not s.run_once()
+    assert len(e.sent) == 1
+
+
+@pytest.mark.parametrize("row,expected", [
+    ({"book_side": "BID", "outcome_side": "YES", "action": "sell", "side": "yes"}, 1),
+    ({"book_side": "ASK", "outcome_side": "NO", "action": "buy", "side": "yes"}, -1),
+    ({"book_side": "bid"}, 1),
+    ({"outcome_side": "no"}, -1),
+    ({"action": "sell", "side": "no"}, 1),
+    ({"action": "sell", "side": "yes"}, -1),
+])
+def test_direction_migration_and_legacy_fallback(row, expected):
+    assert direction(row) == expected
+
+
+@pytest.mark.parametrize("row", [
+    {"book_side": "ask", "outcome_side": "yes"},
+    {"book_side": "unknown", "outcome_side": "no"},
+    {"book_side": "bid", "outcome_side": "unknown"},
+    {"action": "maybe", "side": "yes"},
+])
+def test_unknown_or_conflicting_direction_never_falls_through(row):
+    with pytest.raises(ManualExitBlocked):
+        direction(row)
+
+
+def test_diagnostics_never_print_arbitrary_api_responses_or_exception_values():
+    secret = "PRIVATE KEY fake-secret-response"
+    for error in [KalshiAPIError(404, secret, code=secret), ManualExitBlocked(secret), RuntimeError(secret)]:
+        info = failure_context(error)
+        assert secret not in json.dumps(info)
+        assert "reason" not in info
+        assert (info.get("http_status") == 404) == isinstance(error, KalshiAPIError)
+
+
+def test_cancel_error_reports_status_without_exposing_response(tmp_path):
+    e, s, _, events = setup(tmp_path)
+    e.buy(10, ".42")
+    assert s.run_once()
+    e.make_order(count=10, action="sell")
+    def unavailable(*args):
+        raise KalshiAPIError(404, "private-response-do-not-log")
+    e.cancel_manual_exit = unavailable
+    assert not s.run_once()
+    cancel = [data for event, data in events if event == "MANUAL_CANCEL_UNCONFIRMED"][-1]
+    assert cancel["http_status"] == 404
+    assert "private-response-do-not-log" not in json.dumps(events)

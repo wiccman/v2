@@ -147,6 +147,20 @@ mode, increment, series, dry-run state and `automatic_entries=false`.
 `MANUAL_CANCEL_REQUESTED` does not prove cancellation; reservation release waits
 for the terminal exchange status. Paused or closed markets are never assumed sold.
 
+Pause diagnostics include the reconciliation `stage`, the local source file and
+line of the failed check, an allowlisted `reason` when available, and the numeric
+HTTP status for API failures. Raw exception messages, server response bodies and
+credentials are not printed. Events carry their own UTC time; fill-adoption
+events also include exchange fill time and detection time so log ingestion
+batching is not mistaken for the bot's response time.
+
+Order-direction validation uses Kalshi's canonical `book_side`/`outcome_side`
+fields. Deprecated `action`/`side` fields are used only when neither canonical
+field is present. Invalid or contradictory canonical fields still block. The
+offline tests reproduce a rejected own exit when deprecated direction fields
+disagree; this compatibility fix alone does not establish the cause of a live
+pause. Diagnose the specific logged check before relaxing inventory safeguards.
+
 ## Verification
 
 ```bash
@@ -162,3 +176,4 @@ market close, journal isolation, ownership exclusion and prohibited client write
 API references:
 - https://docs.kalshi.com/api-reference/orders/create-order-v2
 - https://docs.kalshi.com/api-reference/orders/cancel-order-v2
+- https://docs.kalshi.com/getting_started/order_direction

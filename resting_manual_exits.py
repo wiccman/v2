@@ -15,7 +15,7 @@ from decimal import Decimal as D
 from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked,
     TargetUnreachable, ACTIVE_ORDER_STATES, TERMINAL_ORDER_STATES, direction,
-    number, primary_orders, quantity, round_target)
+    number, primary_orders, quantity, round_target, failure_context)
 from request_coordinator import RequestDeferred
 
 
@@ -192,7 +192,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 self._cancel(ticker, intent, "ownership_unverified")
             except Exception as error:
                 self.emit("MANUAL_CANCEL_UNCONFIRMED", ticker=ticker,
-                          order_id=intent.get("order_id"), error_type=type(error).__name__)
+                          order_id=intent.get("order_id"), **failure_context(error))
 
     def maybe_submit(self, ticker, record, automatic_ledger):
         ledger = self.ledger(ticker)

@@ -12,13 +12,13 @@ import signal
 import threading
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal as D
 from pathlib import Path
 
 from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, number,
-                               position, primary_orders, quantity)
+                               position, primary_orders, quantity, failure_context)
 from request_coordinator import RequestDeferred
 from resting_manual_exits import RestingExitOnlyClient, RestingManualExitWorker
 
@@ -149,7 +149,8 @@ def verify_exit_fills(exits, fills):
 class ManualExitService:
     def __init__(self, client, settings, *, clock=None, emit=None):
         self.client, self.settings = client, settings
-        self.emit = emit or (lambda event, **data: print(json.dumps({"event": event, **data}), flush=True))
+        self.emit = emit or (lambda event, **data: print(json.dumps({
+            "event": event, "time_utc": datetime.now(timezone.utc).isoformat(), **data}), flush=True))
         # Validate both journals before creating the new manual activation time.
         self.read_entries()
         read_journal(settings.automatic_exit_state)
@@ -187,12 +188,14 @@ class ManualExitService:
         for ticker in tickers:
             if self.worker.ledger(ticker).get("window_closed"):
                 continue
+            stage = "market"
             try:
                 market = self.client.market(ticker)
                 close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
                 if close.tzinfo is None:
                     raise ManualExitBlocked("Market close requires a timezone")
                 if self.worker.clock() >= close.timestamp() or market.get("status") in {"closed", "settled", "finalized"}:
+                    stage = "market_close"
                     closed = self.worker.window_closed(ticker, close.timestamp())
                     if self.settings.execution_mode == "resting_limit" and not closed:
                         ok = False
@@ -202,21 +205,27 @@ class ManualExitService:
                 # before posting another. Bound work so other markets get time.
                 limit = 20 if self.settings.execution_mode == "resting_limit" else 1
                 for _ in range(limit):
+                    stage = "reconcile_orders"
                     if not self.worker.reconcile(ticker):
                         ok = False
                         self.suspend(ticker)
                         break
+                    stage = "automatic_ownership"
                     record = self.read_entries()["markets"].get(ticker, {})
                     ledger = read_journal(self.settings.automatic_exit_state)["markets"].get(ticker, {})
                     if ledger.get("pending"):
                         raise ManualExitBlocked("Unresolved automatic exit; manual exits paused")
                     orders = primary_orders(self.client.all_orders(ticker), ticker)
                     entries, ownership = automatic_entries(record, ledger, orders)
+                    stage = "read_inventory"
                     fills = self.client.all_fills(ticker)
                     held = position(self.client.positions(ticker), ticker)
                     exits = self.worker.combined_exits(ticker, ledger.get("exit_orders", {}))
+                    stage = "verify_exit_fills"
                     verify_exit_fills(exits, fills)
+                    stage = "observe_inventory"
                     self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
+                    stage = "submit_exit"
                     if not self.worker.maybe_submit(ticker, record, ownership):
                         break
             except Exception as error:
@@ -224,8 +233,7 @@ class ManualExitService:
                 if isinstance(error, (KalshiAPIError, RequestDeferred)):
                     self.worker.transport.defer(self.worker.ledger(ticker), error)
                 self.suspend(ticker)
-                # Log exception type, not arbitrary server responses or secrets.
-                self.emit("MANUAL_EXIT_PAUSED", ticker=ticker, error_type=type(error).__name__)
+                self.emit("MANUAL_EXIT_PAUSED", ticker=ticker, stage=stage, **failure_context(error))
         return ok
 
     def suspend(self, ticker):
@@ -271,7 +279,7 @@ def main(argv=None):
                 ok = service.run_once()
             except Exception as error:
                 ok = False
-                service.emit("MANUAL_EXIT_PASS_FAILED", error_type=type(error).__name__)
+                service.emit("MANUAL_EXIT_PASS_FAILED", **failure_context(error))
             if args.once:
                 return 0 if ok else 1
             stop.wait(settings.poll)
