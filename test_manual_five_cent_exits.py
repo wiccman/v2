@@ -1,8 +1,13 @@
 """Offline exchange lifecycle tests for fixed per-fill +5c targets."""
 import copy
 import json
+import shlex
+import subprocess
+import sys
+import tomllib
 from dataclasses import replace
 from decimal import Decimal as D
+from pathlib import Path
 
 import pytest
 
@@ -278,3 +283,56 @@ def test_closed_market_is_retired_without_assuming_sale(tmp_path):
     reads = len(e.reads)
     assert s.run_once() and len(e.reads) == reads
     assert any(event == "MANUAL_WINDOW_CLOSED" for event, _ in events)
+
+
+@pytest.mark.parametrize("manifest", ["Dockerfile", "railway.toml"])
+def test_default_deployment_cannot_import_legacy_strategy_or_enable_live_mode(manifest):
+    root = Path(__file__).resolve().parent
+    if manifest == "Dockerfile":
+        line = next(line for line in (root / manifest).read_text().splitlines() if line.startswith("CMD "))
+        command = json.loads(line[4:])
+    else:
+        command = shlex.split(tomllib.loads((root / manifest).read_text())["deploy"]["startCommand"])
+    assert command == ["python", "manual_exit_runner.py"]
+    # Exercise the actual startup in a clean interpreter; old modules cannot
+    # hide in pytest's import cache. No credentials, dotenv loading or network.
+    harness = '''
+import builtins, runpy, socket, sys
+import dotenv
+dotenv.load_dotenv = lambda *a, **k: None
+original_import = builtins.__import__
+def guarded_import(name, *a, **k):
+    if name.split(".")[0] in {"bot", "hybrid_runtime"}:
+        raise AssertionError("Manual-only startup imported the legacy strategy")
+    return original_import(name, *a, **k)
+builtins.__import__ = guarded_import
+def offline(*a, **k):
+    raise AssertionError("Startup attempted network access")
+socket.socket.connect = socket.create_connection = offline
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+    result = subprocess.run([sys.executable, "-c", harness, *command[1:], "--check-config"],
+        cwd=root, env={
+            "TRADING_ENABLED": "false",
+            "MODE": "live", "EXECUTION_STRATEGY": "strike_ruler",
+            "DUAL_LIMIT_BUYS_ENABLED": "true", "OPENING_BIAS_ENABLED": "true",
+            "HISTORICAL_STRIKE_ENABLED": "true", "PER_ORDER_PROFIT_DOLLARS": "0.20",
+            "MANUAL_EXITS_ENABLED": "true", "MANUAL_EXITS_DRY_RUN": "false",
+            "MANUAL_EXTERNAL_ORDERS_ARE_MANUAL": "true",
+        }, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report["automatic_entries"] is False and report["dry_run"] is True
+    assert D(report["increment_cents"]) == 5
+    assert report["series"] == ["KXBTC15M", "KXETH15M"]
+
+
+def test_sample_environment_matches_manual_only_preview_defaults():
+    from dotenv import dotenv_values
+    env = dotenv_values(Path(__file__).with_name(".env.example"))
+    settings = Settings.read(env)
+    assert settings.dry_run and settings.increment == D(".05")
+    assert settings.series == ("KXBTC15M", "KXETH15M")
+    assert env["TRADING_ENABLED"] == "false"
+    assert not {"EXECUTION_STRATEGY", "ENTRY_EXIT_PAIRS_CENTS", "PER_ORDER_PROFIT_DOLLARS"} & env.keys()

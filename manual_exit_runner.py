@@ -16,11 +16,17 @@ from datetime import datetime
 from decimal import Decimal as D
 from pathlib import Path
 
-from hybrid_runtime import flag
 from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, number,
                                position, primary_orders, quantity)
 from request_coordinator import RequestDeferred
+
+
+def flag(environ, name, default="false"):
+    value = environ.get(name, default).strip().lower()
+    if value not in {"true", "false"}:
+        raise ValueError(f"{name} must be true or false")
+    return value == "true"
 
 
 @dataclass(frozen=True)

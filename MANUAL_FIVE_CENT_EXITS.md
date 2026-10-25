@@ -1,7 +1,8 @@
 # Manual buys: exit at the fill price plus 5 cents
 
-`manual_exit_runner.py` is a separate startup for manual exits in the existing
-repository. It never starts `bot.main()`, opens automatic entries, cancels user
+`manual_exit_runner.py` is the default Docker and Railway startup on this
+branch. It never imports the legacy bot or hybrid runtime, starts `bot.main()`,
+opens automatic entries, cancels user
 orders, or changes the original entry and automatic-exit journals.
 
 **Prepared code, not activated or exchange-tested.** The runner defaults to
@@ -40,7 +41,9 @@ are netted, so logical lot tracking is not physical custody isolation.
 
 ## Defaults and configuration check
 
-The runner's defaults are independent of the old bot's profit constants:
+The runner's defaults are independent of the old bot's profit constants. The
+sample `.env.example` contains only manual-runner settings; legacy buy-rule
+variables left in the environment cannot select or launch the old strategy:
 
 ```dotenv
 TRADING_ENABLED=false
@@ -86,15 +89,19 @@ Do not delete a journal to work around an unresolved order acknowledgement.
 
 ## Railway operator handoff
 
-The inspected service is `impartial-prosperity / production / v2`. It currently
-tracks `fix/final2-96-10-30c` and starts `python bot.py`. Those production settings
-were not modified by this change. Credentials already exist in Railway and
+The inspected service is `impartial-prosperity / production / v2`. At the last
+successful inspection it tracked `fix/final2-96-10-30c` and started `python bot.py`.
+Those production settings were not modified by this change. Both `Dockerfile`
+and `railway.toml` on this branch now select `python manual_exit_runner.py`.
+Credentials already exist in Railway and
 must not be copied into the repository or chat.
 
-For an operator-run preview, deploy the reviewed revision with the existing
-`/data` volume and use `python manual_exit_runner.py` as the start command. Set
-the configuration above explicitly; the earlier hybrid `.env.example` has a
-different series default. Keep the manual increment at 5 cents.
+For an operator-run preview, stop the old automatic-buy deployment and deploy
+the reviewed revision with the existing `/data` volume. Ensure any service-level
+start-command override uses `python manual_exit_runner.py`. Set the configuration
+above explicitly and keep the manual increment at 5 cents. Review outstanding
+old buy orders separately: stopping the old process does not cancel exchange
+orders, and the manual-only runner will not cancel them or manage their fills.
 
 After reviewing the preview and accepting monitored execution, an operator can
 use `python manual_exit_runner.py --live` with all three manual gates set:
