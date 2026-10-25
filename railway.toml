@@ -2,6 +2,7 @@
 builder = "DOCKERFILE"
 
 [deploy]
-startCommand = "python hybrid_runtime.py"
+# The dashboard selects preview or --live. Without an override, Docker CMD
+# starts the manual-only runner in read-only mode.
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 10

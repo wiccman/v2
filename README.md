@@ -1,4 +1,28 @@
-# Strike Ruler — Directional BTC Scalp
+# Kalshi manual exits: fill price + 5 cents
+
+This branch's default Docker startup runs `manual_exit_runner.py` only. Railway
+uses that default unless the service's start command explicitly selects live mode;
+`railway.toml` does not override the dashboard's start command.
+It detects new manual limit-buy fills in BTC/ETH 15-minute markets and immediately
+posts a resting limit sell 5 cents above each fill price, per contract, before
+fees. Detection uses polling; accepted orders wait at Kalshi until filled,
+canceled, or expired at market close. It never starts
+the old automatic-buy strategy or its automatic-exit worker. Old bot journals
+are read only to identify and exclude bot-owned inventory.
+
+The default is read-only observation. See [manual exit setup and operator
+handoff](MANUAL_FIVE_CENT_EXITS.md) for configuration, tests and live-mode gates.
+Repository defaults do not change an already running Railway deployment.
+
+Kalshi does not allow reduce-only protection on resting orders. Cancel a bot's
+resting sell before manually closing the same position; local checks cannot
+prevent every race or protect orders while the bot is offline.
+
+## Legacy automatic strategy reference
+
+The documentation below describes the retained `bot.py` implementation. It is
+not run by this branch's deployment entrypoints and its buy rules do not apply
+to the manual-only runner.
 
 Python bot for Kalshi's 15-minute Bitcoin markets (`KXBTC15M`).
 `EXECUTION_STRATEGY=strike_ruler` is the only supported execution strategy.
