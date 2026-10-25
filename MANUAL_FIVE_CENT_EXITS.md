@@ -1,7 +1,8 @@
 # Manual fills: immediately post a resting sell 5 cents higher
 
-`manual_exit_runner.py` is the default Docker and Railway startup on this
-branch. It never imports the legacy bot or hybrid runtime, opens automatic
+`manual_exit_runner.py` is the default Docker startup on this branch. Railway
+uses that default unless an operator selects a start-command override. The
+runner never imports the legacy bot or hybrid runtime, opens automatic
 entries, or starts the old automatic-exit worker. Old entry and exit journals
 are read only to identify and exclude bot-owned inventory.
 
@@ -123,8 +124,10 @@ requested standing-order flow and is no longer the default.
 
 At the last verified inspection, `impartial-prosperity / production / v2`
 tracked `fix/final2-96-10-30c` and started `python bot.py`. Those live settings
-were not changed by this PR. `Dockerfile` and `railway.toml` on this branch both
-start `python manual_exit_runner.py` in read-only mode.
+were not activated by this PR. `Dockerfile` starts `python manual_exit_runner.py`
+in read-only mode. `railway.toml` intentionally omits `startCommand`: Railway
+file settings take precedence over dashboard settings, so the file must not
+shadow an operator's explicit preview/live selection.
 
 Stop the old deployment and review any outstanding old buy orders separately:
 stopping a process does not cancel exchange orders. The manual runner will not

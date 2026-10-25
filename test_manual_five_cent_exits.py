@@ -1,7 +1,6 @@
 """Offline exchange lifecycle tests for fixed per-fill +5c targets."""
 import copy
 import json
-import shlex
 import subprocess
 import sys
 import tomllib
@@ -292,7 +291,11 @@ def test_default_deployment_cannot_import_legacy_strategy_or_enable_live_mode(ma
         line = next(line for line in (root / manifest).read_text().splitlines() if line.startswith("CMD "))
         command = json.loads(line[4:])
     else:
-        command = shlex.split(tomllib.loads((root / manifest).read_text())["deploy"]["startCommand"])
+        config = tomllib.loads((root / manifest).read_text())
+        assert config["build"]["builder"] == "DOCKERFILE"
+        assert "startCommand" not in config["deploy"], "Do not shadow the operator's Railway startup selection"
+        line = next(line for line in (root / "Dockerfile").read_text().splitlines() if line.startswith("CMD "))
+        command = json.loads(line[4:])
     assert command == ["python", "manual_exit_runner.py"]
     # Exercise the actual startup in a clean interpreter; old modules cannot
     # hide in pytest's import cache. No credentials, dotenv loading or network.

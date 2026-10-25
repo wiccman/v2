@@ -1,6 +1,8 @@
 # Kalshi manual exits: fill price + 5 cents
 
-This branch's Docker and Railway startup runs `manual_exit_runner.py` only.
+This branch's default Docker startup runs `manual_exit_runner.py` only. Railway
+uses that default unless the service's start command explicitly selects live mode;
+`railway.toml` does not override the dashboard's start command.
 It detects new manual limit-buy fills in BTC/ETH 15-minute markets and immediately
 posts a resting limit sell 5 cents above each fill price, per contract, before
 fees. Detection uses polling; accepted orders wait at Kalshi until filled,
