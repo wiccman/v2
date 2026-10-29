@@ -218,6 +218,13 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             return changed
         if self.clock() < ledger.get("retry_after", 0):
             return False
+        # No quote/market lookup when every eligible fill is already reserved.
+        # Keep all fresh inventory checks for an actual submission unchanged.
+        candidates = [(fid, plan) for fid, plan in sorted(plans.items())
+                      if fid not in ledger.get("suppressed_fills", {})
+                      and quantity(plan["quantity"] - reserved[fid])]
+        if not candidates:
+            return False
         market = self.client.market(ticker)
         close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
         if close.tzinfo is None:
@@ -225,7 +232,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         expires = int(close.timestamp())
         if market.get("status") not in {"active", "open"} or self.clock() >= expires:
             return False
-        for fid, plan in sorted(plans.items()):
+        for fid, plan in candidates:
             if fid in ledger.get("suppressed_fills", {}):
                 continue
             qty = quantity(plan["quantity"] - reserved[fid])

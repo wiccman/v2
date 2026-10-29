@@ -66,9 +66,13 @@ def _latest_index_value(payload):
 
 class KalshiClient:
     def __init__(self, key_id="", private_key_path="", private_key_b64="", timeout=20,
-                 *, coordinator=None, role="entry", quote_ttl=0.5, clock=None):
+                 *, coordinator=None, role="entry", quote_ttl=0.5, clock=None, session=None):
         self.base = BASE_URL
         self.timeout = timeout
+        # Opt-in, single-worker connection pooling; never retry writes implicitly.
+        self.http_session = session
+        self.http_stats = {"requests": 0, "elapsed_ms": 0.0, "order_posts": 0,
+                           "last_order_post_ms": None}
         self.key_id = key_id
         if role not in RequestCoordinator.PRIORITY_DELAY:
             raise ValueError("Unknown API worker role")
@@ -109,8 +113,18 @@ class KalshiClient:
         self.coordinator.check(self.role)
         if method.upper() not in {"GET", "HEAD"}:
             self._market_cache.clear()
-        response = requests.request(method, self.base + path, params=params, json=body,
-            headers=self._headers(method, path) if auth else {}, timeout=self.timeout)
+        transport = self.http_session.request if self.http_session is not None else requests.request
+        started = time.perf_counter()
+        try:
+            response = transport(method, self.base + path, params=params, json=body,
+                headers=self._headers(method, path) if auth else {}, timeout=self.timeout)
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            self.http_stats["requests"] += 1
+            self.http_stats["elapsed_ms"] += elapsed_ms
+            if method.upper() == "POST" and path == "/portfolio/events/orders":
+                self.http_stats["order_posts"] += 1
+                self.http_stats["last_order_post_ms"] = elapsed_ms
         try:
             response.raise_for_status()
         except requests.HTTPError as error:

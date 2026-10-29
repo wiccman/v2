@@ -10,11 +10,14 @@ import json
 import os
 import signal
 import threading
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal as D
 from pathlib import Path
+
+import requests
 
 from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, number,
@@ -149,6 +152,8 @@ def verify_exit_fills(exits, fills):
 class ManualExitService:
     def __init__(self, client, settings, *, clock=None, emit=None):
         self.client, self.settings = client, settings
+        self._live_tickers = set()
+        self._closed_retry_at = {}
         self.emit = emit or (lambda event, **data: print(json.dumps({
             "event": event, "time_utc": datetime.now(timezone.utc).isoformat(), **data}), flush=True))
         # Validate both journals before creating the new manual activation time.
@@ -179,7 +184,10 @@ class ManualExitService:
         try:
             self.read_entries()
             read_journal(self.settings.automatic_exit_state)
-            tickers = sorted(self.worker.discover())
+            known = set(self.worker.state["markets"])
+            # New positions and confirmed live markets precede historical cleanup.
+            tickers = sorted(self.worker.discover(), key=lambda ticker:
+                             (ticker in known, ticker not in self._live_tickers, ticker))
         except Exception:
             for ticker in self.worker.state["markets"]:
                 self.suspend(ticker)
@@ -188,18 +196,40 @@ class ManualExitService:
         for ticker in tickers:
             if self.worker.ledger(ticker).get("window_closed"):
                 continue
+            # Only a venue-confirmed closed market gets this maintenance delay.
+            # Unknown markets, active markets and missing orders never do.
+            if self.worker.clock() < self._closed_retry_at.get(ticker, 0):
+                continue
             stage = "market"
             try:
                 market = self.client.market(ticker)
                 close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
                 if close.tzinfo is None:
                     raise ManualExitBlocked("Market close requires a timezone")
-                if self.worker.clock() >= close.timestamp() or market.get("status") in {"closed", "settled", "finalized"}:
+                status = market.get("status")
+                if status in {"settled", "finalized"} and self.worker.clock() >= close.timestamp():
+                    # The venue has ended trading, independently of delayed order
+                    # history. Retain every intent/reservation and never infer a
+                    # fill or cancellation from a 404. Historical ambiguity must
+                    # not block exits in other, still-trading markets.
+                    self._live_tickers.discard(ticker)
+                    self._closed_retry_at.pop(ticker, None)
+                    self.worker.ledger(ticker)["venue_terminal_status"] = status
+                    ManualLimitExitWorker.window_closed(self.worker, ticker, close.timestamp())
+                    self.emit("MANUAL_TERMINAL_MARKET_RETIRED", ticker=ticker,
+                              status=status, order_history_preserved=True)
+                    continue
+                if self.worker.clock() >= close.timestamp() or status == "closed":
+                    self._live_tickers.discard(ticker)
+                    if status == "closed":
+                        self._closed_retry_at[ticker] = self.worker.clock() + 30
                     stage = "market_close"
                     closed = self.worker.window_closed(ticker, close.timestamp())
                     if self.settings.execution_mode == "resting_limit" and not closed:
                         ok = False
                     continue
+                self._closed_retry_at.pop(ticker, None)
+                self._live_tickers.add(ticker)
                 # Several partial buy fills can arrive together. Reconcile
                 # after every action, reserving each accepted order's quantity
                 # before posting another. Bound work so other markets get time.
@@ -252,7 +282,9 @@ def main(argv=None):
     settings = Settings.read(os.environ, live=args.live)
     print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
                       "increment_cents": str(settings.increment * 100), "series": settings.series,
-                      "dry_run": settings.dry_run, "automatic_entries": False}), flush=True)
+                      "dry_run": settings.dry_run, "automatic_entries": False,
+                      "poll_seconds": settings.poll, "connection_pooling": True,
+                      "latency_patch": "terminal-first-v1"}), flush=True)
     if args.check_config:
         return 0
     if os.getenv("RAILWAY_ENVIRONMENT_ID"):
@@ -262,27 +294,43 @@ def main(argv=None):
             raise RuntimeError("All journals must be on the persistent Railway volume")
     import fcntl  # The deployed worker runs on Linux.
     # Same lock as bot.py, so a local automatic-entry process cannot coexist.
-    with settings.entry_state.with_suffix(".lock").open("a") as lock:
+    with settings.entry_state.with_suffix(".lock").open("a") as lock, requests.Session() as session:
+        # No automatic POST/DELETE replay after a lost acknowledgement.
+        session.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         client_class = RestingExitOnlyClient if settings.execution_mode == "resting_limit" else ExitOnlyClient
         client = client_class(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""),
-            timeout=5, role="exit", dry_run=settings.dry_run)
+            timeout=5, role="exit", dry_run=settings.dry_run, session=session)
         if not client.key_id or client.private_key is None:
             raise RuntimeError("Kalshi credentials are required; configure them privately in the hosting environment")
         service = ManualExitService(client, settings)
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
+        last_timing = float("-inf")
         while not stop.is_set():
+            started = time.perf_counter()
+            before = dict(client.http_stats)
             try:
                 ok = service.run_once()
             except Exception as error:
                 ok = False
                 service.emit("MANUAL_EXIT_PASS_FAILED", **failure_context(error))
+            elapsed = time.perf_counter() - started
+            posts = client.http_stats["order_posts"] - before["order_posts"]
+            if posts or started - last_timing >= 10:
+                service.emit("MANUAL_EXIT_PASS_TIMING", pass_ms=round(elapsed * 1000, 2),
+                    http_requests=client.http_stats["requests"] - before["requests"],
+                    http_ms=round(client.http_stats["elapsed_ms"] - before["elapsed_ms"], 2),
+                    order_post_attempts=posts,
+                    last_order_post_ms=(round(client.http_stats["last_order_post_ms"], 2)
+                                        if posts else None), ok=ok)
+                last_timing = started
             if args.once:
                 return 0 if ok else 1
-            stop.wait(settings.poll)
+            # Poll is a target cadence, not an extra sleep after network work.
+            stop.wait(max(0.05, settings.poll - elapsed))
     return 0
 
 
