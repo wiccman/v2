@@ -3,7 +3,7 @@
 This branch's default Docker startup runs `manual_exit_runner.py` only. Railway
 uses that default unless the service's start command explicitly selects live mode;
 `railway.toml` does not override the dashboard's start command.
-It detects new manual limit-buy fills in BTC/ETH 15-minute markets and immediately
+It detects new manual limit-buy fills in configured BTC/ETH/WTI 15-minute markets and
 posts a resting limit sell 5 cents above each fill price, per contract, before
 fees. Detection uses polling; accepted orders wait at Kalshi until filled,
 canceled, or expired at market close. It never starts
@@ -13,6 +13,9 @@ are read only to identify and exclude bot-owned inventory.
 The default is read-only observation. See [manual exit setup and operator
 handoff](MANUAL_FIVE_CENT_EXITS.md) for configuration, tests and live-mode gates.
 Repository defaults do not change an already running Railway deployment.
+To include WTI, set `MANUAL_EXIT_SERIES=KXBTC15M,KXETH15M,KXWTI15M` with the
+updated runner. Existing BTC/ETH sell records are preserved; WTI coverage starts
+with fills after WTI is first enabled. See the handoff for journal migration.
 
 Kalshi does not allow reduce-only protection on resting orders. Cancel a bot's
 resting sell before manually closing the same position; local checks cannot

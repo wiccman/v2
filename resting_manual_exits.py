@@ -74,13 +74,15 @@ order, automatic entry, transfer, amend, or cancel-all call is never allowed.
 class RestingManualExitWorker(ManualLimitExitWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.state["execution_mode"] = "resting_limit"
+        self.save()
+
+    def _validate_execution_mode(self):
         if self.price_increment is None:
             raise ValueError("Resting manual exits require a per-fill price increment")
         mode = self.state.get("execution_mode")
         if mode not in {None, "resting_limit"} or (mode is None and self.state["markets"]):
             raise ManualExitBlocked("Do not reuse an IOC journal for resting exits")
-        self.state["execution_mode"] = "resting_limit"
-        self.save()
 
     def intents(self, ticker):
         return self.ledger(ticker).setdefault("resting_intents", {})

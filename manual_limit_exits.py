@@ -21,7 +21,7 @@ from co_trading import MANUAL_GROSS_PROFIT_GOAL
 from price_pairs import InventorySyncError, _remaining_lots, _outcome_cost
 from take_profit import TakeProfitMonitor
 
-SCHEMA = 2
+SCHEMA = 3
 ACTIVE_ORDER_STATES = {"resting", "pending"}
 TERMINAL_ORDER_STATES = {"executed", "canceled", "cancelled", "expired", "rejected"}
 
@@ -247,7 +247,9 @@ class ManualLimitExitWorker:
         self.target_policy = ({"mode": "price_increment", "increment": str(self.price_increment.normalize())}
                               if self.price_increment is not None else {"mode": "order_gross_profit"})
         self.series = tuple(series)
-        if not self.series or any(not s or not s.isalnum() for s in self.series):
+        if (not self.series
+                or any(not isinstance(s, str) or not s or not s.isalnum() for s in self.series)
+                or len(self.series) != len(set(self.series))):
             raise ValueError("Explicit alphanumeric manual series are required")
         self.discovery_seconds = float(max(D(1), number(discovery_seconds, "discovery interval")))
         self.emit = emit or (lambda event, **data: print(json.dumps({"event": event, **data}), flush=True))
@@ -256,24 +258,66 @@ class ManualLimitExitWorker:
             poll=1.0, no_fill_pause=3.0,
             emit=lambda event, **data: self.emit("MANUAL_" + event, **data))
         self.state = self.transport.state
+        self._validate_execution_mode()
         key_scope = digest(str(getattr(client, "key_id", "")))
         if existed:
-            if self.state.get("schema") != SCHEMA or self.state.get("key_scope") != key_scope:
+            if self.state.get("schema") not in {2, SCHEMA} or self.state.get("key_scope") != key_scope:
                 raise ManualExitBlocked("Manual journal schema/account changed; review before enabling")
-            if tuple(self.state.get("series", [])) != self.series:
+            previous = self.state.get("series")
+            if (not isinstance(previous, list) or not previous
+                    or any(not isinstance(s, str) or not s.isalnum() for s in previous)
+                    or len(previous) != len(set(previous))
+                    or tuple(previous) != self.series[:len(previous)]):
                 raise ManualExitBlocked("Manual series scope changed; review the existing journal")
             if self.state.get("target_policy", {"mode": "order_gross_profit"}) != self.target_policy:
                 raise ManualExitBlocked("Manual target policy changed; do not reuse an incompatible journal")
-            number(self.state.get("activation_time"), "activation time")
+            activation = number(self.state.get("activation_time"), "activation time")
+            if activation < 0:
+                raise ManualExitBlocked("Invalid activation time")
+            # Old journals had one activation time. Preserve that cutoff for
+            # their existing series; newly enabled series start at this launch.
+            # Schema 3 makes older runners fail closed instead of ignoring the
+            # new per-series cutoffs when an operator rolls back the code.
+            if self.state["schema"] == 2:
+                if "series_activation_times" in self.state:
+                    raise ManualExitBlocked("Legacy journal has unexpected series activation times")
+                activations = {s: str(activation) for s in previous}
+            else:
+                activations = self.state.get("series_activation_times")
+                if not isinstance(activations, dict) or set(activations) != set(previous):
+                    raise ManualExitBlocked("Manual series activation times are incomplete")
+                if any(number(t, "series activation time") < activation for t in activations.values()):
+                    raise ManualExitBlocked("Manual series activation precedes original activation")
+                activations = dict(activations)
+            added = self.series[len(previous):]
+            if added:
+                enabled_at = number(clock(), "series activation time")
+                if enabled_at < max(number(t, "series activation time") for t in activations.values()):
+                    raise ManualExitBlocked("Clock precedes existing series activation")
+                activations.update({s: str(enabled_at) for s in added})
+            if self.state["schema"] != SCHEMA or added:
+                self.state.update(schema=SCHEMA, series=list(self.series),
+                                  series_activation_times=activations)
+                self.save()
+                if added:
+                    self.emit("MANUAL_SERIES_ADDED", series=list(added),
+                              activation_time=str(enabled_at))
         else:
-            self.state.update(schema=SCHEMA, activation_time=str(number(clock(), "activation time")),
-                              key_scope=key_scope, series=list(self.series), target_policy=self.target_policy)
+            activation = number(clock(), "activation time")
+            if activation < 0:
+                raise ManualExitBlocked("Invalid activation time")
+            self.state.update(schema=SCHEMA, activation_time=str(activation),
+                              key_scope=key_scope, series=list(self.series), target_policy=self.target_policy,
+                              series_activation_times={s: str(activation) for s in self.series})
             self.save()
         self.read_entries = lambda: {"markets": {}}
         self._snapshots: dict[str, dict] = {}
         self._plans: dict[str, list[dict]] = {}
         self._last_discovery = None
         self._discovered: set[str] = set()
+
+    def _validate_execution_mode(self):
+        """Subclass startup checks must finish before a journal upgrade is saved."""
 
     def bind(self, read_entries):
         self.read_entries = read_entries
@@ -286,6 +330,10 @@ class ManualLimitExitWorker:
 
     def allowed(self, ticker: str) -> bool:
         return isinstance(ticker, str) and any(ticker.startswith(s + "-") for s in self.series)
+
+    def activation_time(self, ticker: str) -> D:
+        return number(self.state["series_activation_times"][ticker.split("-", 1)[0]],
+                      "series activation time")
 
     def discover(self) -> set[str]:
         now = self.clock()
@@ -383,7 +431,7 @@ class ManualLimitExitWorker:
                     raise ManualExitBlocked("Previously adopted fill identity/cost changed")
                 continue
             if (lot["entry"] is not None or oid in bot_ids or not self.allowed(ticker)
-                    or stamp < number(self.state["activation_time"], "activation time")):
+                    or stamp < self.activation_time(ticker)):
                 continue
             remote = by_order.get(oid)
             if remote is None:

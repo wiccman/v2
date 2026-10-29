@@ -147,6 +147,8 @@ def verify_exit_fills(exits, fills):
 
 
 class ManualExitService:
+    CLOSED_RETRY_SECONDS = 30.0
+
     def __init__(self, client, settings, *, clock=None, emit=None):
         self.client, self.settings = client, settings
         self.emit = emit or (lambda event, **data: print(json.dumps({
@@ -170,35 +172,121 @@ class ManualExitService:
         self.worker.state["manual_runner_mode"] = runner_mode
         self.worker.state["execution_mode"] = settings.execution_mode
         self.worker.save()
+        # Scheduling hints never replace order/inventory reconciliation. Keep
+        # unresolved expired orders in the journal, but take their cleanup out
+        # of the path that detects a fresh manual fill.
+        self._market_closes = {}
+        self._closed_markets = set()
+        self._closed_attempted = {}
+        self._closed_retry_after = {}
+        self._closed_confirm = set()
 
     def read_entries(self):
         return read_journal(self.settings.entry_state)
+
+    def close_hint(self, ticker):
+        if ticker in self._market_closes:
+            return self._market_closes[ticker]
+        # Existing resting intents provide a startup scheduling hint before a
+        # market lookup. They are not proof of an order's terminal state.
+        intents = self.worker.state["markets"].get(ticker, {}).get("resting_intents", {})
+        if not isinstance(intents, dict) or any(not isinstance(i, dict) for i in intents.values()):
+            return None
+        try:
+            return float(max(number(i["expires_at"], "expiry") for i in intents.values())) if intents else None
+        except (KeyError, TypeError, ValueError):
+            return None  # The normal reconciliation path will validate it.
+
+    def scheduled_markets(self, tickers):
+        now = self.worker.clock()
+        active, expired = [], []
+        for ticker in tickers:
+            if self.worker.ledger(ticker).get("window_closed"):
+                continue
+            close = self.close_hint(ticker)
+            if ticker in self._closed_markets or (close is not None and now >= close):
+                expired.append(ticker)
+            else:
+                active.append(ticker)
+        # A ticker with no prior expiry hint is commonly a newly filled market.
+        # Always service it before any historical cleanup, on restart too.
+        active.sort(key=lambda ticker: (bool(self.worker.ledger(ticker)),
+                                        self.close_hint(ticker) is not None, ticker))
+        due = [ticker for ticker in expired if now >= self._closed_retry_after.get(ticker, 0)]
+        due.sort(key=lambda ticker: (ticker not in self._closed_confirm,
+                                    self._closed_attempted.get(ticker, float("-inf")), ticker))
+        # One expired market per pass bounds the cost even with a large backlog.
+        # Least-recently-attempted ordering prevents one broken record starving
+        # all other cleanup. Deferred records still make the pass unhealthy.
+        return active + due[:1], len(expired) > len(due[:1])
+
+    def reconcile_closed(self, ticker, close):
+        self._closed_markets.add(ticker)
+        self._closed_attempted[ticker] = self.worker.clock()
+        self._closed_confirm.discard(ticker)
+        def progress():
+            # Merely moving a cancellation retry timer is not proof of progress
+            # and must not keep one unconfirmed order at the front of the queue.
+            return json.dumps({cid: {key: value for key, value in intent.items()
+                                    if key != "cancel_retry_at"}
+                               for cid, intent in self.worker.ledger(ticker).get("resting_intents", {}).items()},
+                              sort_keys=True)
+        before = progress()
+        closed = self.worker.window_closed(ticker, close)
+        if self.settings.execution_mode != "resting_limit" or closed:
+            self._closed_retry_after.pop(ticker, None)
+            return True
+        after = progress()
+        if after != before:
+            # A cancellation/status change merits one prompt confirmation read.
+            self._closed_confirm.add(ticker)
+            self._closed_retry_after.pop(ticker, None)
+        else:
+            self._closed_retry_after[ticker] = self.worker.clock() + self.CLOSED_RETRY_SECONDS
+        return False
 
     def run_once(self):
         # A fresh read detects another writer even if it bypasses the file lock.
         try:
             self.read_entries()
             read_journal(self.settings.automatic_exit_state)
-            tickers = sorted(self.worker.discover())
+            tickers, deferred_cleanup = self.scheduled_markets(self.worker.discover())
         except Exception:
             for ticker in self.worker.state["markets"]:
                 self.suspend(ticker)
             raise
-        ok = True
+        ok = not deferred_cleanup
+        closed_attempts = 0
         for ticker in tickers:
             if self.worker.ledger(ticker).get("window_closed"):
                 continue
+            hint = self.close_hint(ticker)
+            historical = ticker in self._closed_markets or (hint is not None and self.worker.clock() >= hint)
+            if historical:
+                if closed_attempts:
+                    ok = False
+                    continue
+                self._closed_attempted[ticker] = self.worker.clock()
             stage = "market"
             try:
+                if ticker in self._closed_markets:
+                    stage = "market_close"
+                    closed_attempts += 1
+                    ok = self.reconcile_closed(ticker, self._market_closes[ticker]) and ok
+                    continue
                 market = self.client.market(ticker)
                 close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
                 if close.tzinfo is None:
                     raise ManualExitBlocked("Market close requires a timezone")
+                self._market_closes[ticker] = close.timestamp()
                 if self.worker.clock() >= close.timestamp() or market.get("status") in {"closed", "settled", "finalized"}:
-                    stage = "market_close"
-                    closed = self.worker.window_closed(ticker, close.timestamp())
-                    if self.settings.execution_mode == "resting_limit" and not closed:
+                    self._closed_markets.add(ticker)
+                    if closed_attempts:
                         ok = False
+                        continue
+                    stage = "market_close"
+                    closed_attempts += 1
+                    ok = self.reconcile_closed(ticker, close.timestamp()) and ok
                     continue
                 # Several partial buy fills can arrive together. Reconcile
                 # after every action, reserving each accepted order's quantity
@@ -230,6 +318,9 @@ class ManualExitService:
                         break
             except Exception as error:
                 ok = False
+                if stage == "market_close" or (historical and stage == "market"):
+                    self._closed_confirm.discard(ticker)
+                    self._closed_retry_after[ticker] = self.worker.clock() + self.CLOSED_RETRY_SECONDS
                 if isinstance(error, (KalshiAPIError, RequestDeferred)):
                     self.worker.transport.defer(self.worker.ledger(ticker), error)
                 self.suspend(ticker)
@@ -252,6 +343,7 @@ def main(argv=None):
     settings = Settings.read(os.environ, live=args.live)
     print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
                       "increment_cents": str(settings.increment * 100), "series": settings.series,
+                      "poll_seconds": settings.poll,
                       "dry_run": settings.dry_run, "automatic_entries": False}), flush=True)
     if args.check_config:
         return 0
