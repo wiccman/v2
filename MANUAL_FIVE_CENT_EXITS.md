@@ -20,7 +20,7 @@ The production service is not changed by editing this branch.
 - Use `good_till_canceled` with expiry at the market's close and
   `cancel_order_on_pause=true`. It remains until filled, canceled, or expired.
   It may fill immediately if its target is already marketable; post-only is off.
-- Detection uses polling, with a one-second wait between passes by default.
+- Detection uses polling, with a one-second cadence by default.
   API latency, rate limits, reconciliation and other markets add delay. This is
   not an exchange-native bracket and does not guarantee instantaneous posting.
   Up to 20 actions per market are reconciled in each pass so multiple detected
@@ -31,9 +31,47 @@ The production service is not changed by editing this branch.
 - Targets round upward to the valid exchange grid. If entry plus 5c is not
   tradable (for example 96c + 5c), log it as unreachable and do not lower it.
 - Only newly filled primary-account limit-buy exposure in `KXBTC15M` and
-  `KXETH15M` is eligible by default. Fills before this live journal's first
-  activation, other series, subaccounts, and old bot-owned inventory are excluded.
+  `KXETH15M` is eligible by default. Add `KXWTI15M` explicitly for WTI 15-minute
+  coverage. Fills before the series' activation, other series, subaccounts,
+  and old bot-owned inventory are excluded.
   An order placed earlier can qualify if its fill occurs after activation.
+
+## Adding WTI 15-minute coverage
+
+Deploy this revision together with
+`MANUAL_EXIT_SERIES=KXBTC15M,KXETH15M,KXWTI15M`. The exact `KXWTI15M-` prefix
+excludes daily/hourly WTI and unrelated markets. YES and NO fills use the same
+per-fill +5c target and fractional quantities as BTC/ETH.
+
+The worker reads each market's `price_ranges`. For WTI's currently published
+tapered grid, a 9.9c fill targets 15c (14.9c is off-grid), while a 94.9c fill can
+target 99.9c. Entry plus 5c at or above $1 is unreachable and is not silently
+capped. These are gross price increments before fees.
+
+Existing schema-2 journals upgrade atomically to schema 3. Existing activation
+times, fills, resting-order IDs and quantity reservations are retained. Appended
+series receive their own first-enable timestamp; older WTI fills are not adopted.
+The configuration can append series, but cannot remove, replace or reorder the
+saved list. Restarts preserve every series' cutoff. Keep the same journal path.
+
+Older runners reject schema 3 instead of ignoring its cutoffs. A rollback must
+use schema-3-compatible code and preserve the expanded series list; do not reset
+or restore an older journal to force an old runner to start.
+
+## Compatibility with the deployed latency fix
+
+This WTI revision is based on deployed commit `69de776` and preserves its
+`terminal-first-v1` runner, pooled HTTP transport, cadence-based polling and
+latency telemetry. New positions and previously confirmed live markets precede
+historical cleanup. Venue-confirmed closed markets defer repeated maintenance;
+settled/finalized markets past their close time are retired from the polling
+loop while their original order history and reservations remain recorded.
+
+The WTI change updates journal scope and activation cutoffs only. It retains
+the deployed fill/order/position checks, submission logic and timing behavior.
+Neither an HTTP 404 nor an elapsed expiry is treated as proof of a sale or
+cancellation. Polling and API latency still preclude an instantaneous-posting
+guarantee.
 
 ## Resting-order limitation
 
@@ -62,8 +100,9 @@ User orders are never canceled. Network failure can prevent these cancellations.
 A user cancellation or unexplained exchange cancellation suppresses further
 orders for that same fill instead of undoing the cancellation. New buy fills
 remain eligible. Uncertain submissions/cancellations stay blocked across restarts;
-a missing order or 404 is not proof that an order never existed. Market-close
-records remain unresolved until outstanding orders are confirmed terminal.
+a missing order or 404 is not proof that an order never existed. Outstanding
+order records retain any ambiguity even when a venue-finalized market is
+retired from polling; market retirement does not assert a fill or cancellation.
 
 ## Configuration and preview
 
@@ -122,19 +161,20 @@ requested standing-order flow and is no longer the default.
 
 ## Railway operator handoff
 
-At the last verified inspection, `impartial-prosperity / production / v2`
-tracked `fix/final2-96-10-30c` and started `python bot.py`. Those live settings
-were not activated by this PR. `Dockerfile` starts `python manual_exit_runner.py`
+At the October 29, 2026 inspection, `impartial-prosperity / production / v2`
+tracked `fix/manual-exit-latency-20261029` at `69de776` and started
+`python manual_exit_runner.py --live`. Its configuration log reported BTC/ETH,
+a 5c increment, resting-limit mode, one-second polling and automatic entries off. The WTI update is
+prepared separately for operator deployment. `Dockerfile` starts `python manual_exit_runner.py`
 in read-only mode. `railway.toml` intentionally omits `startCommand`: Railway
 file settings take precedence over dashboard settings, so the file must not
 shadow an operator's explicit preview/live selection.
 
-Stop the old deployment and review any outstanding old buy orders separately:
-stopping a process does not cancel exchange orders. The manual runner will not
-cancel those orders or manage their filled inventory. Deploy the reviewed
-revision with the existing `/data` volume and ensure any service-level start
-command override uses `python manual_exit_runner.py`. Verify the preview logs
-and the resting-order limitation before live operation.
+Apply the reviewed WTI revision and expanded `MANUAL_EXIT_SERIES` together,
+retaining the existing `/data` volume, state paths and manual-only start command.
+Do not deploy the variable change with the old revision: it rejects any series
+scope change. WTI is enabled only once the new deployment reports successful
+startup with all three series. `MANUAL_SERIES_ADDED` records its activation cutoff.
 
 An operator can choose `python manual_exit_runner.py --live` with
 `MANUAL_EXITS_ENABLED=true`, `MANUAL_EXITS_DRY_RUN=false`, and
@@ -164,7 +204,7 @@ pause. Diagnose the specific logged check before relaxing inventory safeguards.
 ## Verification
 
 ```bash
-python tools/run_offline_tests.py -q test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
+python tools/run_offline_tests.py -q test_manual_wti_exits.py test_manual_series_journal.py test_manual_journal_validation.py test_manual_exit_latency.py test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
 ```
 
 Tests block real TCP access and use exchange simulators. They cover posting
@@ -177,3 +217,5 @@ API references:
 - https://docs.kalshi.com/api-reference/orders/create-order-v2
 - https://docs.kalshi.com/api-reference/orders/cancel-order-v2
 - https://docs.kalshi.com/getting_started/order_direction
+- https://api.elections.kalshi.com/trade-api/v2/series/KXWTI15M
+- https://docs.kalshi.com/getting_started/fixed_point_migration
