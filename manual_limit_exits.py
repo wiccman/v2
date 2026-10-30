@@ -34,6 +34,19 @@ class ManualExitBlocked(InventorySyncError):
     """An external snapshot has not proved that these contracts can be sold."""
 
 
+class ReconciliationPending(ManualExitBlocked):
+    """Fresh read models disagree; a bounded full refresh may establish proof."""
+
+
+class RestingOrderMismatch(ManualExitBlocked):
+    """Strict order validation failed; expose only fixed fields and decimals."""
+    def __init__(self, fields, expected_price, observed_price, expected_qty, observed_qty):
+        super().__init__("Resting exit identity or terms changed")
+        self.mismatched_fields = tuple(fields)
+        self.expected_yes_price, self.observed_yes_price = expected_price, observed_price
+        self.expected_quantity, self.observed_quantity = expected_qty, observed_qty
+
+
 def failure_context(error: Exception) -> dict:
     """Report the failed check without logging response bodies or credentials."""
     result = {"error_type": type(error).__name__}
@@ -47,6 +60,7 @@ def failure_context(error: Exception) -> dict:
         "Exit order/fill history has not converged",
         "Managed entry order/fill counts have not converged",
         "External order/fill counts have not converged",
+        "External fill has no matching order yet",
         "Previously adopted fill identity/cost changed",
         "Previously adopted opening disappeared from fill history",
         "Manual/automatic ownership snapshot is stale",
@@ -58,6 +72,11 @@ def failure_context(error: Exception) -> dict:
     }
     if str(error) in reasons:
         result["reason"] = str(error)
+    if isinstance(error, RestingOrderMismatch):
+        result["mismatched_fields"] = list(error.mismatched_fields)
+        for field in ("expected_yes_price", "observed_yes_price", "expected_quantity", "observed_quantity"):
+            value = getattr(error, field)
+            result[field] = str(value) if value is not None else None
     status = getattr(error, "status_code", None)
     if type(status) is int and 100 <= status <= 599:
         result["http_status"] = status
@@ -435,13 +454,13 @@ class ManualLimitExitWorker:
                 continue
             remote = by_order.get(oid)
             if remote is None:
-                raise ManualExitBlocked("External fill has no matching order yet")
+                raise ReconciliationPending("External fill has no matching order yet")
             if remote.get("type") != "limit" or str(remote.get("action", "")).lower() == "sell":
                 continue
             if direction(remote) != lot["sign"]:
                 raise ManualExitBlocked("External order and fill directions disagree")
             if quantity(remote.get("fill_count_fp", remote.get("fill_count"))) != observed_counts[oid]:
-                raise ManualExitBlocked("External order/fill counts have not converged")
+                raise ReconciliationPending("External order/fill counts have not converged")
             if stamp > number(self.clock() + 1, "clock"):
                 raise ManualExitBlocked("Fill timestamp is ahead of the local clock")
             managed[fid] = {"order_id": oid, "sign": lot["sign"],
@@ -463,7 +482,7 @@ class ManualLimitExitWorker:
         for oid in {m["order_id"] for m in managed.values()}:
             remote = by_order.get(oid)
             if remote is None or quantity(remote.get("fill_count_fp", remote.get("fill_count"))) != observed_counts[oid]:
-                raise ManualExitBlocked("Managed entry order/fill counts have not converged")
+                raise ReconciliationPending("Managed entry order/fill counts have not converged")
         realized = defaultdict(lambda: D(0))
         for reduction in reductions:
             saved = managed.get(reduction["entry_fill_id"])
@@ -528,7 +547,7 @@ class ManualLimitExitWorker:
     def verify_snapshot(self, ticker: str) -> None:
         snapshot = self._snapshots.get(ticker)
         if not snapshot or not 0 <= self.clock() - snapshot["checked_at"] <= 10:
-            raise ManualExitBlocked("Manual/automatic ownership snapshot is stale")
+            raise ReconciliationPending("Manual/automatic ownership snapshot is stale")
         held = position(self.client.positions(ticker), ticker)
         fills = self.client.all_fills(ticker)
         orders = primary_orders(self.client.all_orders(ticker), ticker)
@@ -536,7 +555,7 @@ class ManualLimitExitWorker:
         if (held != snapshot["held"] or rows_digest(fills) != snapshot["fills"] or
                 rows_digest(orders) != snapshot["orders"] or record_digest(record) != snapshot["record"]
                 or self.clock() - snapshot["checked_at"] > 10):
-            raise ManualExitBlocked("Ownership changed before submission; reconcile again")
+            raise ReconciliationPending("Ownership changed before submission; reconcile again")
 
     def maybe_submit(self, ticker: str, record: dict, automatic_ledger: dict) -> bool:
         ledger = self.ledger(ticker)

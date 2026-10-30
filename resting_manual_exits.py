@@ -14,6 +14,7 @@ from decimal import Decimal as D
 
 from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked,
+    ReconciliationPending, RestingOrderMismatch,
     TargetUnreachable, ACTIVE_ORDER_STATES, TERMINAL_ORDER_STATES, direction,
     number, primary_orders, quantity, round_target, failure_context)
 from request_coordinator import RequestDeferred
@@ -93,15 +94,35 @@ class RestingManualExitWorker(ManualLimitExitWorker):
 
     def _validate(self, ticker, intent, row):
         sign = 1 if intent["side"] == "YES" else -1
-        wire_price = number(row.get("yes_price_dollars"), "resting price")
         expected = D(intent["target"]) if sign > 0 else 1-D(intent["target"])
-        if (row.get("ticker") != ticker or row.get("subaccount_number", 0) != 0
-                or row.get("client_order_id") != intent["client_id"]
-                or (intent.get("order_id") and row.get("order_id") != intent["order_id"])
-                or row.get("type") != "limit" or direction(row) != -sign
-                or wire_price != expected
-                or quantity(row.get("initial_count_fp", row.get("initial_count"))) != D(intent["quantity"])):
-            raise ManualExitBlocked("Resting exit identity or terms changed")
+        expected_qty = quantity(intent["quantity"])
+        # Never print a raw response or arbitrary string value. Invalid numeric
+        # representations are reported as null, with the failed field named.
+        try:
+            wire_price = number(row.get("yes_price_dollars"), "resting price")
+        except ManualExitBlocked:
+            wire_price = None
+        try:
+            initial = quantity(row.get("initial_count_fp", row.get("initial_count")))
+        except ManualExitBlocked:
+            initial = None
+        try:
+            wire_direction = direction(row)
+        except ManualExitBlocked:
+            wire_direction = None
+        checks = {
+            "ticker": row.get("ticker") == ticker,
+            "subaccount_number": row.get("subaccount_number", 0) == 0,
+            "client_order_id": row.get("client_order_id") == intent["client_id"],
+            "order_id": not intent.get("order_id") or row.get("order_id") == intent["order_id"],
+            "type": row.get("type") == "limit",
+            "direction": wire_direction == -sign,
+            "yes_price_dollars": wire_price == expected,
+            "initial_count_fp": initial == expected_qty,
+        }
+        mismatches = [name for name, matched in checks.items() if not matched]
+        if mismatches:
+            raise RestingOrderMismatch(mismatches, expected, wire_price, expected_qty, initial)
         filled = quantity(row.get("fill_count_fp", row.get("fill_count")))
         remaining = quantity(row.get("remaining_count_fp", row.get("remaining_count")))
         status = str(row.get("status", "")).lower()
@@ -164,7 +185,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 status, filled, remaining = self._validate(ticker, intent, row)
                 if (status != intent["status"] or filled != D(intent["filled"])
                         or remaining != D(intent["remaining"])):
-                    raise ManualExitBlocked("Resting reservation changed during reconciliation")
+                    raise ReconciliationPending("Resting reservation changed during reconciliation")
                 return True
         return False
 

@@ -320,7 +320,8 @@ def test_ownership_change_before_post_prevents_submission(tmp_path):
         e.fill(sale, 10)
         original(ticker)
     s.worker.verify_snapshot = changed
-    assert not s.run_once() and not e.sent
+    assert s.run_once()  # Fresh reconciliation sees the manual close.
+    assert not e.sent and e.held[T] == 0
 
 
 def test_change_while_saving_intent_is_rechecked_before_post(tmp_path, monkeypatch):
@@ -336,7 +337,8 @@ def test_change_while_saving_intent_is_rechecked_before_post(tmp_path, monkeypat
             sale = e.make_order(count=10, action="sell")
             e.fill(sale, 10)
     monkeypatch.setattr(s.worker, "save", save_and_change_position)
-    assert not s.run_once() and not e.sent and not s.worker.pending(T)
+    assert s.run_once()  # The unsent intent is removed before the refresh.
+    assert not e.sent and not s.worker.pending(T) and e.held[T] == 0
 
 
 def test_journal_read_failure_attempts_only_owned_cancellations(tmp_path):

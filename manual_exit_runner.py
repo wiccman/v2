@@ -20,7 +20,7 @@ from pathlib import Path
 import requests
 
 from kalshi import KalshiClient, KalshiAPIError
-from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, number,
+from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, ReconciliationPending, number,
                                position, primary_orders, quantity, failure_context)
 from request_coordinator import RequestDeferred
 from resting_manual_exits import RestingExitOnlyClient, RestingManualExitWorker
@@ -145,8 +145,10 @@ def verify_exit_fills(exits, fills):
         seen[fid] = fill
         counts[fill.get("order_id")] += quantity(fill.get("count_fp", fill.get("count")))
     for oid, order in exits.items():
-        if "filled" not in order or counts[oid] != quantity(order["filled"]):
+        if "filled" not in order:
             raise ManualExitBlocked("Exit order/fill history has not converged")
+        if counts[oid] != quantity(order["filled"]):
+            raise ReconciliationPending("Exit order/fill history has not converged")
 
 
 class ManualExitService:
@@ -234,29 +236,47 @@ class ManualExitService:
                 # after every action, reserving each accepted order's quantity
                 # before posting another. Bound work so other markets get time.
                 limit = 20 if self.settings.execution_mode == "resting_limit" else 1
+                refreshed = False
                 for _ in range(limit):
-                    stage = "reconcile_orders"
-                    if not self.worker.reconcile(ticker):
-                        ok = False
-                        self.suspend(ticker)
-                        break
-                    stage = "automatic_ownership"
-                    record = self.read_entries()["markets"].get(ticker, {})
-                    ledger = read_journal(self.settings.automatic_exit_state)["markets"].get(ticker, {})
-                    if ledger.get("pending"):
-                        raise ManualExitBlocked("Unresolved automatic exit; manual exits paused")
-                    orders = primary_orders(self.client.all_orders(ticker), ticker)
-                    entries, ownership = automatic_entries(record, ledger, orders)
-                    stage = "read_inventory"
-                    fills = self.client.all_fills(ticker)
-                    held = position(self.client.positions(ticker), ticker)
-                    exits = self.worker.combined_exits(ticker, ledger.get("exit_orders", {}))
-                    stage = "verify_exit_fills"
-                    verify_exit_fills(exits, fills)
-                    stage = "observe_inventory"
-                    self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
-                    stage = "submit_exit"
-                    if not self.worker.maybe_submit(ticker, record, ownership):
+                    acted = False
+                    while True:
+                        try:
+                            stage = "reconcile_orders"
+                            if not self.worker.reconcile(ticker):
+                                ok = False
+                                self.suspend(ticker)
+                                break
+                            stage = "automatic_ownership"
+                            record = self.read_entries()["markets"].get(ticker, {})
+                            ledger = read_journal(self.settings.automatic_exit_state)["markets"].get(ticker, {})
+                            if ledger.get("pending"):
+                                raise ManualExitBlocked("Unresolved automatic exit; manual exits paused")
+                            orders = primary_orders(self.client.all_orders(ticker), ticker)
+                            entries, ownership = automatic_entries(record, ledger, orders)
+                            stage = "read_inventory"
+                            fills = self.client.all_fills(ticker)
+                            held = position(self.client.positions(ticker), ticker)
+                            exits = self.worker.combined_exits(ticker, ledger.get("exit_orders", {}))
+                            stage = "verify_exit_fills"
+                            verify_exit_fills(exits, fills)
+                            stage = "observe_inventory"
+                            self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
+                            stage = "submit_exit"
+                            acted = self.worker.maybe_submit(ticker, record, ownership)
+                            break
+                        except ReconciliationPending as error:
+                            # Keep durable reservations, but never reuse a plan
+                            # derived from the inconsistent reads. One complete
+                            # refresh per market/pass lets the read models catch
+                            # up without canceling an otherwise valid exit.
+                            self.worker._plans.pop(ticker, None)
+                            self.worker._snapshots.pop(ticker, None)
+                            if refreshed:
+                                raise  # Persistent uncertainty still suspends.
+                            refreshed = True
+                            self.emit("MANUAL_RECONCILIATION_REFRESH", ticker=ticker,
+                                      stage=stage, **failure_context(error))
+                    if not acted:
                         break
             except Exception as error:
                 ok = False

@@ -75,6 +75,33 @@ guarantee.
 
 ## Resting-order limitation
 
+### Kalshi app auto-sell and changing read snapshots
+
+A separate app-created sell can overlap the bot's resting exit for the same
+position. The external-order guard keeps the app's order, withholds new bot
+submissions and cancels only verified bot-owned exits. It is not a speed error
+and must not be disabled to force a second sell onto the same inventory.
+
+Order, fill and position responses can also change between sequential reads.
+For explicitly classified snapshot-progress checks, the runner now refreshes
+the entire reconciliation sequence once per market/pass before taking its
+existing cancellation path. The failed snapshot and plans are discarded;
+durable intents and quantity reservations remain. A newly consistent snapshot
+can retain a valid remaining sell or recognize that a manual close left nothing
+to sell. Persistent disagreement keeps the existing protective behavior.
+
+External reducing orders, contradictory identity/price/quantity, invalid status
+and API errors are not treated as transient snapshot checks. Strict order
+validation now reports `mismatched_fields` with expected/observed YES-axis price
+and initial quantity, so a WTI sub-cent mismatch can be diagnosed precisely.
+Invalid observed numeric values appear as null; raw responses, client IDs and
+credentials are not included in these diagnostics. Price comparison remains
+exact: there is no rounding tolerance that could hide an amended order.
+
+`MANUAL_RECONCILIATION_REFRESH` records a refresh attempt; it does not mean an
+order filled or a conflict was cleared. The live log must still establish which
+field caused a particular identity/terms failure.
+
 Kalshi V2 rejects `reduce_only=true` with GTC. These standing exits therefore
 use `reduce_only=false`. The application verifies ownership and size before
 posting, but **cannot guarantee that a resting order only reduces the position**.
@@ -204,7 +231,7 @@ pause. Diagnose the specific logged check before relaxing inventory safeguards.
 ## Verification
 
 ```bash
-python tools/run_offline_tests.py -q test_manual_wti_exits.py test_manual_series_journal.py test_manual_journal_validation.py test_manual_exit_latency.py test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
+python tools/run_offline_tests.py -q test_manual_reconciliation_refresh.py test_manual_order_diagnostics.py test_manual_wti_exits.py test_manual_series_journal.py test_manual_journal_validation.py test_manual_exit_latency.py test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
 ```
 
 Tests block real TCP access and use exchange simulators. They cover posting
