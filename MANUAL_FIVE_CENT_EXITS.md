@@ -75,12 +75,42 @@ guarantee.
 
 ## Resting-order limitation
 
-### Kalshi app auto-sell and changing read snapshots
+### Existing sells reserve their remaining quantity
 
-A separate app-created sell can overlap the bot's resting exit for the same
-position. The external-order guard keeps the app's order, withholds new bot
-submissions and cancels only verified bot-owned exits. It is not a speed error
-and must not be disabled to force a second sell onto the same inventory.
+In resting-limit mode, an existing app/manual sell no longer pauses the entire
+market. The worker reserves the remaining quantity of every external active
+order that can reduce the same primary-account position. An opposite-outcome
+buy also counts. Initial order size and already-filled quantity do not count
+as outstanding reservations; fractional contract quantities stay exact.
+
+For example, if 10 contracts bought at 42c already have an app-created sell,
+and another 10 fill at 47c, the bot can post a 52c sell for the new 10. If the
+first sell has filled 4 contracts, its remaining 6 still cover the older lot;
+the new 10 remain eligible. If existing orders cover the entire position, the
+bot adds no duplicate sell. User orders keep their own prices and quantities.
+
+External coverage follows the same oldest-fill-first allocation used when
+replaying external sale fills. It includes old and automatic inventory before
+any later eligible manual lots. Each uncovered manual fill keeps its own +5c
+target. An existing bot exit stays when its fill allocation remains available.
+If an external order overlaps that allocation, only the bot-owned order is
+canceled, and its quantity is not reused until terminal cancellation is
+confirmed. The worker can then cover the eligible remainder. A cancellation
+or change to an external order causes coverage to be recalculated; external
+orders are never canceled or amended by this worker.
+
+The monitored IOC worker retains its previous external-order guard. Existing
+snapshot verification, pending-acknowledgment reservations and manual-only
+entry behavior are preserved. Known legacy automatic exits also retain their
+guard because their saved allocations may differ from external FIFO.
+
+`MANUAL_EXTERNAL_COVERAGE` logs coverage changes with `external_remaining`,
+`held_quantity`, `bot_reserved_quantity` and `uncovered_quantity`. A fully
+covered position is normal and needs no additional bot sell. Coverage is
+recomputed from confirmed fills and current order remainders on every pass;
+an amended external order may retain its original initial size.
+
+### Changing read snapshots
 
 Order, fill and position responses can also change between sequential reads.
 For explicitly classified snapshot-progress checks, the runner now refreshes
@@ -90,8 +120,8 @@ durable intents and quantity reservations remain. A newly consistent snapshot
 can retain a valid remaining sell or recognize that a manual close left nothing
 to sell. Persistent disagreement keeps the existing protective behavior.
 
-External reducing orders, contradictory identity/price/quantity, invalid status
-and API errors are not treated as transient snapshot checks. Strict order
+Contradictory identity/price/quantity, invalid status and API errors are not
+treated as transient snapshot checks. Strict order
 validation now reports `mismatched_fields` with expected/observed YES-axis price
 and initial quantity, so a WTI sub-cent mismatch can be diagnosed precisely.
 Invalid observed numeric values appear as null; raw responses, client IDs and
@@ -231,7 +261,7 @@ pause. Diagnose the specific logged check before relaxing inventory safeguards.
 ## Verification
 
 ```bash
-python tools/run_offline_tests.py -q test_manual_reconciliation_refresh.py test_manual_order_diagnostics.py test_manual_wti_exits.py test_manual_series_journal.py test_manual_journal_validation.py test_manual_exit_latency.py test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
+python tools/run_offline_tests.py -q test_existing_sell_coverage.py test_manual_reconciliation_refresh.py test_manual_order_diagnostics.py test_manual_wti_exits.py test_manual_series_journal.py test_manual_journal_validation.py test_manual_exit_latency.py test_resting_manual_exits.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py
 ```
 
 Tests block real TCP access and use exchange simulators. They cover posting
