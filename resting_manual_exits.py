@@ -76,6 +76,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.state["execution_mode"] = "resting_limit"
+        self._coverage_reports = {}
         self.save()
 
     def _validate_execution_mode(self):
@@ -189,6 +190,36 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 return True
         return False
 
+    def external_order_reservation(self, orders):
+        reserved = D(0)
+        for row in orders:
+            remaining = quantity(row.get("remaining_count_fp", row.get("remaining_count")))
+            filled = quantity(row.get("fill_count_fp", row.get("fill_count")))
+            initial = quantity(row.get("initial_count_fp", row.get("initial_count")))
+            # A user's amended/decreased order can retain its original initial
+            # count. Only the verified still-resting amount reserves inventory.
+            if filled + remaining > initial:
+                raise ManualExitBlocked("External resting order counts are inconsistent")
+            reserved += remaining
+        return reserved
+
+    def observe(self, ticker, record, automatic_ledger, fills, entry_orders, exit_orders, held):
+        super().observe(ticker, record, automatic_ledger, fills, entry_orders, exit_orders, held)
+        snapshot = self._snapshots[ticker]
+        reserved = defaultdict(lambda: D(0))
+        for intent in self.intents(ticker).values():
+            if intent["status"] in ACTIVE_ORDER_STATES:
+                reserved[intent["fill_id"]] += D(intent["remaining"])
+        uncovered = sum((max(D(0), plan["quantity"] - reserved[plan["fill_id"]])
+                         for plan in self._plans[ticker]), D(0))
+        report = {"external_remaining": str(snapshot["external_reserved"]),
+                  "held_quantity": str(abs(snapshot["held"])),
+                  "bot_reserved_quantity": str(sum(reserved.values(), D(0))),
+                  "uncovered_quantity": str(uncovered)}
+        if (snapshot["external_reserved"] or ticker in self._coverage_reports) and self._coverage_reports.get(ticker) != report:
+            self._coverage_reports[ticker] = report
+            self.emit("MANUAL_EXTERNAL_COVERAGE", ticker=ticker, **report)
+
     def _cancel(self, ticker, intent, reason):
         if intent["status"] in TERMINAL_ORDER_STATES or not intent.get("order_id"):
             return False
@@ -226,8 +257,9 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         reserved = defaultdict(lambda: D(0))
         for intent in active:
             reserved[intent["fill_id"]] += D(intent["remaining"])
-        # Retire oversized reservations before placing any new order, including
-        # a manual close to zero or reversal. Never cancel a user's own order.
+        # Plans exclude external orders' FIFO coverage. Retire overlapping or
+        # oversized bot reservations before placing a replacement, including a
+        # manual close to zero or reversal. Never cancel a user's own order.
         cancel = []
         for intent in active:
             plan = plans.get(intent["fill_id"])
@@ -237,7 +269,15 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         if cancel:
             changed = False
             for intent in cancel:
-                changed = self._cancel(ticker, intent, "inventory_reduced") or changed
+                try:
+                    changed = self._cancel(ticker, intent, "inventory_reduced") or changed
+                except Exception as error:
+                    # _cancel persisted its reservation and retry deadline.
+                    # Report this attempt now: suspend will respect that
+                    # deadline rather than issuing/logging a second attempt.
+                    self.emit("MANUAL_CANCEL_UNCONFIRMED", ticker=ticker,
+                              order_id=intent.get("order_id"), **failure_context(error))
+                    raise
             return changed
         if self.clock() < ledger.get("retry_after", 0):
             return False
@@ -269,7 +309,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 continue
             self.verify_snapshot(ticker)
             held = self._snapshots[ticker]["held"]
-            if held * plan["sign"] <= 0 or qty + sum(reserved.values(), D(0)) > abs(held):
+            external = self._snapshots[ticker]["external_reserved"]
+            if held * plan["sign"] <= 0 or qty + sum(reserved.values(), D(0)) + external > abs(held):
                 raise ManualExitBlocked("Resting exits exceed verified owned inventory")
             if self.dry_run:
                 self.emit("MANUAL_DRY_RUN_RESTING_ORDER", ticker=ticker, fill_id=fid,

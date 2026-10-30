@@ -56,6 +56,8 @@ def failure_context(error: Exception) -> dict:
         "Resting exit counts/status are inconsistent",
         "Resting reservation changed during reconciliation",
         "An existing resting order can reduce the shared position",
+        "A managed automatic exit can reduce the shared position",
+        "External resting order counts are inconsistent",
         "Fills and position disagree; waiting for consistent exchange data",
         "Exit order/fill history has not converged",
         "Managed entry order/fill counts have not converged",
@@ -399,6 +401,13 @@ class ManualLimitExitWorker:
         # overrides this only for orders recovered from its durable journal.
         return False
 
+    def external_order_reservation(self, orders: list[dict]) -> D:
+        # IOC execution retains its strict conflict guard. The resting worker
+        # can reserve verified external quantities before planning its exits.
+        if orders:
+            raise ManualExitBlocked("An existing resting order can reduce the shared position")
+        return D(0)
+
     def observe(self, ticker, record, automatic_ledger, fills, entry_orders, exit_orders, held):
         started = self.clock()
         if self.pending(ticker) or automatic_ledger.get("pending"):
@@ -411,6 +420,7 @@ class ManualLimitExitWorker:
         by_order = {o["order_id"]: o for o in orders}
         bot_ids, bot_clients = known_ids(record)
         bot_ids |= set(entry_orders) | set(recovered.values()) | set(automatic_ledger.get("exit_orders", {}))
+        external_orders = []
         for row in orders:
             if row.get("client_order_id") in bot_clients:
                 bot_ids.add(row["order_id"])
@@ -418,11 +428,15 @@ class ManualLimitExitWorker:
             if status in ACTIVE_ORDER_STATES:
                 count = quantity(row.get("remaining_count_fp", row.get("remaining_count")))
                 if count and held and direction(row) * held < 0 and not self.owns_resting_order(ticker, row):
-                    # A user sell or opposing resting buy could consume these
-                    # contracts. Do not cancel it or submit a competing exit.
-                    raise ManualExitBlocked("An existing resting order can reduce the shared position")
+                    if row["order_id"] in exit_orders:
+                        # Old automatic exits replay their saved allocations or
+                        # paired targets, not external FIFO. Retain the strict
+                        # guard for these rather than misassigning their cover.
+                        raise ManualExitBlocked("A managed automatic exit can reduce the shared position")
+                    external_orders.append(row)
             elif status not in TERMINAL_ORDER_STATES:
                 raise ManualExitBlocked("Unknown order status")
+        external_reserved = self.external_order_reservation(external_orders)
         openings, reductions, outside = [], [], []
         lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, outside,
                               include_untracked=True, openings=openings, reductions=reductions)
@@ -432,6 +446,18 @@ class ManualLimitExitWorker:
             if not row.get("order_id"):
                 raise ManualExitBlocked("Fill order identity unavailable")
             observed_counts[row["order_id"]] += quantity(row.get("count_fp", row.get("count")))
+        for row in external_orders:
+            if quantity(row.get("fill_count_fp", row.get("fill_count"))) != observed_counts[row["order_id"]]:
+                raise ReconciliationPending("External order/fill counts have not converged")
+        # External reductions replay FIFO, including automatic and unadopted
+        # lots. Reserve the same oldest lots now so either order of execution
+        # leaves the bot's saved fill allocations valid. Existing bot exits
+        # that overlap this coverage must be retired before any replacement.
+        external_by_fill, unallocated = {}, external_reserved
+        for lot in lots:
+            covered = min(lot["quantity"], unallocated)
+            external_by_fill[lot["fill_id"]] = covered
+            unallocated -= covered
         ledger = self.ledger(ticker)
         managed = ledger.setdefault("managed_fills", {})
         goals = ledger.setdefault("order_goals", {})
@@ -505,14 +531,16 @@ class ManualLimitExitWorker:
                 summaries[oid] = {"mode": "price_increment", "increment": str(self.price_increment),
                                   "realized_gross": str(realized[oid]), "fills": []}
                 for lot in members:
-                    fid, qty = lot["fill_id"], lot["quantity"]
+                    fid = lot["fill_id"]
+                    qty = lot["quantity"] - external_by_fill.get(fid, D(0))
                     entry = D(managed[fid]["cost"])
                     raw_target = entry + self.price_increment
-                    plans.append({"order_id": oid, "fill_id": fid, "sign": lot["sign"],
-                                  "quantity": qty, "cost": entry * qty, "realized": D(0),
-                                  "goal": qty * self.price_increment, "raw_target": raw_target,
-                                  "allocations": [{"fill_id": fid, "quantity": str(qty)}]})
-                    summaries[oid]["fills"].append({"fill_id": fid, "remaining_quantity": str(qty),
+                    if qty:
+                        plans.append({"order_id": oid, "fill_id": fid, "sign": lot["sign"],
+                                      "quantity": qty, "cost": entry * qty, "realized": D(0),
+                                      "goal": qty * self.price_increment, "raw_target": raw_target,
+                                      "allocations": [{"fill_id": fid, "quantity": str(qty)}]})
+                    summaries[oid]["fills"].append({"fill_id": fid, "remaining_quantity": str(lot["quantity"]),
                                                    "entry_price": str(entry), "raw_target": str(raw_target)})
         for oid, goal_text in goals.items():
             if self.price_increment is not None:
@@ -542,7 +570,7 @@ class ManualLimitExitWorker:
         self._plans[ticker] = plans
         self._snapshots[ticker] = {"held": held, "fills": rows_digest(fills),
                                   "orders": rows_digest(orders), "record": record_digest(record),
-                                  "checked_at": started}
+                                  "external_reserved": external_reserved, "checked_at": started}
 
     def verify_snapshot(self, ticker: str) -> None:
         snapshot = self._snapshots.get(ticker)

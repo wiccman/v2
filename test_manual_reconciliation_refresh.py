@@ -222,10 +222,10 @@ def test_actual_manual_reduction_on_refresh_cancels_before_sizing_replacement(tm
     assert len(exchange.sent) == 3 and len(refresh_events(events)) == 1
 
 
-def test_real_app_auto_sell_conflict_still_cancels_only_bot_exit_without_refresh(tmp_path):
+def test_fully_covered_app_sell_cancels_only_overlapping_bot_exit_without_refresh(tmp_path):
     exchange, service, _, events, _, sell = resting_exit(tmp_path)
     app_sell = exchange.make_order(ticker=WTI, count=10, price=".60", action="sell")
-    assert not service.run_once()
+    assert service.run_once()
     assert exchange.cancelled == [sell] and app_sell not in exchange.cancelled
     assert exchange.remote[app_sell]["status"] == "resting" and len(exchange.sent) == 1
     assert not refresh_events(events)

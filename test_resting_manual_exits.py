@@ -134,19 +134,17 @@ def test_manual_reduction_cancels_old_reservation_before_replacing_only_remainin
         assert e.sent[-1]["count"] == "7" and e.sent[-1]["price"] == "0.4700"
 
 
-def test_existing_user_sell_pauses_and_cancels_only_bot_owned_exit(tmp_path):
+def test_fully_covered_user_sell_cancels_only_overlapping_bot_owned_exit(tmp_path):
     e, s, _, events = setup(tmp_path)
     e.buy(10, ".42")
     assert s.run_once()
     user_sell = e.make_order(count=10, price=".50", action="sell")
-    assert not s.run_once()
+    assert s.run_once()
     assert e.cancelled == exit_ids(e) and user_sell not in e.cancelled
     assert len(e.sent) == 1
-    pause = [data for event, data in events if event == "MANUAL_EXIT_PAUSED"][-1]
-    assert pause["stage"] == "observe_inventory"
-    assert pause["reason"] == "An existing resting order can reduce the shared position"
-    assert pause["check_source"] == "manual_limit_exits.py"
-    assert pause["check_line"] > 0
+    assert e.remote[user_sell]["status"] == "resting"
+    assert not [data for event, data in events if event == "MANUAL_EXIT_PAUSED"]
+    assert s.run_once() and len(e.sent) == 1
 
 
 def test_user_cancel_is_respected_but_later_buy_fill_gets_its_own_order(tmp_path):

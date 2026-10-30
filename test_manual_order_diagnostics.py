@@ -155,16 +155,18 @@ def test_app_auto_sell_overlap_cancels_only_bot_order_without_duplicates(tmp_pat
                                   client_id="kalshi-app-autosell", action="sell")
     app_before = copy.deepcopy(exchange.remote[app_oid])
 
-    assert not service.run_once()
+    assert service.run_once()
     assert exchange.cancelled == [bot_oid]
     assert exchange.remote[app_oid] == app_before
     assert len(exchange.sent) == 1
-    assert any(name == "MANUAL_EXIT_PAUSED" and
-               data.get("reason") == "An existing resting order can reduce the shared position"
+    assert any(name == "MANUAL_EXTERNAL_COVERAGE" and
+               D(data["external_remaining"]) == 40 and
+               D(data["uncovered_quantity"]) == 0
                for name, data in events)
+    assert not any(name == "MANUAL_EXIT_PAUSED" for name, _ in events)
 
     # Repeated reconciliation must neither replace the bot order nor touch the app order.
-    assert not service.run_once()
+    assert service.run_once()
     assert exchange.cancelled == [bot_oid]
     assert exchange.remote[app_oid] == app_before
     assert len(exchange.sent) == 1
