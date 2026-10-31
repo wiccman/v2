@@ -309,8 +309,34 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 reservations[fid] += quantity(intent["remaining"])
         stop_verified = (self._stop_checked_cycle.get(ticker) ==
                          self._protection_cycles[ticker])
+        # Also track open manual inventory covered by someone else's sell.
+        # That order is not safely cancelable by this bot, so don't claim
+        # those contracts have a bot-managed stop.
+        remaining = {}
+        for summary in ledger.get("profit_summary", {}).values():
+            for fill in summary.get("fills", []):
+                fid = fill["fill_id"]
+                qty = quantity(fill["remaining_quantity"])
+                if qty:
+                    remaining[fid] = qty
         old = {fid for t, fid in self._protection_reports if t == ticker}
         current = set()
+
+        def publish(report):
+            key = (ticker, report["fill_id"])
+            now = self.clock()
+            if (self._protection_reports.get(key) != report or
+                    now - self._protection_report_at.get(key, float("-inf")) >= 30):
+                self._protection_reports[key] = report
+                self._protection_report_at[key] = now
+                self.emit("MANUAL_PROTECTION_CHECK", ticker=ticker, **report)
+                if (report["tp_status"] in {"missing", "partial", "suppressed",
+                                            "over_reserved", "external_sell"} or
+                        report["sl_status"] in {"unverified", "unavailable",
+                                               "blocked_by_external_sell",
+                                               "partially_blocked"}):
+                    self.emit("MANUAL_PROTECTION_ALERT", ticker=ticker, **report)
+
         for fid, plan in sorted(plans.items()):
             current.add(fid)
             entry = number(ledger["managed_fills"][fid]["cost"], "entry cost")
@@ -331,30 +357,40 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 tp = "partial"
             else:
                 tp = "over_reserved"
+            external_qty = max(D(0), remaining.get(fid, expected) - expected)
             if fid in ledger.get("stop_armed", {}):
                 sl = "triggered"
             elif stop_trigger <= 0:
                 sl = "unavailable"  # No positive sell price 11c below entry.
-            elif stop_verified:
-                sl = "monitoring"
-            else:
+            elif not stop_verified:
                 sl = "unverified"
+            elif external_qty:
+                sl = "partially_blocked"
+            else:
+                sl = "monitoring"
             report = {"fill_id": fid, "side": "YES" if plan["sign"] > 0 else "NO",
                       "entry": str(entry), "quantity": str(expected),
+                      "externally_reserved_quantity": str(external_qty),
                       "tp_target": str(plan["raw_target"]),
                       "tp_status": tp, "tp_resting_quantity": str(actual),
                       "sl_trigger": str(stop_trigger) if stop_trigger > 0 else None,
                       "sl_status": sl, "sl_order_type": "local_bid_monitor"}
-            key = (ticker, fid)
-            now = self.clock()
-            if (self._protection_reports.get(key) != report or
-                    now - self._protection_report_at.get(key, float("-inf")) >= 30):
-                self._protection_reports[key] = report
-                self._protection_report_at[key] = now
-                self.emit("MANUAL_PROTECTION_CHECK", ticker=ticker, **report)
-                if (tp in {"missing", "partial", "suppressed", "over_reserved"} or
-                        sl in {"unverified", "unavailable"}):
-                    self.emit("MANUAL_PROTECTION_ALERT", ticker=ticker, **report)
+            publish(report)
+        for fid, qty in sorted(remaining.items()):
+            if fid in current:
+                continue
+            current.add(fid)
+            saved = ledger["managed_fills"][fid]
+            entry = number(saved["cost"], "entry cost")
+            trigger = entry - self.stop_loss_increment
+            publish({"fill_id": fid, "side": "YES" if saved["sign"] > 0 else "NO",
+                     "entry": str(entry), "quantity": "0",
+                     "externally_reserved_quantity": str(qty),
+                     "tp_target": str(entry + self.price_increment),
+                     "tp_status": "external_sell", "tp_resting_quantity": "0",
+                     "sl_trigger": str(trigger) if trigger > 0 else None,
+                     "sl_status": "blocked_by_external_sell",
+                     "sl_order_type": "local_bid_monitor"})
         for fid in old - current:
             self._protection_reports.pop((ticker, fid), None)
             self._protection_report_at.pop((ticker, fid), None)
