@@ -242,6 +242,8 @@ class ManualExitService:
                 # after every action, reserving each accepted order's quantity
                 # before posting another. Bound work so other markets get time.
                 limit = 20 if self.settings.execution_mode == "resting_limit" else 1
+                if isinstance(self.worker, RestingManualExitWorker):
+                    self.worker.begin_protection_check(ticker)
                 refreshed = False
                 for _ in range(limit):
                     acted = False
@@ -269,6 +271,8 @@ class ManualExitService:
                             self.worker.observe(ticker, record, ownership, fills, entries, exits, held)
                             stage = "submit_exit"
                             acted = self.worker.maybe_submit(ticker, record, ownership)
+                            if isinstance(self.worker, RestingManualExitWorker):
+                                self.worker.report_protection(ticker)
                             break
                         except ReconciliationPending as error:
                             # Keep durable reservations, but never reuse a plan
