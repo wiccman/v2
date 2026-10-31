@@ -43,6 +43,7 @@ class Settings:
     poll: float
     dry_run: bool
     execution_mode: str
+    stop_loss_cents: D = D("11")
 
     @classmethod
     def read(cls, env, *, live=False):
@@ -73,7 +74,10 @@ class Settings:
                      or not flag(env, "MANUAL_EXTERNAL_ORDERS_ARE_MANUAL")):
             raise ValueError("Live mode requires MANUAL_EXITS_ENABLED=true, MANUAL_EXITS_DRY_RUN=false, "
                              "and MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=true")
-        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode)
+        stop_cents = number(env.get("MANUAL_STOP_LOSS_CENTS", "11"), "stop loss cents")
+        if not D(0) < stop_cents < 100 or stop_cents.quantize(D(".01")) != stop_cents:
+            raise ValueError("MANUAL_STOP_LOSS_CENTS must be positive and below 100 with at most .01-cent precision")
+        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode, stop_cents)
 
 
 class ExitOnlyClient(KalshiClient):
@@ -170,6 +174,8 @@ class ManualExitService:
                 raise ManualExitBlocked("Use separate journals for resting and monitored execution")
         options = {"clock": clock} if clock is not None else {}
         worker = RestingManualExitWorker if settings.execution_mode == "resting_limit" else ManualLimitExitWorker
+        if settings.execution_mode == "resting_limit":
+            options["stop_loss_cents"] = settings.stop_loss_cents
         self.worker = worker(client, settings.manual_state,
             price_increment=settings.increment, series=settings.series, dry_run=settings.dry_run,
             emit=self.emit, **options)
@@ -301,7 +307,9 @@ def main(argv=None):
     load_dotenv()
     settings = Settings.read(os.environ, live=args.live)
     print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
-                      "increment_cents": str(settings.increment * 100), "series": settings.series,
+                      "increment_cents": str(settings.increment * 100),
+                      "stop_loss_cents": str(settings.stop_loss_cents) if settings.execution_mode == "resting_limit" else None,
+                      "series": settings.series,
                       "dry_run": settings.dry_run, "automatic_entries": False,
                       "poll_seconds": settings.poll, "connection_pooling": True,
                       "latency_patch": "terminal-first-v1"}), flush=True)
