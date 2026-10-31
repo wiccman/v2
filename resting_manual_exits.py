@@ -60,6 +60,22 @@ order, automatic entry, transfer, amend, or cancel-all call is never allowed.
                 "cancel_order_on_pause": True, "reduce_only": False, "subaccount": 0}
         return self._write("POST", "/portfolio/events/orders", body=body)
 
+    def place_manual_stop(self, ticker, intent):
+        """One explicit, price-protected, reduce-only IOC; never a resting stop sell."""
+        qty = quantity(intent["quantity"])
+        limit = number(intent["target"], "stop execution price")
+        side, cid = intent["side"], intent["client_id"]
+        if (not qty or not D(0) < limit < 1 or side not in {"YES", "NO"}
+                or not isinstance(cid, str) or not cid.startswith("manualstop-")):
+            raise ValueError("Invalid durable manual stop intent")
+        body = {"ticker": ticker, "client_order_id": cid,
+                "side": "ask" if side == "YES" else "bid", "count": format(qty, "f"),
+                "price": format((limit if side == "YES" else 1-limit).quantize(D(".0001")), "f"),
+                "time_in_force": "immediate_or_cancel",
+                "self_trade_prevention_type": "taker_at_cross", "post_only": False,
+                "cancel_order_on_pause": True, "reduce_only": True}
+        return self._write("POST", "/portfolio/events/orders", body=body)
+
     def cancel_manual_exit(self, ticker, intent):
         # Verify ownership afresh; cancellation is never authorized by a prefix
         # or an arbitrary order ID alone.
@@ -73,8 +89,15 @@ order, automatic entry, transfer, amend, or cancel-all call is never allowed.
 
 
 class RestingManualExitWorker(ManualLimitExitWorker):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, stop_loss_cents=D("11"), **kwargs):
+        self.stop_loss_increment = number(stop_loss_cents, "stop loss cents") / 100
+        if not D(0) < self.stop_loss_increment < 1:
+            raise ValueError("Manual stop loss must be between zero and one dollar")
         super().__init__(*args, **kwargs)
+        previous = self.state.get("stop_loss_increment")
+        if previous is not None and number(previous, "saved stop loss") != self.stop_loss_increment:
+            raise ManualExitBlocked("Stop loss policy changed; review the existing journal")
+        self.state["stop_loss_increment"] = str(self.stop_loss_increment)
         self.state["execution_mode"] = "resting_limit"
         self._coverage_reports = {}
         self.save()
@@ -90,8 +113,9 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         return self.ledger(ticker).setdefault("resting_intents", {})
 
     def pending(self, ticker):
-        return any(i["status"] == "pending_ack" or i.get("cancel_requested")
-                   for i in self.intents(ticker).values())
+        return bool(self.ledger(ticker).get("pending")) or any(
+            i["status"] == "pending_ack" or i.get("cancel_requested")
+            for i in self.intents(ticker).values())
 
     def _validate(self, ticker, intent, row):
         sign = 1 if intent["side"] == "YES" else -1
@@ -137,6 +161,10 @@ class RestingManualExitWorker(ManualLimitExitWorker):
 
     def reconcile(self, ticker):
         ledger, unresolved = self.ledger(ticker), False
+        # Recover a stop IOC before considering any new exits. An ambiguous
+        # acknowledgement must never generate a second stop order.
+        if not self.transport._reconcile(ticker, ledger):
+            return False
         orders = primary_orders(self.client.all_orders(ticker), ticker)
         for cid, intent in self.intents(ticker).items():
             if intent["status"] in TERMINAL_ORDER_STATES:
@@ -248,6 +276,89 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 self.emit("MANUAL_CANCEL_UNCONFIRMED", ticker=ticker,
                           order_id=intent.get("order_id"), **failure_context(error))
 
+    def _stop_candidate(self, ticker, plans):
+        """Latch a per-fill stop when its own outcome bid falls 11c below entry."""
+        ledger = self.ledger(ticker)
+        armed = ledger.setdefault("stop_armed", {})
+        if not plans:
+            return None, None
+        market = self.client.market(ticker)
+        close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
+        if close.tzinfo is None:
+            raise ManualExitBlocked("Market close requires a timezone")
+        if market.get("status") not in {"active", "open"} or self.clock() >= close.timestamp():
+            return None, market
+        for fid, plan in sorted(plans.items()):
+            if fid in ledger.get("suppressed_fills", {}):
+                continue
+            side = "yes" if plan["sign"] > 0 else "no"
+            bid = number(market.get(side + "_bid_dollars"), "stop bid")
+            if not 0 <= bid <= 1:
+                raise ManualExitBlocked("Stop bid out of bounds")
+            entry = number(ledger["managed_fills"][fid]["cost"], "manual entry cost")
+            trigger = entry - self.stop_loss_increment
+            if fid not in armed and trigger >= 0 and bid <= trigger:
+                armed[fid] = {"entry": str(entry), "trigger": str(trigger),
+                              "armed_at": self.clock()}
+                self.save()  # Never forget a crossed stop during cancellation.
+                self.emit("MANUAL_STOP_ARMED", ticker=ticker, fill_id=fid,
+                          entry=str(entry), trigger=str(trigger), observed_bid=str(bid))
+            if fid in armed:
+                return (fid, plan, bid), market
+        return None, market
+
+    def _submit_stop(self, ticker, fid, plan, bid, market, reserved):
+        ledger = self.ledger(ticker)
+        if self.clock() < max(ledger.get("retry_after", 0), ledger.get("next_attempt_at", 0)):
+            return False
+        if not 0 < bid < 1:
+            return False  # No executable bid; retry next poll without a blind market order.
+        qty = quantity(plan["quantity"] - reserved[fid])
+        if not qty:
+            return False
+        close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00")).timestamp()
+        if self.clock() >= close:
+            return False
+        self.verify_snapshot(ticker)
+        snapshot = self._snapshots[ticker]
+        if (plan["sign"] * snapshot["held"] <= 0 or
+                qty + sum(reserved.values(), D(0)) + snapshot["external_reserved"] > abs(snapshot["held"])):
+            raise ManualExitBlocked("Stop exits exceed verified available inventory")
+        if self.dry_run:
+            self.emit("MANUAL_DRY_RUN_STOP", ticker=ticker, fill_id=fid,
+                      quantity=str(qty), observed_bid=str(bid))
+            return False
+        intent = {"client_id": "manualstop-" + str(uuid.uuid4()), "side": "YES" if plan["sign"] > 0 else "NO",
+                  "quantity": str(qty), "target": str(bid), "created_at": self.clock(),
+                  "purpose": "manual_stop_loss", "paired": False,
+                  "allocations": [{"fill_id": fid, "quantity": str(qty)}]}
+        ledger["pending"] = intent
+        self.save()  # Must survive a lost POST acknowledgement or restart.
+        if self.clock() >= close:
+            ledger.pop("pending")
+            self.save()
+            return False
+        try:
+            result = self.client.place_manual_stop(ticker, intent)
+        except RequestDeferred as error:
+            ledger.pop("pending")  # Proves no HTTP dispatch occurred.
+            self.transport.defer(ledger, error)
+            raise
+        except KalshiAPIError as error:
+            if error.status_code in {400, 401, 403, 404, 422, 429}:
+                ledger.pop("pending")  # Confirmed rejection only.
+                self.transport.defer(ledger, error)
+            raise
+        if not result.get("order_id") or result.get("client_order_id") != intent["client_id"]:
+            raise ManualExitBlocked("Stop order acknowledgement identity is missing/mismatched")
+        intent["order_id"] = result["order_id"]
+        intent["placement_receipt"] = result
+        self.save()
+        self.emit("MANUAL_STOP_SUBMITTED", ticker=ticker, fill_id=fid,
+                  order_id=intent["order_id"], quantity=str(qty), limit=str(bid),
+                  execution="reduce_only_ioc", fill_confirmed=False)
+        return True
+
     def maybe_submit(self, ticker, record, automatic_ledger):
         ledger = self.ledger(ticker)
         if ledger.get("window_closed") or self.pending(ticker) or automatic_ledger.get("pending"):
@@ -279,13 +390,26 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                               order_id=intent.get("order_id"), **failure_context(error))
                     raise
             return changed
+        # Monitor even inventory reserved by +5c sell orders. Release it
+        # before submitting a stop; never double-sell a reserved contract.
+        stop, stop_market = self._stop_candidate(ticker, plans)
+        if stop:
+            fid, plan, bid = stop
+            matching = [i for i in active if i["fill_id"] == fid]
+            if matching:
+                changed = False
+                for intent in matching:
+                    changed = self._cancel(ticker, intent, "stop_loss") or changed
+                return changed
+            return self._submit_stop(ticker, fid, plan, bid, stop_market, reserved)
         if self.clock() < ledger.get("retry_after", 0):
             return False
         # No quote/market lookup when every eligible fill is already reserved.
         # Keep all fresh inventory checks for an actual submission unchanged.
         candidates = [(fid, plan) for fid, plan in sorted(plans.items())
                       if fid not in ledger.get("suppressed_fills", {})
-                      and quantity(plan["quantity"] - reserved[fid])]
+                      and fid not in ledger.get("stop_armed", {})
+                       and quantity(plan["quantity"] - reserved[fid])]
         if not candidates:
             return False
         market = self.client.market(ticker)
