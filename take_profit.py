@@ -196,7 +196,9 @@ class TakeProfitMonitor:
             self.save()
         filled = Decimal(str(order.get("fill_count_fp", order.get("fill_count", "0"))))
         if filled > Decimal(intent.get("reported_fill", "0")):
-            event = "SETTLEMENT_CLOSE_FILL" if intent.get("purpose") == "settlement_switch" else "TP_FILL"
+            purpose = intent.get("purpose")
+            event = ("SETTLEMENT_CLOSE_FILL" if purpose == "settlement_switch"
+                     else "STOP_FILL" if purpose == "manual_stop_loss" else "TP_FILL")
             self.emit(event, ticker=ticker, order_id=order["order_id"],
                       cumulative_quantity=str(filled), side=intent["side"], target=intent["target"])
             intent["reported_fill"] = str(filled)
