@@ -128,3 +128,30 @@ def test_too_cheap_entry_is_reported_not_pretended_protected(tmp_path):
     assert report["sl_status"] == "unavailable"
     assert report["sl_trigger"] is None
     assert any(event == "MANUAL_PROTECTION_ALERT" for event, _ in events)
+
+
+def test_external_sell_without_bot_coverage_is_reported_as_unprotected(tmp_path):
+    e, service, _, events = setup(tmp_path)
+    e.buy(5, ".50")
+    external = e.make_order(sign=1, count=5, price=".70", action="sell")
+    assert service.run_once()
+    report = checks(events)[-1]
+    assert report["tp_status"] == "external_sell"
+    assert report["sl_status"] == "blocked_by_external_sell"
+    assert report["externally_reserved_quantity"] == "5"
+    assert report["tp_resting_quantity"] == "0"
+    assert len(e.sent) == 0
+    assert e.remote[external]["status"] == "resting"
+
+
+def test_partial_external_sell_is_not_claimed_stop_protected(tmp_path):
+    e, service, _, events = setup(tmp_path)
+    e.buy(5, ".50")
+    e.make_order(sign=1, count=2, price=".70", action="sell")
+    assert service.run_once()
+    report = checks(events)[-1]
+    assert report["tp_status"] == "active"
+    assert report["quantity"] == "3"
+    assert report["externally_reserved_quantity"] == "2"
+    assert report["sl_status"] == "partially_blocked"
+    assert len(e.sent) == 1 and e.sent[0]["count"] == "3"
