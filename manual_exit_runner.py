@@ -260,8 +260,18 @@ class ManualExitService:
                         try:
                             stage = "reconcile_orders"
                             if not self.worker.reconcile(ticker):
+                                # False means a durable order/stop acknowledgement,
+                                # cancel readback, or API cooldown is unresolved.
+                                # It does NOT prove that another verified TP is
+                                # unsafe. Retain all saved reservations and avoid
+                                # cancel/repost churn during exchange read lag.
+                                # No inventory read, new exit, or stop submission
+                                # may proceed until reconciliation succeeds.
                                 ok = False
-                                self.suspend(ticker)
+                                self.worker._plans.pop(ticker, None)
+                                self.worker._snapshots.pop(ticker, None)
+                                self.emit("MANUAL_RECONCILIATION_PENDING", ticker=ticker,
+                                          stage=stage, action="preserve_orders_no_new_sells")
                                 break
                             stage = "automatic_ownership"
                             record = self.read_entries()["markets"].get(ticker, {})
