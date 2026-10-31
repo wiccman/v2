@@ -24,6 +24,7 @@ from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked, Reconc
                                position, primary_orders, quantity, failure_context)
 from request_coordinator import RequestDeferred
 from resting_manual_exits import RestingExitOnlyClient, RestingManualExitWorker
+from manual_order_edits import ManualEditPending
 
 
 def flag(environ, name, default="false"):
@@ -44,6 +45,7 @@ class Settings:
     dry_run: bool
     execution_mode: str
     stop_loss_cents: D = D("11")
+    respect_manual_edits: bool = False
 
     @classmethod
     def read(cls, env, *, live=False):
@@ -77,7 +79,9 @@ class Settings:
         stop_cents = number(env.get("MANUAL_STOP_LOSS_CENTS", "11"), "stop loss cents")
         if not D(0) < stop_cents < 100 or stop_cents.quantize(D(".01")) != stop_cents:
             raise ValueError("MANUAL_STOP_LOSS_CENTS must be positive and below 100 with at most .01-cent precision")
-        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode, stop_cents)
+        respect_edits = flag(env, "MANUAL_EXIT_RESPECT_MANUAL_EDITS")
+        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode,
+                   stop_cents, respect_edits)
 
 
 class ExitOnlyClient(KalshiClient):
@@ -176,6 +180,7 @@ class ManualExitService:
         worker = RestingManualExitWorker if settings.execution_mode == "resting_limit" else ManualLimitExitWorker
         if settings.execution_mode == "resting_limit":
             options["stop_loss_cents"] = settings.stop_loss_cents
+            options["respect_manual_edits"] = settings.respect_manual_edits
         self.worker = worker(client, settings.manual_state,
             price_increment=settings.increment, series=settings.series, dry_run=settings.dry_run,
             emit=self.emit, **options)
@@ -307,6 +312,12 @@ class ManualExitService:
                                       stage=stage, **failure_context(error))
                     if not acted:
                         break
+            except ManualEditPending as error:
+                ok = False
+                self.worker._plans.pop(ticker, None)
+                self.worker._snapshots.pop(ticker, None)
+                self.emit("MANUAL_EDIT_RECHECK_PENDING", ticker=ticker, stage=stage,
+                          action="preserve_orders_no_new_sells", **failure_context(error))
             except Exception as error:
                 ok = False
                 if isinstance(error, (KalshiAPIError, RequestDeferred)):
@@ -331,6 +342,7 @@ def main(argv=None):
     settings = Settings.read(os.environ, live=args.live)
     print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
                       "increment_cents": str(settings.increment * 100),
+                      "respect_manual_edits": settings.respect_manual_edits,
                       "stop_loss_cents": str(settings.stop_loss_cents) if settings.execution_mode == "resting_limit" else None,
                       "series": settings.series,
                       "dry_run": settings.dry_run, "automatic_entries": False,

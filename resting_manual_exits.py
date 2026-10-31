@@ -19,6 +19,8 @@ from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked,
     number, primary_orders, quantity, round_target, failure_context)
 from request_coordinator import RequestDeferred
 from order_reconciliation import verified_exit_snapshot, terminal_cancel_receipt
+from manual_order_edits import (verified_manual_exit_snapshot, amendment_terms,
+                                ManualEditPending)
 
 
 class RestingExitOnlyClient(KalshiClient):
@@ -93,11 +95,16 @@ order, automatic entry, transfer, amend, or cancel-all call is never allowed.
 
 
 class RestingManualExitWorker(ManualLimitExitWorker):
-    def __init__(self, *args, stop_loss_cents=D("11"), **kwargs):
+    def __init__(self, *args, stop_loss_cents=D("11"), respect_manual_edits=False, **kwargs):
+        self.respect_manual_edits = bool(respect_manual_edits)
         self.stop_loss_increment = number(stop_loss_cents, "stop loss cents") / 100
         if not D(0) < self.stop_loss_increment < 1:
             raise ValueError("Manual stop loss must be between zero and one dollar")
         super().__init__(*args, **kwargs)
+        if self.state.get("manual_edit_policy") and not self.respect_manual_edits:
+            raise ManualExitBlocked("Manual edit policy cannot be silently disabled")
+        if self.respect_manual_edits:
+            self.state["manual_edit_policy"] = "respect_verified_v1"
         previous = self.state.get("stop_loss_increment")
         migration = None
         if previous is not None and number(previous, "saved stop loss") != self.stop_loss_increment:
@@ -144,7 +151,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
     def _validate(self, ticker, intent, row):
         sign = 1 if intent["side"] == "YES" else -1
         expected = D(intent["target"]) if sign > 0 else 1-D(intent["target"])
-        expected_qty = quantity(intent["quantity"])
+        expected_qty = quantity(intent.get("wire_initial_quantity", intent["quantity"]))
         # Never print a raw response or arbitrary string value. Invalid numeric
         # representations are reported as null, with the failed field named.
         try:
@@ -193,7 +200,10 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         for cid, intent in self.intents(ticker).items():
             if intent["status"] in TERMINAL_ORDER_STATES:
                 continue
-            matches = [r for r in orders if r.get("client_order_id") == cid]
+            if self.respect_manual_edits and intent.get("order_id"):
+                matches = [r for r in orders if r.get("order_id") == intent["order_id"]]
+            else:
+                matches = [r for r in orders if r.get("client_order_id") == intent["client_id"]]
             if len(matches) > 1:
                 raise ManualExitBlocked("Multiple orders match one saved client ID")
             if not matches and intent.get("order_id"):
@@ -206,7 +216,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 unresolved = True
                 continue  # Absence/404 never proves rejection or cancellation.
             row = matches[0]
-            verified = verified_exit_snapshot(self, ticker, intent, row)
+            verify = verified_manual_exit_snapshot if self.respect_manual_edits else verified_exit_snapshot
+            verified = verify(self, ticker, intent, row)
             if verified is None:
                 unresolved = True
                 continue
@@ -239,7 +250,13 @@ class RestingManualExitWorker(ManualLimitExitWorker):
     def owns_resting_order(self, ticker, row):
         for intent in self.intents(ticker).values():
             if intent.get("order_id") == row["order_id"]:
-                status, filled, remaining = self._validate(ticker, intent, row)
+                try:
+                    status, filled, remaining = self._validate(ticker, intent, row)
+                except ManualExitBlocked:
+                    if not self.respect_manual_edits:
+                        raise
+                    amendment_terms(ticker, intent, row)
+                    raise ManualEditPending("Manual edit arrived during inventory reconciliation")
                 if (status != intent["status"] or filled != D(intent["filled"])
                         or remaining != D(intent["remaining"])):
                     raise ReconciliationPending("Resting reservation changed during reconciliation")
@@ -394,10 +411,13 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 sl = "partially_blocked"
             else:
                 sl = "monitoring"
+            amended = [i for i in active if i["fill_id"] == fid and i.get("manual_override")]
             report = {"fill_id": fid, "side": "YES" if plan["sign"] > 0 else "NO",
                       "entry": str(entry), "quantity": str(expected),
                       "externally_reserved_quantity": str(external_qty),
-                      "tp_target": str(plan["raw_target"]),
+                      "tp_target": (amended[0]["target"] if len(amended) == 1
+                                    else str(plan["raw_target"])),
+                      "tp_manual_override": fid in ledger.get("manual_tp_overrides", {}),
                       "tp_status": tp, "tp_resting_quantity": str(actual),
                       "sl_trigger": str(stop_trigger) if stop_trigger > 0 else None,
                       "sl_status": sl, "sl_order_type": "local_bid_monitor"}
@@ -526,7 +546,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         for intent in active:
             plan = plans.get(intent["fill_id"])
             target_mismatch = False
-            if plan and stop_market and stop_market.get("status") in {"active", "open"}:
+            if (plan and not intent.get("manual_override") and stop_market
+                    and stop_market.get("status") in {"active", "open"}):
                 try:
                     expected = round_target(plan["raw_target"],
                                             stop_market.get("price_ranges"), plan["sign"])
@@ -570,6 +591,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         candidates = [(fid, plan) for fid, plan in sorted(plans.items())
                       if fid not in ledger.get("suppressed_fills", {})
                       and fid not in ledger.get("stop_armed", {})
+                      and fid not in ledger.get("manual_tp_overrides", {})
                        and quantity(plan["quantity"] - reserved[fid])]
         if not candidates:
             return False

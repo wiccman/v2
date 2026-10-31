@@ -146,9 +146,10 @@ def terminal_cancel_receipt(ticker, intent, row):
             or row.get("client_order_id") != intent["client_id"]
             or row.get("ticker") != ticker or row.get("subaccount_number", 0) != 0
             or row.get("type") != "limit" or direction(row) != -sign
-            or initial != quantity(intent["quantity"]) or remaining != 0
-            or not quantity(intent.get("filled", "0")) <= filled <= initial
-            or (status == "executed" and filled != initial)):
+            or initial != quantity(intent.get("wire_initial_quantity", intent["quantity"]))
+            or remaining != 0
+            or not quantity(intent.get("filled", "0")) <= filled <= quantity(intent["quantity"])
+            or (status == "executed" and filled != quantity(intent["quantity"]))):
         raise ManualExitBlocked("Terminal cancellation evidence is inconsistent")
     return {"order_id": row["order_id"], "client_order_id": row["client_order_id"],
             "already_terminal": True}
