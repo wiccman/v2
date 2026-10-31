@@ -100,6 +100,9 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         self.state["stop_loss_increment"] = str(self.stop_loss_increment)
         self.state["execution_mode"] = "resting_limit"
         self._coverage_reports = {}
+        self._protection_reports = {}
+        self._protection_cycles = defaultdict(int)
+        self._stop_checked_cycle = {}
         self.save()
 
     def _validate_execution_mode(self):
@@ -276,8 +279,84 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 self.emit("MANUAL_CANCEL_UNCONFIRMED", ticker=ticker,
                           order_id=intent.get("order_id"), **failure_context(error))
 
+    def begin_protection_check(self, ticker):
+        """A cycle only counts as monitored after a *fresh* valid market quote."""
+        self._protection_cycles[ticker] += 1
+
+    def report_protection(self, ticker):
+        """Audit actual exchange TP reservations and the local SL monitor for open fills.
+
+        Every managed fill with available, unreserved inventory has a distinct
+        TP and SL state. A stop is software-monitored, never claimed to be a
+        resting exchange order. Reconcile validates each TP's remote identity,
+        quantity, direction and price before it can count as active.
+        """
+        ledger = self.ledger(ticker)
+        plans = {p["fill_id"]: p for p in self._plans.get(ticker, [])}
+        active = [i for i in self.intents(ticker).values()
+                  if i["status"] in ACTIVE_ORDER_STATES]
+        reservations = defaultdict(lambda: D(0))
+        pending = set()
+        canceling = set()
+        for intent in self.intents(ticker).values():
+            fid = intent["fill_id"]
+            if intent.get("cancel_requested"):
+                canceling.add(fid)
+            if intent["status"] == "pending_ack":
+                pending.add(fid)
+            if intent["status"] in ACTIVE_ORDER_STATES:
+                reservations[fid] += quantity(intent["remaining"])
+        stop_verified = (self._stop_checked_cycle.get(ticker) ==
+                         self._protection_cycles[ticker])
+        old = {fid for t, fid in self._protection_reports if t == ticker}
+        current = set()
+        for fid, plan in sorted(plans.items()):
+            current.add(fid)
+            entry = number(ledger["managed_fills"][fid]["cost"], "entry cost")
+            stop_trigger = entry - self.stop_loss_increment
+            expected = plan["quantity"]
+            actual = reservations[fid]
+            if fid in canceling:
+                tp = "canceling"
+            elif fid in pending:
+                tp = "submitting"
+            elif fid in ledger.get("suppressed_fills", {}):
+                tp = "suppressed"
+            elif actual == expected:
+                tp = "active"
+            elif actual == 0:
+                tp = "missing"
+            elif actual < expected:
+                tp = "partial"
+            else:
+                tp = "over_reserved"
+            if fid in ledger.get("stop_armed", {}):
+                sl = "triggered"
+            elif stop_trigger <= 0:
+                sl = "unavailable"  # No positive sell price 11c below entry.
+            elif stop_verified:
+                sl = "monitoring"
+            else:
+                sl = "unverified"
+            report = {"fill_id": fid, "side": "YES" if plan["sign"] > 0 else "NO",
+                      "entry": str(entry), "quantity": str(expected),
+                      "tp_target": str(plan["raw_target"]),
+                      "tp_status": tp, "tp_resting_quantity": str(actual),
+                      "sl_trigger": str(stop_trigger) if stop_trigger > 0 else None,
+                      "sl_status": sl, "sl_order_type": "local_bid_monitor"}
+            key = (ticker, fid)
+            if self._protection_reports.get(key) != report:
+                self._protection_reports[key] = report
+                self.emit("MANUAL_PROTECTION_CHECK", ticker=ticker, **report)
+                if (tp in {"missing", "partial", "suppressed", "over_reserved"} or
+                        sl in {"unverified", "unavailable"}):
+                    self.emit("MANUAL_PROTECTION_ALERT", ticker=ticker, **report)
+        for fid in old - current:
+            self._protection_reports.pop((ticker, fid), None)
+            self.emit("MANUAL_PROTECTION_CLOSED", ticker=ticker, fill_id=fid)
+
     def _stop_candidate(self, ticker, plans):
-        """Latch a per-fill stop when its own outcome bid falls 11c below entry."""
+        """Check every open fill against its own downside trigger on each pass."""
         ledger = self.ledger(ticker)
         armed = ledger.setdefault("stop_armed", {})
         if not plans:
@@ -288,6 +367,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             raise ManualExitBlocked("Market close requires a timezone")
         if market.get("status") not in {"active", "open"} or self.clock() >= close.timestamp():
             return None, market
+        candidate = None
         for fid, plan in sorted(plans.items()):
             if fid in ledger.get("suppressed_fills", {}):
                 continue
@@ -297,15 +377,16 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 raise ManualExitBlocked("Stop bid out of bounds")
             entry = number(ledger["managed_fills"][fid]["cost"], "manual entry cost")
             trigger = entry - self.stop_loss_increment
-            if fid not in armed and trigger >= 0 and bid <= trigger:
+            if fid not in armed and trigger > 0 and bid <= trigger:
                 armed[fid] = {"entry": str(entry), "trigger": str(trigger),
                               "armed_at": self.clock()}
                 self.save()  # Never forget a crossed stop during cancellation.
                 self.emit("MANUAL_STOP_ARMED", ticker=ticker, fill_id=fid,
                           entry=str(entry), trigger=str(trigger), observed_bid=str(bid))
-            if fid in armed:
-                return (fid, plan, bid), market
-        return None, market
+            if fid in armed and candidate is None:
+                candidate = (fid, plan, bid)
+        self._stop_checked_cycle[ticker] = self._protection_cycles[ticker]
+        return candidate, market
 
     def _submit_stop(self, ticker, fid, plan, bid, market, reserved):
         ledger = self.ledger(ticker)
@@ -377,6 +458,10 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             if (not plan or reserved[intent["fill_id"]] > plan["quantity"]
                     or intent["side"] != ("YES" if plan["sign"] > 0 else "NO")):
                 cancel.append(intent)
+        # Check the stop on every eligible pass, even when we need to cancel
+        # invalid TP reservations. This prevents a TP repair from delaying the
+        # downside trigger or marking the stop as verified without a quote.
+        stop, stop_market = self._stop_candidate(ticker, plans)
         if cancel:
             changed = False
             for intent in cancel:
@@ -392,7 +477,6 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             return changed
         # Monitor even inventory reserved by +5c sell orders. Release it
         # before submitting a stop; never double-sell a reserved contract.
-        stop, stop_market = self._stop_candidate(ticker, plans)
         if stop:
             fid, plan, bid = stop
             matching = [i for i in active if i["fill_id"] == fid]
