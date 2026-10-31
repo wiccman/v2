@@ -101,6 +101,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         self.state["execution_mode"] = "resting_limit"
         self._coverage_reports = {}
         self._protection_reports = {}
+        self._protection_report_at = {}
         self._protection_cycles = defaultdict(int)
         self._stop_checked_cycle = {}
         self.save()
@@ -345,14 +346,18 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                       "sl_trigger": str(stop_trigger) if stop_trigger > 0 else None,
                       "sl_status": sl, "sl_order_type": "local_bid_monitor"}
             key = (ticker, fid)
-            if self._protection_reports.get(key) != report:
+            now = self.clock()
+            if (self._protection_reports.get(key) != report or
+                    now - self._protection_report_at.get(key, float("-inf")) >= 30):
                 self._protection_reports[key] = report
+                self._protection_report_at[key] = now
                 self.emit("MANUAL_PROTECTION_CHECK", ticker=ticker, **report)
                 if (tp in {"missing", "partial", "suppressed", "over_reserved"} or
                         sl in {"unverified", "unavailable"}):
                     self.emit("MANUAL_PROTECTION_ALERT", ticker=ticker, **report)
         for fid in old - current:
             self._protection_reports.pop((ticker, fid), None)
+            self._protection_report_at.pop((ticker, fid), None)
             self.emit("MANUAL_PROTECTION_CLOSED", ticker=ticker, fill_id=fid)
 
     def _stop_candidate(self, ticker, plans):
@@ -369,8 +374,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             return None, market
         candidate = None
         for fid, plan in sorted(plans.items()):
-            if fid in ledger.get("suppressed_fills", {}):
-                continue
+            # Canceling one's TP suppresses automatic TP reposting, but does
+            # not silently disable the independently configured stop monitor.
             side = "yes" if plan["sign"] > 0 else "no"
             bid = number(market.get(side + "_bid_dollars"), "stop bid")
             if not 0 <= bid <= 1:
@@ -452,16 +457,26 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         # Plans exclude external orders' FIFO coverage. Retire overlapping or
         # oversized bot reservations before placing a replacement, including a
         # manual close to zero or reversal. Never cancel a user's own order.
+        # The quote is checked for every eligible open fill, even when its
+        # entire quantity is already reserved by a take-profit sell.
+        stop, stop_market = self._stop_candidate(ticker, plans)
         cancel = []
         for intent in active:
             plan = plans.get(intent["fill_id"])
+            target_mismatch = False
+            if plan and stop_market and stop_market.get("status") in {"active", "open"}:
+                try:
+                    expected = round_target(plan["raw_target"],
+                                            stop_market.get("price_ranges"), plan["sign"])
+                except TargetUnreachable:
+                    # Existing exchange order is not blindly replaced by an
+                    # arbitrary valid price when the target is out of range.
+                    expected = number(intent["target"], "existing target")
+                target_mismatch = number(intent["target"], "current target") != expected
             if (not plan or reserved[intent["fill_id"]] > plan["quantity"]
-                    or intent["side"] != ("YES" if plan["sign"] > 0 else "NO")):
+                    or intent["side"] != ("YES" if plan["sign"] > 0 else "NO")
+                    or target_mismatch):
                 cancel.append(intent)
-        # Check the stop on every eligible pass, even when we need to cancel
-        # invalid TP reservations. This prevents a TP repair from delaying the
-        # downside trigger or marking the stop as verified without a quote.
-        stop, stop_market = self._stop_candidate(ticker, plans)
         if cancel:
             changed = False
             for intent in cancel:
