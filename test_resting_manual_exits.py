@@ -63,7 +63,8 @@ def setup(tmp_path, *, dry_run=False):
     path = tmp_path / "state.json"
     path.write_text('{"markets": {}}')
     path.with_name("state_take_profit.json").write_text('{"markets": {}}')
-    config = replace(Settings.read({"STATE_PATH": str(path)}), dry_run=dry_run)
+    config = replace(Settings.read({"STATE_PATH": str(path)}), dry_run=dry_run,
+                     stop_loss_cents=D("99"))  # Legacy tests isolate +5c order behavior.
     events = []
     service = ManualExitService(e, config, clock=e.clock,
         emit=lambda event, **data: events.append((event, data)))
