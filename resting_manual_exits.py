@@ -18,6 +18,7 @@ from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked,
     TargetUnreachable, ACTIVE_ORDER_STATES, TERMINAL_ORDER_STATES, direction,
     number, primary_orders, quantity, round_target, failure_context)
 from request_coordinator import RequestDeferred
+from order_reconciliation import verified_exit_snapshot, terminal_cancel_receipt
 
 
 class RestingExitOnlyClient(KalshiClient):
@@ -84,6 +85,9 @@ order, automatic entry, transfer, amend, or cancel-all call is never allowed.
         if (row.get("client_order_id") != intent["client_id"] or row.get("ticker") != ticker
                 or row.get("subaccount_number", 0) != 0):
             raise ManualExitBlocked("Cancellation ownership could not be verified")
+        receipt = terminal_cancel_receipt(ticker, intent, row)
+        if receipt is not None:
+            return receipt  # No DELETE; reconciliation still verifies actual fills.
         return self._write("DELETE", "/portfolio/events/orders/" + oid,
                            params={"market_ticker": ticker, "exchange_index": -1})
 
@@ -186,7 +190,11 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 unresolved = True
                 continue  # Absence/404 never proves rejection or cancellation.
             row = matches[0]
-            status, filled, remaining = self._validate(ticker, intent, row)
+            verified = verified_exit_snapshot(self, ticker, intent, row)
+            if verified is None:
+                unresolved = True
+                continue
+            row, (status, filled, remaining) = verified
             previous = D(intent.get("filled", "0"))
             cancel_requested = intent.get("cancel_requested")
             intent.update(order_id=row["order_id"], status=status,
@@ -262,8 +270,10 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             return False
         intent.update(cancel_requested=reason, cancel_retry_at=self.clock() + 5)
         self.save()  # A timeout leaves a durable cancellation to reconcile.
-        self.client.cancel_manual_exit(ticker, intent)
-        self.emit("MANUAL_CANCEL_REQUESTED", ticker=ticker, order_id=intent["order_id"], reason=reason)
+        result = self.client.cancel_manual_exit(ticker, intent)
+        event = ("MANUAL_CANCEL_NOT_NEEDED" if isinstance(result, dict) and
+                 result.get("already_terminal") else "MANUAL_CANCEL_REQUESTED")
+        self.emit(event, ticker=ticker, order_id=intent["order_id"], reason=reason)
         return True  # Not a confirmed cancellation; never reuse its size yet.
 
     def suspend(self, ticker):
