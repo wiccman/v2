@@ -55,6 +55,9 @@ def test_stop_cancels_resting_profit_then_exits_only_owned_contracts(tmp_path, s
     assert stop[0]["price"] == ("0.3000" if sign == 1 else "0.7000")
     assert any(event == "MANUAL_STOP_ARMED" for event, _ in events)
     assert service.run_once() and len(e.sent) == 2
+    assert any(event == "MANUAL_STOP_FILL" and data["cumulative_quantity"] == "10"
+               for event, data in events)
+    assert not any(event == "MANUAL_TP_FILL" for event, _ in events)
 
 
 def test_fallen_quote_before_first_exit_skips_take_profit(tmp_path):
