@@ -196,7 +196,16 @@ class ManualExitService:
             # New positions and confirmed live markets precede historical cleanup.
             tickers = sorted(self.worker.discover(), key=lambda ticker:
                              (ticker in known, ticker not in self._live_tickers, ticker))
-        except Exception:
+        except Exception as error:
+            # A shared API cooldown (or 429 on the discovery request) is not
+            # evidence of lost ownership. Do not turn a temporary read outage
+            # into a bulk cancellation of resting take-profits across the
+            # durable journal, including historical markets. Keep every
+            # reservation intact and retry discovery after the API recovers.
+            if (isinstance(error, RequestDeferred) or
+                    (isinstance(error, KalshiAPIError) and error.status_code == 429)):
+                self.emit("MANUAL_DISCOVERY_DEFERRED", **failure_context(error))
+                raise
             for ticker in self.worker.state["markets"]:
                 self.suspend(ticker)
             raise
