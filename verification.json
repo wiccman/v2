@@ -1,0 +1,43 @@
+{
+  "base_commit": "8ce6bb29e16858083ab40b88fdc76d767163c8f1",
+  "targeted_passed": 354,
+  "new_regression_cases_passed": 39,
+  "baseline_full": {
+    "passed": 1425,
+    "failed": 422
+  },
+  "patched_full": {
+    "passed": 1464,
+    "failed": 422
+  },
+  "new_failures": [],
+  "removed_failures": [],
+  "github_write": "blocked; no commit created",
+  "deployed": false,
+  "files": {
+    "manual_order_edits.py": {
+      "sha256": "a824c4eb2b052d37fd479710700077b293c27928467016bb12d347e915a62b1b",
+      "git_blob_sha": "ba277445dc7c6fc1a8b92207f22f64f248eb96dd"
+    },
+    "test_manual_order_edits.py": {
+      "sha256": "20be8f4290a32432f1cbd24c1a42df2fe6c7bcc5cc82d7f9375f0d1873945cdd",
+      "git_blob_sha": "071087c1fd8b6064eb4a436cdc446780a4b5a1fa"
+    },
+    "resting_manual_exits.py": {
+      "sha256": "cd003258e7afcea7608d691204bb0657fac8983521cd1000aae1195fce169248",
+      "git_blob_sha": "9ebd1327a1e36655456ed719b141c438c8176d26"
+    },
+    "manual_exit_runner.py": {
+      "sha256": "1d3cf764c42de1fd1f424391bcddb10a6fbc0625b745b7b9a00008d12796229b",
+      "git_blob_sha": "3f69ebe41aed62e46b5fc9db526921525f0478f3"
+    },
+    "order_reconciliation.py": {
+      "sha256": "61a2ce35155c866039c5038a0826b237db91234e4b11add2f1104b996dc1ccdb",
+      "git_blob_sha": "f41bf7e0d745ded5032353bf92a96d0be741e946"
+    },
+    ".github/workflows/hybrid-tests.yml": {
+      "sha256": "3bd454c45dcb9d54cd79beb0626f34deba6dc2646beb9dbdf03a05a064e0be85",
+      "git_blob_sha": "e9336659996307bca54d9ccbdd21dfed76e619b1"
+    }
+  }
+}

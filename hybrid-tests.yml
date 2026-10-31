@@ -1,0 +1,56 @@
+name: Hybrid offline tests
+
+on:
+  push:
+    branches: [feature/manual-limit-exit-worker]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  targeted:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Targeted offline lifecycle checks
+        run: python tools/run_offline_tests.py -q test_existing_sell_coverage.py test_resting_manual_exits.py test_manual_stop_loss.py test_manual_stop_policy_migration.py test_manual_order_edits.py test_manual_protection_audit.py test_order_price_recovery.py test_discovery_throttle_safety.py test_pending_reservation_guard.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py --junitxml=hybrid-targeted-results.xml
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hybrid-targeted-results
+          retention-days: 7
+          path: hybrid-targeted-results.xml
+  full-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Full offline suite (pre-existing failures remain visible)
+        run: python tools/run_offline_tests.py -q --junitxml=hybrid-full-results.xml
+      - name: Archive tested source
+        if: always()
+        run: git archive --format=tar.gz --output=/tmp/hybrid-tested-source.tar.gz HEAD
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hybrid-offline-results
+          retention-days: 7
+          path: |
+            hybrid-full-results.xml
+            /tmp/hybrid-tested-source.tar.gz

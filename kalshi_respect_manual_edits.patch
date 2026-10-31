@@ -1,0 +1,551 @@
+--- /dev/null
++++ b/manual_order_edits.py
+@@ -0,0 +1,126 @@
++"""Opt-in read-only adoption of operator amendments to a known exit order.
++
++Kalshi allows amendments to price/count and client_order_id. We anchor ownership
++in the exchange order_id already saved before any edit, never a price or prefix.
++This module never sends an amend/cancel/order request. A changed order is read
++back, bounded by its original fill allocation and checked against actual fills
++before its new terms are saved. Unknown identities remain fail-closed.
++"""
++from __future__ import annotations
++
++import copy
++from decimal import Decimal as D
++
++from kalshi import KalshiAPIError
++from manual_limit_exits import (
++    ACTIVE_ORDER_STATES, TERMINAL_ORDER_STATES, ManualExitBlocked,
++    ReconciliationPending, direction, number, quantity,
++)
++from order_reconciliation import _verify_terminal_fills
++
++
++class ManualEditPending(ReconciliationPending):
++    """An identifiable amendment needs a fresh read; preserve reservations."""
++
++
++def amendment_terms(ticker, intent, row):
++    """Validate immutable identity and bounded mutable terms without saving."""
++    oid = intent.get("order_id")
++    sign = 1 if intent["side"] == "YES" else -1
++    if (not isinstance(oid, str) or not oid or row.get("order_id") != oid
++            or row.get("ticker") != ticker or row.get("subaccount_number", 0) != 0
++            or row.get("type") != "limit" or direction(row) != -sign):
++        raise ManualExitBlocked("Manual amendment order identity is inconsistent")
++    cid = row.get("client_order_id")
++    if not isinstance(cid, str) or not cid or len(cid) > 128:
++        raise ManualExitBlocked("Manual amendment client identity is invalid")
++    wire = number(row.get("yes_price_dollars"), "manual amendment price")
++    if not 0 < wire < 1 or wire.quantize(D(".0001")) != wire:
++        raise ManualExitBlocked("Invalid manual amendment price")
++    if row.get("no_price_dollars") is not None:
++        if number(row["no_price_dollars"], "opposite amendment price") + wire != 1:
++            raise ManualExitBlocked("Conflicting manual amendment prices")
++    initial = quantity(row.get("initial_count_fp", row.get("initial_count")))
++    filled = quantity(row.get("fill_count_fp", row.get("fill_count")))
++    remaining = quantity(row.get("remaining_count_fp", row.get("remaining_count")))
++    status = str(row.get("status", "")).lower()
++    allocation = sum((quantity(a["quantity"]) for a in intent["allocations"]), D(0))
++    cap = quantity(intent.get("original_quantity", intent["quantity"]))
++    if (status not in ACTIVE_ORDER_STATES | TERMINAL_ORDER_STATES or not initial
++            or not cap or cap > allocation or initial > cap
++            or filled < quantity(intent.get("filled", "0"))
++            or filled + remaining > initial
++            or (status in TERMINAL_ORDER_STATES and remaining)):
++        raise ManualExitBlocked("Manual amendment exceeds allocated inventory or has invalid counts")
++    # Decrease can retain the original initial_count. The effective max is the
++    # already-filled quantity plus the desired outstanding quantity, not a delta.
++    if status in ACTIVE_ORDER_STATES:
++        effective = filled + remaining
++        if not remaining:
++            raise ManualEditPending("Active amended order has no remaining quantity yet")
++    elif status == "executed":
++        effective = filled
++        if not effective:
++            raise ManualExitBlocked("Executed amended order has no verified execution")
++    else:
++        effective = min(initial, quantity(intent["quantity"]))
++        if filled > effective:
++            effective = filled
++    return {"target": str(wire if sign > 0 else 1-wire),
++            "client_id": cid, "quantity": str(effective),
++            "wire_initial_quantity": str(initial)}, (status, filled, remaining)
++
++
++def verified_manual_exit_snapshot(worker, ticker, intent, row):
++    """Preserve valid edits; no cancellation or default-target restoration."""
++    try:
++        return row, worker._validate(ticker, intent, row)
++    except ManualExitBlocked:
++        # Before requesting a refresh, refuse changed immutable identity,
++        # over-allocation, missing price data and contradictory counts.
++        amendment_terms(ticker, intent, row)
++    try:
++        fresh = worker.client.order(intent["order_id"], ticker)
++    except KalshiAPIError as error:
++        if error.status_code != 404:
++            raise
++        worker.emit("MANUAL_EDIT_RECHECK_PENDING", ticker=ticker,
++                    order_id=intent["order_id"])
++        return None  # A 404 never releases a reservation or permits a new sell.
++    try:
++        return fresh, worker._validate(ticker, intent, fresh)
++    except ManualExitBlocked:
++        terms, state = amendment_terms(ticker, intent, fresh)
++    try:
++        _verify_terminal_fills(worker, ticker, intent, fresh, state[1])
++    except ReconciliationPending as error:
++        raise ManualEditPending(str(error)) from error
++    updated = copy.deepcopy(intent)
++    updated.setdefault("original_target", intent["target"])
++    updated.setdefault("original_quantity", intent["quantity"])
++    updated.update(terms, manual_override=True)
++    # Full validation is still required; the order's identity/direction/counts
++    # are not bypassed by enabling this policy.
++    worker._validate(ticker, updated, fresh)
++    previous = copy.deepcopy(intent)
++    ledger = worker.ledger(ticker)
++    overrides_before = copy.deepcopy(ledger.get("manual_tp_overrides", {}))
++    overrides = ledger.setdefault("manual_tp_overrides", {})
++    overrides[intent["fill_id"]] = {"reason": "operator_amended_existing_order",
++                                    "order_id": intent["order_id"]}
++    intent.clear()
++    intent.update(updated)
++    try:
++        worker.save()
++    except Exception:
++        intent.clear()
++        intent.update(previous)
++        ledger["manual_tp_overrides"] = overrides_before
++        raise
++    worker.emit("MANUAL_ORDER_EDIT_ADOPTED", ticker=ticker,
++                order_id=intent["order_id"], fill_id=intent["fill_id"],
++                previous_target=previous["target"], target=intent["target"],
++                previous_quantity=previous["quantity"], quantity=intent["quantity"],
++                remaining=str(state[2]), fills_verified=True,
++                default_tp_repost_suppressed=True)
++    return fresh, state
+--- /dev/null
++++ b/test_manual_order_edits.py
+@@ -0,0 +1,226 @@
++"""Operator amendments must not be undone, duplicated, or mistaken for fills."""
++import copy
++from dataclasses import replace
++from decimal import Decimal as D
++
++import pytest
++
++from kalshi import KalshiAPIError
++from manual_exit_runner import ManualExitService, Settings
++from manual_limit_exits import ManualExitBlocked
++from manual_order_edits import verified_manual_exit_snapshot, amendment_terms
++from test_manual_limit_exits import T
++from test_manual_stop_loss import setup
++from test_order_price_recovery import reprice
++
++
++def opened(tmp_path, sign=1):
++    e, old, config, events = setup(tmp_path)
++    config = replace(config, stop_loss_cents=D('20'), respect_manual_edits=True)
++    s = ManualExitService(e, config, clock=e.clock,
++                         emit=lambda ev, **kw: events.append((ev, kw)))
++    e.buy(10, '.60', sign)
++    e.bid = e.no_bid = D('.59')
++    assert s.run_once(), events
++    intent = next(iter(s.worker.intents(T).values()))
++    return e, s, config, events, intent, intent['order_id']
++
++
++def shrink(e, oid, remaining, keep_initial=False):
++    row = e.remote[oid]
++    row['remaining_count_fp'] = str(remaining)
++    if not keep_initial:
++        row['initial_count_fp'] = str(D(str(remaining)) + D(row['fill_count_fp']))
++
++
++@pytest.mark.parametrize('sign', [1, -1])
++@pytest.mark.parametrize('price', ['.61', '.70', '.6420'])
++def test_manual_prices_survive_poll_and_restart(tmp_path, sign, price):
++    e, s, config, events, intent, oid = opened(tmp_path, sign)
++    reprice(e, oid, price)
++    assert s.run_once(), events
++    assert D(intent['target']) == D(price) and intent['manual_override']
++    assert not e.cancelled and len(e.sent) == 1
++    assert s.run_once() and not e.cancelled and len(e.sent) == 1
++    restarted = ManualExitService(e, config, clock=e.clock, emit=lambda *a, **k: None)
++    assert restarted.run_once() and len(e.sent) == 1 and not e.cancelled
++    assert any(ev == 'MANUAL_ORDER_EDIT_ADOPTED' for ev, _ in events)
++    report = [r for ev,r in events if ev == 'MANUAL_PROTECTION_CHECK'][-1]
++    assert D(report['tp_target']) == D(price)
++    assert report['tp_manual_override'] and report['sl_trigger'] == '0.40'
++
++
++@pytest.mark.parametrize('sign', [1, -1])
++@pytest.mark.parametrize('keep_initial', [False, True])
++def test_size_reduction_stays_reduced_and_stop_covers_remainder(tmp_path, sign, keep_initial):
++    e, s, _, events, intent, oid = opened(tmp_path, sign)
++    shrink(e, oid, 4, keep_initial)
++    assert s.run_once(), events
++    assert intent['quantity'] == '4' and intent['remaining'] == '4'
++    assert len(e.sent) == 1 and not e.cancelled
++    e.fill(oid, 4, '.65')
++    assert s.run_once(), events
++    assert e.held[T] == sign*6 and len(e.sent) == 1
++    e.bid = e.no_bid = D('.40')
++    assert s.run_once(), events
++    assert e.held[T] == 0
++    assert len(e.sent) == 2 and e.sent[-1]['count'] == '6'
++    assert e.sent[-1]['reduce_only'] is True
++
++
++@pytest.mark.parametrize('sign', [1, -1])
++def test_partial_fill_then_price_count_and_client_id_amendment(tmp_path, sign):
++    e, s, _, events, intent, oid = opened(tmp_path, sign)
++    e.fill(oid, 3, '.65')
++    assert s.run_once()
++    reprice(e, oid, '.64')
++    shrink(e, oid, 4)
++    e.remote[oid]['client_order_id'] = 'app-modified-id'
++    assert s.run_once(), events
++    assert intent['quantity'] == '7' and intent['filled'] == '3'
++    assert intent['remaining'] == '4' and intent['client_id'] == 'app-modified-id'
++    assert not e.cancelled and len(e.sent) == 1
++    e.bid = e.no_bid = D('.40')
++    assert s.run_once(), events
++    assert e.cancelled == [oid] and e.sent[-1]['count'] == '7'
++    assert e.held[T] == 0
++
++
++def test_can_increase_back_only_within_original_allocation(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    shrink(e, oid, 4)
++    assert s.run_once(), events
++    shrink(e, oid, 10)
++    assert s.run_once(), events
++    assert intent['quantity'] == '10' and len(e.sent) == 1 and not e.cancelled
++
++
++def test_canceling_manual_edited_tp_does_not_repost(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    reprice(e, oid, '.70')
++    assert s.run_once()
++    e.request('DELETE', '/portfolio/events/orders/' + oid)
++    assert s.run_once(), events
++    assert len(e.sent) == 1 and e.cancelled == [oid]
++    e.bid = D('.40')
++    assert s.run_once(), events
++    assert e.held[T] == 0 and len(e.sent) == 2
++
++
++def test_new_buy_keeps_default_tp_after_an_existing_order_override(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    reprice(e, oid, '.70')
++    assert s.run_once()
++    e.buy(2, '.60'); e.clock_value += 2
++    assert s.run_once(), events
++    assert len(e.sent) == 2 and e.sent[-1]['price'] == '0.6500'
++    assert e.remote[oid]['yes_price_dollars'] == '0.70'
++    assert not e.cancelled
++
++
++def test_unknown_exact_order_keeps_reservation_and_never_duplicates(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    reprice(e, oid, '.70')
++    def missing(*a, **k): raise KalshiAPIError(404, 'not found')
++    e.order = missing
++    assert not s.run_once()
++    assert not s.run_once()
++    assert len(e.sent) == 1 and not e.cancelled
++    assert intent['target'] == '0.65'
++
++
++def test_delayed_amended_fill_does_not_cancel_or_repost(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    reprice(e, oid, '.64')
++    fid = e.fill(oid, 3, '.64'); e.hidden_fills.add(fid)
++    assert not s.run_once()
++    assert not e.cancelled and len(e.sent) == 1
++    e.hidden_fills.clear()
++    assert s.run_once(), events
++    assert intent['filled'] == '3' and intent['remaining'] == '7'
++    assert not e.cancelled and len(e.sent) == 1
++
++
++@pytest.mark.parametrize('sign', [1, -1])
++def test_terminal_edited_order_verified_without_cancel(tmp_path, sign):
++    e, s, _, events, intent, oid = opened(tmp_path, sign)
++    reprice(e, oid, '.62'); e.fill(oid, 10, '.62')
++    assert s.run_once(), events
++    assert intent['status'] == 'executed' and e.held[T] == 0
++    assert not e.cancelled and len(e.sent) == 1
++
++
++def test_manual_edit_during_observe_refreshes_instead_of_canceling(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    observe = s.worker.observe
++    done = []
++    def edit_then_observe(*args):
++        if not done:
++            done.append(True); reprice(e, oid, '.63')
++        return observe(*args)
++    s.worker.observe = edit_then_observe
++    assert s.run_once(), events
++    assert intent['target'] == '0.63' and not e.cancelled and len(e.sent) == 1
++
++
++def test_repeated_inflight_amendments_preserve_orders_and_block_new_writes(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    observe = s.worker.observe; prices = iter(['.63', '.62', '.61'])
++    def edit_every_observe(*args):
++        reprice(e, oid, next(prices))
++        return observe(*args)
++    s.worker.observe = edit_every_observe
++    assert not s.run_once()
++    assert not e.cancelled and len(e.sent) == 1
++    assert any(ev == 'MANUAL_EDIT_RECHECK_PENDING' for ev,_ in events)
++
++
++@pytest.mark.parametrize('field,value', [
++    ('ticker','OTHER'), ('order_id','another-order'), ('subaccount_number',1),
++    ('type','market'), ('book_side','bid'), ('initial_count_fp','11'),
++    ('remaining_count_fp','11'), ('fill_count_fp','11'), ('client_order_id',''),
++    ('yes_price_dollars','NaN'), ('yes_price_dollars','0'), ('yes_price_dollars','1'),
++    ('yes_price_dollars','.64001'), ('no_price_dollars','.99'),
++])
++def test_invalid_identity_or_overallocation_never_adopted(tmp_path, field, value):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    row = copy.deepcopy(e.remote[oid])
++    row.update(yes_price_dollars='.64', no_price_dollars='.36'); row[field] = value
++    with pytest.raises(ManualExitBlocked):
++        amendment_terms(T, intent, row)
++    assert 'manual_override' not in intent and not e.cancelled and len(e.sent) == 1
++
++
++def test_lost_ack_before_edit_still_anchors_to_saved_exchange_id(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    intent['status'] = 'pending_ack'
++    reprice(e, oid, '.64')
++    assert s.run_once(), events
++    assert intent['target'] == '0.64' and len(e.sent) == 1
++
++
++def test_edit_does_not_clear_latched_stop_or_cancel_confirmation(tmp_path):
++    e, s, _, events, intent, oid = opened(tmp_path)
++    e.bid = D('.40'); e.delay_cancel = True
++    assert not s.run_once()
++    assert intent['cancel_requested'] == 'stop_loss'
++    reprice(e, oid, '.70')
++    assert not s.run_once() and len(e.sent) == 1
++    assert intent['cancel_requested'] == 'stop_loss'
++    e.delay_cancel = False; e.clock_value += 6
++    for _ in range(3): s.run_once()
++    assert e.held[T] == 0 and e.sent[-1]['reduce_only']
++
++
++def test_enabled_manual_edit_policy_cannot_be_silently_reverted(tmp_path):
++    e, s, config, events, intent, oid = opened(tmp_path)
++    with pytest.raises(ManualExitBlocked, match='silently disabled'):
++        ManualExitService(e, replace(config, respect_manual_edits=False), clock=e.clock)
++
++
++def test_settings_are_explicit_and_preserve_twenty_cent_stop():
++    assert Settings.read({}).respect_manual_edits is False
++    settings = Settings.read({'MANUAL_EXIT_RESPECT_MANUAL_EDITS':'true',
++                              'MANUAL_STOP_LOSS_CENTS':'20'})
++    assert settings.respect_manual_edits and settings.stop_loss_cents == D('20')
++    assert settings.increment == D('.05')
+--- a/resting_manual_exits.py
++++ b/resting_manual_exits.py
+@@ -19,6 +19,8 @@
+     number, primary_orders, quantity, round_target, failure_context)
+ from request_coordinator import RequestDeferred
+ from order_reconciliation import verified_exit_snapshot, terminal_cancel_receipt
++from manual_order_edits import (verified_manual_exit_snapshot, amendment_terms,
++                                ManualEditPending)
+ 
+ 
+ class RestingExitOnlyClient(KalshiClient):
+@@ -93,11 +95,16 @@
+ 
+ 
+ class RestingManualExitWorker(ManualLimitExitWorker):
+-    def __init__(self, *args, stop_loss_cents=D("11"), **kwargs):
++    def __init__(self, *args, stop_loss_cents=D("11"), respect_manual_edits=False, **kwargs):
++        self.respect_manual_edits = bool(respect_manual_edits)
+         self.stop_loss_increment = number(stop_loss_cents, "stop loss cents") / 100
+         if not D(0) < self.stop_loss_increment < 1:
+             raise ValueError("Manual stop loss must be between zero and one dollar")
+         super().__init__(*args, **kwargs)
++        if self.state.get("manual_edit_policy") and not self.respect_manual_edits:
++            raise ManualExitBlocked("Manual edit policy cannot be silently disabled")
++        if self.respect_manual_edits:
++            self.state["manual_edit_policy"] = "respect_verified_v1"
+         previous = self.state.get("stop_loss_increment")
+         migration = None
+         if previous is not None and number(previous, "saved stop loss") != self.stop_loss_increment:
+@@ -144,7 +151,7 @@
+     def _validate(self, ticker, intent, row):
+         sign = 1 if intent["side"] == "YES" else -1
+         expected = D(intent["target"]) if sign > 0 else 1-D(intent["target"])
+-        expected_qty = quantity(intent["quantity"])
++        expected_qty = quantity(intent.get("wire_initial_quantity", intent["quantity"]))
+         # Never print a raw response or arbitrary string value. Invalid numeric
+         # representations are reported as null, with the failed field named.
+         try:
+@@ -193,7 +200,10 @@
+         for cid, intent in self.intents(ticker).items():
+             if intent["status"] in TERMINAL_ORDER_STATES:
+                 continue
+-            matches = [r for r in orders if r.get("client_order_id") == cid]
++            if self.respect_manual_edits and intent.get("order_id"):
++                matches = [r for r in orders if r.get("order_id") == intent["order_id"]]
++            else:
++                matches = [r for r in orders if r.get("client_order_id") == intent["client_id"]]
+             if len(matches) > 1:
+                 raise ManualExitBlocked("Multiple orders match one saved client ID")
+             if not matches and intent.get("order_id"):
+@@ -206,7 +216,8 @@
+                 unresolved = True
+                 continue  # Absence/404 never proves rejection or cancellation.
+             row = matches[0]
+-            verified = verified_exit_snapshot(self, ticker, intent, row)
++            verify = verified_manual_exit_snapshot if self.respect_manual_edits else verified_exit_snapshot
++            verified = verify(self, ticker, intent, row)
+             if verified is None:
+                 unresolved = True
+                 continue
+@@ -239,7 +250,13 @@
+     def owns_resting_order(self, ticker, row):
+         for intent in self.intents(ticker).values():
+             if intent.get("order_id") == row["order_id"]:
+-                status, filled, remaining = self._validate(ticker, intent, row)
++                try:
++                    status, filled, remaining = self._validate(ticker, intent, row)
++                except ManualExitBlocked:
++                    if not self.respect_manual_edits:
++                        raise
++                    amendment_terms(ticker, intent, row)
++                    raise ManualEditPending("Manual edit arrived during inventory reconciliation")
+                 if (status != intent["status"] or filled != D(intent["filled"])
+                         or remaining != D(intent["remaining"])):
+                     raise ReconciliationPending("Resting reservation changed during reconciliation")
+@@ -394,10 +411,13 @@
+                 sl = "partially_blocked"
+             else:
+                 sl = "monitoring"
++            amended = [i for i in active if i["fill_id"] == fid and i.get("manual_override")]
+             report = {"fill_id": fid, "side": "YES" if plan["sign"] > 0 else "NO",
+                       "entry": str(entry), "quantity": str(expected),
+                       "externally_reserved_quantity": str(external_qty),
+-                      "tp_target": str(plan["raw_target"]),
++                      "tp_target": (amended[0]["target"] if len(amended) == 1
++                                    else str(plan["raw_target"])),
++                      "tp_manual_override": fid in ledger.get("manual_tp_overrides", {}),
+                       "tp_status": tp, "tp_resting_quantity": str(actual),
+                       "sl_trigger": str(stop_trigger) if stop_trigger > 0 else None,
+                       "sl_status": sl, "sl_order_type": "local_bid_monitor"}
+@@ -526,7 +546,8 @@
+         for intent in active:
+             plan = plans.get(intent["fill_id"])
+             target_mismatch = False
+-            if plan and stop_market and stop_market.get("status") in {"active", "open"}:
++            if (plan and not intent.get("manual_override") and stop_market
++                    and stop_market.get("status") in {"active", "open"}):
+                 try:
+                     expected = round_target(plan["raw_target"],
+                                             stop_market.get("price_ranges"), plan["sign"])
+@@ -570,6 +591,7 @@
+         candidates = [(fid, plan) for fid, plan in sorted(plans.items())
+                       if fid not in ledger.get("suppressed_fills", {})
+                       and fid not in ledger.get("stop_armed", {})
++                      and fid not in ledger.get("manual_tp_overrides", {})
+                        and quantity(plan["quantity"] - reserved[fid])]
+         if not candidates:
+             return False
+--- a/manual_exit_runner.py
++++ b/manual_exit_runner.py
+@@ -24,6 +24,7 @@
+                                position, primary_orders, quantity, failure_context)
+ from request_coordinator import RequestDeferred
+ from resting_manual_exits import RestingExitOnlyClient, RestingManualExitWorker
++from manual_order_edits import ManualEditPending
+ 
+ 
+ def flag(environ, name, default="false"):
+@@ -44,6 +45,7 @@
+     dry_run: bool
+     execution_mode: str
+     stop_loss_cents: D = D("11")
++    respect_manual_edits: bool = False
+ 
+     @classmethod
+     def read(cls, env, *, live=False):
+@@ -77,7 +79,9 @@
+         stop_cents = number(env.get("MANUAL_STOP_LOSS_CENTS", "11"), "stop loss cents")
+         if not D(0) < stop_cents < 100 or stop_cents.quantize(D(".01")) != stop_cents:
+             raise ValueError("MANUAL_STOP_LOSS_CENTS must be positive and below 100 with at most .01-cent precision")
+-        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode, stop_cents)
++        respect_edits = flag(env, "MANUAL_EXIT_RESPECT_MANUAL_EDITS")
++        return cls(entry, automatic, manual, series, increment, float(poll), not live, mode,
++                   stop_cents, respect_edits)
+ 
+ 
+ class ExitOnlyClient(KalshiClient):
+@@ -176,6 +180,7 @@
+         worker = RestingManualExitWorker if settings.execution_mode == "resting_limit" else ManualLimitExitWorker
+         if settings.execution_mode == "resting_limit":
+             options["stop_loss_cents"] = settings.stop_loss_cents
++            options["respect_manual_edits"] = settings.respect_manual_edits
+         self.worker = worker(client, settings.manual_state,
+             price_increment=settings.increment, series=settings.series, dry_run=settings.dry_run,
+             emit=self.emit, **options)
+@@ -307,6 +312,12 @@
+                                       stage=stage, **failure_context(error))
+                     if not acted:
+                         break
++            except ManualEditPending as error:
++                ok = False
++                self.worker._plans.pop(ticker, None)
++                self.worker._snapshots.pop(ticker, None)
++                self.emit("MANUAL_EDIT_RECHECK_PENDING", ticker=ticker, stage=stage,
++                          action="preserve_orders_no_new_sells", **failure_context(error))
+             except Exception as error:
+                 ok = False
+                 if isinstance(error, (KalshiAPIError, RequestDeferred)):
+@@ -331,6 +342,7 @@
+     settings = Settings.read(os.environ, live=args.live)
+     print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
+                       "increment_cents": str(settings.increment * 100),
++                      "respect_manual_edits": settings.respect_manual_edits,
+                       "stop_loss_cents": str(settings.stop_loss_cents) if settings.execution_mode == "resting_limit" else None,
+                       "series": settings.series,
+                       "dry_run": settings.dry_run, "automatic_entries": False,
+--- a/order_reconciliation.py
++++ b/order_reconciliation.py
+@@ -146,9 +146,10 @@
+             or row.get("client_order_id") != intent["client_id"]
+             or row.get("ticker") != ticker or row.get("subaccount_number", 0) != 0
+             or row.get("type") != "limit" or direction(row) != -sign
+-            or initial != quantity(intent["quantity"]) or remaining != 0
+-            or not quantity(intent.get("filled", "0")) <= filled <= initial
+-            or (status == "executed" and filled != initial)):
++            or initial != quantity(intent.get("wire_initial_quantity", intent["quantity"]))
++            or remaining != 0
++            or not quantity(intent.get("filled", "0")) <= filled <= quantity(intent["quantity"])
++            or (status == "executed" and filled != quantity(intent["quantity"]))):
+         raise ManualExitBlocked("Terminal cancellation evidence is inconsistent")
+     return {"order_id": row["order_id"], "client_order_id": row["client_order_id"],
+             "already_terminal": True}
+--- a/.github/workflows/hybrid-tests.yml
++++ b/.github/workflows/hybrid-tests.yml
+@@ -22,7 +22,7 @@
+       - name: Install pinned test dependencies
+         run: python -m pip install -r requirements.txt
+       - name: Targeted offline lifecycle checks
+-        run: python tools/run_offline_tests.py -q test_existing_sell_coverage.py test_resting_manual_exits.py test_manual_stop_loss.py test_manual_protection_audit.py test_order_price_recovery.py test_discovery_throttle_safety.py test_pending_reservation_guard.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py --junitxml=hybrid-targeted-results.xml
++        run: python tools/run_offline_tests.py -q test_existing_sell_coverage.py test_resting_manual_exits.py test_manual_stop_loss.py test_manual_stop_policy_migration.py test_manual_order_edits.py test_manual_protection_audit.py test_order_price_recovery.py test_discovery_throttle_safety.py test_pending_reservation_guard.py test_manual_five_cent_exits.py test_manual_limit_exits.py test_hybrid_runtime.py test_co_trading.py --junitxml=hybrid-targeted-results.xml
+       - uses: actions/upload-artifact@v4
+         if: always()
+         with:
