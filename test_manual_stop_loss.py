@@ -118,7 +118,7 @@ def test_other_fills_are_not_stopped_at_the_wrong_entry_cost(tmp_path):
     e, service, _, _ = setup(tmp_path)
     e.buy(10, ".42")
     e.buy(5, ".25")
-    e.bid = D(".30")
+    e.bid = D(".29")
     assert service.run_once()
     assert e.held[T] == 5
     stopped = [x for x in e.sent if x["time_in_force"] == "immediate_or_cancel"]
