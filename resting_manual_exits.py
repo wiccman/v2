@@ -99,8 +99,22 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             raise ValueError("Manual stop loss must be between zero and one dollar")
         super().__init__(*args, **kwargs)
         previous = self.state.get("stop_loss_increment")
+        migration = None
         if previous is not None and number(previous, "saved stop loss") != self.stop_loss_increment:
-            raise ManualExitBlocked("Stop loss policy changed; review the existing journal")
+            # The operator explicitly requested the 11c -> 20c policy change.
+            # Permit only that transition, without resetting ownership, TP
+            # reservations, pending acknowledgements, or already-armed stops.
+            # All other changes still require a separately reviewed migration.
+            if (number(previous, "saved stop loss"), self.stop_loss_increment) != (D(".11"), D(".20")):
+                raise ManualExitBlocked("Stop loss policy changed; review the existing journal")
+            history = self.state.get("stop_loss_policy_migrations", [])
+            if not isinstance(history, list):
+                raise ManualExitBlocked("Stop loss policy migration history is invalid")
+            migration = {"from_cents": "11", "to_cents": "20",
+                         "at": str(self.clock()),
+                         "reason": "operator_requested_20c_stop",
+                         "armed_stops_preserved": True}
+            self.state["stop_loss_policy_migrations"] = [*history, migration]
         self.state["stop_loss_increment"] = str(self.stop_loss_increment)
         self.state["execution_mode"] = "resting_limit"
         self._coverage_reports = {}
@@ -109,6 +123,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         self._protection_cycles = defaultdict(int)
         self._stop_checked_cycle = {}
         self.save()
+        if migration is not None:
+            self.emit("MANUAL_STOP_POLICY_MIGRATED", **migration)
 
     def _validate_execution_mode(self):
         if self.price_increment is None:
@@ -371,7 +387,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             if fid in ledger.get("stop_armed", {}):
                 sl = "triggered"
             elif stop_trigger <= 0:
-                sl = "unavailable"  # No positive sell price 11c below entry.
+                sl = "unavailable"  # No positive sell price at the configured offset.
             elif not stop_verified:
                 sl = "unverified"
             elif external_qty:
