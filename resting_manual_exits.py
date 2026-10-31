@@ -16,7 +16,8 @@ from kalshi import KalshiClient, KalshiAPIError
 from manual_limit_exits import (ManualLimitExitWorker, ManualExitBlocked,
     ReconciliationPending, RestingOrderMismatch,
     TargetUnreachable, ACTIVE_ORDER_STATES, TERMINAL_ORDER_STATES, direction,
-    number, primary_orders, quantity, round_target, failure_context)
+    number, primary_orders, quantity, round_target, failure_context,
+    position, rows_digest, record_digest)
 from request_coordinator import RequestDeferred
 from order_reconciliation import verified_exit_snapshot, terminal_cancel_receipt
 from manual_order_edits import (verified_manual_exit_snapshot, amendment_terms,
@@ -527,6 +528,40 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                   execution="reduce_only_ioc", fill_confirmed=False)
         return True
 
+    def _verify_tp_batch_snapshot(self, ticker, submitted):
+        """Recheck inventory while reserving every order sent in this batch.
+
+        A successful POST may precede visibility in the order read model. Only
+        this invocation's acknowledged order IDs may be absent/filtered here;
+        existing orders, fills, positions and ownership must remain unchanged.
+        Pending intents stay durable and still block subsequent invocations.
+        """
+        if not submitted:
+            return self.verify_snapshot(ticker)
+        snapshot = self._snapshots.get(ticker)
+        if not snapshot or not 0 <= self.clock() - snapshot["checked_at"] <= 10:
+            raise ReconciliationPending("Manual/automatic ownership snapshot is stale")
+        held = position(self.client.positions(ticker), ticker)
+        fills = self.client.all_fills(ticker)
+        orders = primary_orders(self.client.all_orders(ticker), ticker)
+        record = self.read_entries().get("markets", {}).get(ticker, {})
+        acknowledged = {i["order_id"]: i for i in submitted}
+        baseline_orders = []
+        for row in orders:
+            intent = acknowledged.get(row["order_id"])
+            if intent is None:
+                baseline_orders.append(row)
+                continue
+            status, filled, remaining = self._validate(ticker, intent, row)
+            if (status not in ACTIVE_ORDER_STATES or filled
+                    or remaining != quantity(intent["quantity"])):
+                raise ReconciliationPending("Resting reservation changed during reconciliation")
+        if (held != snapshot["held"] or rows_digest(fills) != snapshot["fills"]
+                or rows_digest(baseline_orders) != snapshot["orders"]
+                or record_digest(record) != snapshot["record"]
+                or self.clock() - snapshot["checked_at"] > 10):
+            raise ReconciliationPending("Ownership changed before submission; reconcile again")
+
     def maybe_submit(self, ticker, record, automatic_ledger):
         ledger = self.ledger(ticker)
         if ledger.get("window_closed") or self.pending(ticker) or automatic_ledger.get("pending"):
@@ -602,7 +637,11 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         expires = int(close.timestamp())
         if market.get("status") not in {"active", "open"} or self.clock() >= expires:
             return False
-        for fid, plan in candidates:
+        # Cover up to twenty distinct fills in one bounded batch. Read-model
+        # lag for an accepted sell must not serialize the rest across polls.
+        # Each quantity stays allocated to its own fill and existing target.
+        submitted = []
+        for fid, plan in candidates[:20]:
             if fid in ledger.get("suppressed_fills", {}):
                 continue
             qty = quantity(plan["quantity"] - reserved[fid])
@@ -614,7 +653,15 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 self.emit("MANUAL_TARGET_UNREACHABLE", ticker=ticker, fill_id=fid,
                           required_price=str(plan["raw_target"]))
                 continue
-            self.verify_snapshot(ticker)
+            try:
+                self._verify_tp_batch_snapshot(ticker, submitted)
+            except ReconciliationPending:
+                if submitted:
+                    # A TP may already have filled, or another manual trade may
+                    # have changed inventory. End this batch and replay before
+                    # sizing the rest; this is not a lost-ownership failure.
+                    return True
+                raise
             held = self._snapshots[ticker]["held"]
             external = self._snapshots[ticker]["external_reserved"]
             if held * plan["sign"] <= 0 or qty + sum(reserved.values(), D(0)) + external > abs(held):
@@ -631,12 +678,14 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             self.intents(ticker)[intent["client_id"]] = intent
             self.save()
             try:
-                self.verify_snapshot(ticker)
+                self._verify_tp_batch_snapshot(ticker, submitted)
                 if self.clock() >= expires:
                     raise ManualExitBlocked("Market closed before submission")
-            except Exception:
+            except Exception as error:
                 self.intents(ticker).pop(intent["client_id"])
                 self.save()  # Proven unsent; safe to retry after reconciliation.
+                if submitted and isinstance(error, ReconciliationPending):
+                    return True
                 raise
             try:
                 result = self.client.place_manual_limit(ticker, intent)
@@ -652,8 +701,17 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             self.emit("MANUAL_RESTING_SUBMITTED", ticker=ticker, fill_id=fid,
                       order_id=intent["order_id"], quantity=str(qty), target=str(target),
                       fill_confirmed=False)
-            return True  # Reconcile again before submitting the next fill.
-        return False
+            # Reserve the FULL submitted size, even before the exchange's order
+            # list catches up. A timeout/malformed acknowledgement exits above;
+            # it can never authorize the next sell or an automatic retry.
+            reserved[fid] += qty
+            submitted.append(intent)
+        if submitted:
+            self.emit("MANUAL_TP_BATCH_SUBMITTED", ticker=ticker,
+                      orders=len(submitted),
+                      quantity=str(sum((D(i["quantity"]) for i in submitted), D(0))),
+                      fill_confirmed=False)
+        return bool(submitted)
 
     def window_closed(self, ticker, close):
         if not self.reconcile(ticker):

@@ -252,9 +252,9 @@ class ManualExitService:
                     continue
                 self._closed_retry_at.pop(ticker, None)
                 self._live_tickers.add(ticker)
-                # Several partial buy fills can arrive together. Reconcile
-                # after every action, reserving each accepted order's quantity
-                # before posting another. Bound work so other markets get time.
+                # Each TP action covers a bounded batch of uncovered fills,
+                # reserving every submitted quantity before continuing. Fully
+                # reconcile between batches and stop/cancel actions.
                 limit = 20 if self.settings.execution_mode == "resting_limit" else 1
                 if isinstance(self.worker, RestingManualExitWorker):
                     self.worker.begin_protection_check(ticker)
@@ -347,7 +347,8 @@ def main(argv=None):
                       "series": settings.series,
                       "dry_run": settings.dry_run, "automatic_entries": False,
                       "poll_seconds": settings.poll, "connection_pooling": True,
-                      "latency_patch": "terminal-first-v1"}), flush=True)
+                      "latency_patch": "terminal-first-v1",
+                      "quantity_patch": "uncovered-fill-batch-v1"}), flush=True)
     if args.check_config:
         return 0
     if os.getenv("RAILWAY_ENVIRONMENT_ID"):
