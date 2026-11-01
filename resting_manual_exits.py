@@ -106,21 +106,22 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             raise ManualExitBlocked("Manual edit policy cannot be silently disabled")
         if self.respect_manual_edits:
             self.state["manual_edit_policy"] = "respect_verified_v1"
-        previous = self.state.get("stop_loss_increment")
+        saved = self.state.get("stop_loss_increment")
+        previous = number(saved, "saved stop loss") if saved is not None else None
         migration = None
-        if previous is not None and number(previous, "saved stop loss") != self.stop_loss_increment:
-            # The operator explicitly requested the 11c -> 20c policy change.
-            # Permit only that transition, without resetting ownership, TP
-            # reservations, pending acknowledgements, or already-armed stops.
-            # All other changes still require a separately reviewed migration.
-            if (number(previous, "saved stop loss"), self.stop_loss_increment) != (D(".11"), D(".20")):
+        if previous is not None and previous != self.stop_loss_increment:
+            # Only operator-approved transitions may reuse an existing journal.
+            # All order reservations, acknowledgements and armed stops carry over.
+            if (previous, self.stop_loss_increment) not in {
+                    (D(".11"), D(".20")), (D(".20"), D(".15"))}:
                 raise ManualExitBlocked("Stop loss policy changed; review the existing journal")
             history = self.state.get("stop_loss_policy_migrations", [])
             if not isinstance(history, list):
                 raise ManualExitBlocked("Stop loss policy migration history is invalid")
-            migration = {"from_cents": "11", "to_cents": "20",
+            to_cents = format(self.stop_loss_increment * 100, ".0f")
+            migration = {"from_cents": format(previous * 100, ".0f"), "to_cents": to_cents,
                          "at": str(self.clock()),
-                         "reason": "operator_requested_20c_stop",
+                         "reason": f"operator_requested_{to_cents}c_stop",
                          "armed_stops_preserved": True}
             self.state["stop_loss_policy_migrations"] = [*history, migration]
         self.state["stop_loss_increment"] = str(self.stop_loss_increment)

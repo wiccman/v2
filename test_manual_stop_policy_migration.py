@@ -1,4 +1,4 @@
-"""Offline regressions for the operator-authorized 11c -> 20c stop migration."""
+"""Offline regressions for operator-authorized stop policy migrations."""
 import copy
 import json
 from dataclasses import replace
@@ -12,8 +12,8 @@ from test_manual_limit_exits import T
 from test_manual_stop_loss import setup
 
 
-def migrate(exchange, config, events):
-    config = replace(config, stop_loss_cents=D("20"))
+def migrate(exchange, config, events, cents="20"):
+    config = replace(config, stop_loss_cents=D(cents))
     service = ManualExitService(exchange, config, clock=exchange.clock,
         emit=lambda event, **data: events.append((event, data)))
     return service, config
@@ -65,6 +65,39 @@ def test_migration_is_durable_and_idempotent(tmp_path):
     assert sum(event == "MANUAL_STOP_POLICY_MIGRATED" for event, _ in events) == 1
 
 
+@pytest.mark.parametrize("sign", [1, -1])
+def test_20_to_15_preserves_tp_and_restarts_at_new_boundary(tmp_path, sign):
+    exchange, _, config, events = setup(tmp_path)
+    worker20, config = migrate(exchange, config, events)
+    exchange.buy(10, ".60", sign)
+    exchange.bid = exchange.no_bid = D(".59")
+    assert worker20.run_once()
+    before = copy.deepcopy(worker20.worker.state)
+    orders = copy.deepcopy(exchange.sent)
+
+    worker15, config = migrate(exchange, config, events, "15")
+    after = worker15.worker.state
+    for key in before.keys() - {"stop_loss_increment", "stop_loss_policy_migrations"}:
+        assert after[key] == before[key]
+    assert D(after["stop_loss_increment"]) == D(".15")
+    assert after["stop_loss_policy_migrations"][:-1] == before["stop_loss_policy_migrations"]
+    last = after["stop_loss_policy_migrations"][-1]
+    assert (last["from_cents"], last["to_cents"]) == ("20", "15")
+    restarted, _ = migrate(exchange, config, events, "15")
+    assert restarted.worker.state == after
+    assert sum(event == "MANUAL_STOP_POLICY_MIGRATED" and data["to_cents"] == "15"
+               for event, data in events) == 1
+
+    exchange.bid = exchange.no_bid = D(".4501")
+    assert restarted.run_once()
+    assert exchange.sent == orders and not exchange.cancelled
+    exchange.bid = exchange.no_bid = D(".45")
+    assert restarted.run_once()
+    assert exchange.held[T] == 0 and len(exchange.cancelled) == 1
+    stops = [o for o in exchange.sent if o["time_in_force"] == "immediate_or_cancel"]
+    assert len(stops) == 1 and stops[0]["reduce_only"] is True
+
+
 def test_per_fill_entry_costs_use_new_offset(tmp_path):
     e, old, config, events = setup(tmp_path)
     service, _ = migrate(e, config, events)
@@ -79,15 +112,18 @@ def test_per_fill_entry_costs_use_new_offset(tmp_path):
                for o in e.sent)
 
 
-def test_already_armed_stop_retains_cancel_confirmation_and_latch(tmp_path):
+@pytest.mark.parametrize("target", ["20", "15"])
+def test_already_armed_stop_retains_cancel_confirmation_and_latch(tmp_path, target):
     e, old, config, events = setup(tmp_path)
+    if target == "15":
+        old, config = migrate(e, config, events)
     e.buy(10, ".60")
     e.bid = D(".59")
     assert old.run_once()
-    e.bid, e.delay_cancel = D(".48"), True
+    e.bid, e.delay_cancel = D(".39"), True
     assert not old.run_once()
     before = copy.deepcopy(old.worker.state["markets"])
-    service, _ = migrate(e, config, events)
+    service, _ = migrate(e, config, events, target)
     assert service.worker.state["markets"] == before
     assert not service.run_once() and len(e.sent) == 1
     e.bid, e.delay_cancel = D(".55"), False
@@ -98,13 +134,16 @@ def test_already_armed_stop_retains_cancel_confirmation_and_latch(tmp_path):
     assert len([o for o in e.sent if o["time_in_force"] == "immediate_or_cancel"]) == 1
 
 
-def test_pending_stop_ack_is_preserved_without_duplicate_sale(tmp_path):
+@pytest.mark.parametrize("target", ["20", "15"])
+def test_pending_stop_ack_is_preserved_without_duplicate_sale(tmp_path, target):
     e, old, config, events = setup(tmp_path)
+    if target == "15":
+        old, config = migrate(e, config, events)
     e.buy(10, ".60")
-    e.bid, e.lose_ack = D(".48"), True
+    e.bid, e.lose_ack = D(".39"), True
     assert not old.run_once() and old.worker.ledger(T).get("pending")
     before = copy.deepcopy(old.worker.state["markets"])
-    service, _ = migrate(e, config, events)
+    service, _ = migrate(e, config, events, target)
     assert service.worker.state["markets"] == before
     e.lose_ack = False
     assert service.run_once()
@@ -113,7 +152,8 @@ def test_pending_stop_ack_is_preserved_without_duplicate_sale(tmp_path):
 
 
 @pytest.mark.parametrize("previous,new", [("0.12", "20"), ("0.10", "20"),
-                                          ("0.20", "11"), ("0.11", "21")])
+                                          ("0.20", "11"), ("0.11", "21"),
+                                          ("0.11", "15"), ("0.15", "20")])
 def test_unapproved_transitions_remain_blocked_without_state_changes(tmp_path, previous, new):
     e, old, config, events = setup(tmp_path)
     saved = json.loads(config.manual_state.read_text())
