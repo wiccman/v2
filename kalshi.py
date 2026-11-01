@@ -91,10 +91,12 @@ class KalshiClient:
         self.private_key = serialization.load_pem_private_key(pem, password=None) if pem else None
 
     def _headers(self, method, path):
+        return self.signed_headers(method, urlparse(self.base + path).path)
+
+    def signed_headers(self, method, signed_path):
         if not self.key_id or self.private_key is None:
             raise RuntimeError("Kalshi credentials unavailable")
         timestamp = str(int(time.time() * 1000))
-        signed_path = urlparse(self.base + path).path
         signature = self.private_key.sign(
             (timestamp + method.upper() + signed_path).encode(),
             padding.PSS(mgf=padding.MGF1(hashes.SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),

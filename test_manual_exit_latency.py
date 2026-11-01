@@ -158,3 +158,84 @@ def test_pooling_does_not_bypass_exit_write_authorization():
     with pytest.raises(RuntimeError, match="unauthorized write"):
         client.request("POST", "/portfolio/events/orders", body={"side": "bid"})
     transport.assert_not_called()
+
+
+def test_stream_wakes_for_scoped_primary_fills_and_coalesces_duplicates(tmp_path):
+    import json
+    import threading
+    from manual_fill_stream import ManualFillStream
+
+    exchange, service, _, _ = setup(tmp_path)
+    stream = ManualFillStream(exchange, service.worker.allowed, service.emit, threading.Event())
+
+    def signal(ticker, account=0):
+        stream.receive(json.dumps({"type": "fill", "msg": {"market_ticker": ticker, "subaccount": account}}))
+
+    assert service.run_once()  # Cache an empty position discovery.
+    signal(T, 1)
+    signal("OUTSIDE-TEST")
+    assert not stream.wake.is_set()
+    exchange.buy(5, ".42")
+    for _ in range(3):
+        signal(T)
+    assert stream.wake.is_set() and not exchange.sent
+    hints = stream.take()
+    assert hints == {T} and not stream.wake.is_set()
+    assert service.run_once(hints) and len(exchange.sent) == 1
+    signal(T)
+    assert service.run_once(stream.take()) and len(exchange.sent) == 1
+
+
+def test_subscription_error_falls_back_and_poll_still_protects(tmp_path, monkeypatch):
+    import json
+    import threading
+    from contextlib import nullcontext
+    from manual_fill_stream import ManualFillStream
+
+    exchange, service, _, events = setup(tmp_path)
+    stop = threading.Event()
+    stream = ManualFillStream(Mock(), service.worker.allowed, service.emit, stop)
+    ws = Mock()
+    ws.recv.side_effect = [json.dumps({"type": "subscribed", "msg": {"channel": "fill"}}),
+                           json.dumps({"type": "error", "msg": {"code": 1}})]
+    monkeypatch.setattr("manual_fill_stream.connect", lambda *a, **kw: nullcontext(ws))
+    monkeypatch.setattr(stop, "wait", lambda timeout: stop.set())
+    stream.run()
+    stream.client.signed_headers.assert_called_once_with("GET", "/trade-api/ws/v2")
+    assert json.loads(ws.send.call_args.args[0])["params"] == {"channels": ["fill"]}
+    assert {"MANUAL_FILL_STREAM_READY", "MANUAL_FILL_STREAM_RETRY"} <= {event for event, _ in events}
+    exchange.buy(5, ".42")
+    assert service.run_once(stream.take()) and len(exchange.sent) == 1
+
+
+def test_one_final_inventory_check_per_tp_after_journaling(tmp_path, monkeypatch):
+    exchange, service, _, events = setup(tmp_path)
+    original = service.worker._verify_tp_batch_snapshot
+    checked = []
+
+    def check(ticker, submitted):
+        pending = [i for i in service.worker.intents(ticker).values()
+                   if i["status"] == "pending_ack" and not i.get("order_id")]
+        assert len(pending) == 1
+        checked.append(pending[0]["client_id"])
+        return original(ticker, submitted)
+
+    monkeypatch.setattr(service.worker, "_verify_tp_batch_snapshot", check)
+    for _ in range(3):
+        exchange.buy(5, ".42")
+    assert service.run_once() and len(set(checked)) == len(checked) == len(exchange.sent) == 3
+    assert all("fill_to_ack_ms" in data for event, data in events if event == "MANUAL_RESTING_SUBMITTED")
+
+
+def test_unchanged_journal_skips_volume_sync_and_changed_journal_is_durable(tmp_path, monkeypatch):
+    import json
+    import os
+    exchange, service, settings, _ = setup(tmp_path)
+    worker = service.worker
+    sync = Mock(wraps=os.fsync)
+    monkeypatch.setattr(os, "fsync", sync)
+    worker.save()
+    assert sync.call_count == 0
+    exchange.buy(5, ".42")
+    assert service.run_once() and len(exchange.sent) == 1 and sync.call_count >= 2
+    assert json.loads(settings.manual_state.read_text()) == worker.state

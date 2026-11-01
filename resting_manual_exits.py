@@ -654,20 +654,12 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 self.emit("MANUAL_TARGET_UNREACHABLE", ticker=ticker, fill_id=fid,
                           required_price=str(plan["raw_target"]))
                 continue
-            try:
-                self._verify_tp_batch_snapshot(ticker, submitted)
-            except ReconciliationPending:
-                if submitted:
-                    # A TP may already have filled, or another manual trade may
-                    # have changed inventory. End this batch and replay before
-                    # sizing the rest; this is not a lost-ownership failure.
-                    return True
-                raise
             held = self._snapshots[ticker]["held"]
             external = self._snapshots[ticker]["external_reserved"]
             if held * plan["sign"] <= 0 or qty + sum(reserved.values(), D(0)) + external > abs(held):
                 raise ManualExitBlocked("Resting exits exceed verified owned inventory")
             if self.dry_run:
+                self._verify_tp_batch_snapshot(ticker, submitted)
                 self.emit("MANUAL_DRY_RUN_RESTING_ORDER", ticker=ticker, fill_id=fid,
                           quantity=str(qty), target=str(target), expires_at=expires)
                 continue
@@ -690,6 +682,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 raise
             try:
                 result = self.client.place_manual_limit(ticker, intent)
+                acknowledged_at = self.clock()
             except (KalshiAPIError, RequestDeferred) as error:
                 if isinstance(error, RequestDeferred) or error.status_code in {400, 401, 403, 404, 422, 429}:
                     self.intents(ticker).pop(intent["client_id"])
@@ -701,6 +694,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             self.save()
             self.emit("MANUAL_RESTING_SUBMITTED", ticker=ticker, fill_id=fid,
                       order_id=intent["order_id"], quantity=str(qty), target=str(target),
+                      fill_to_ack_ms=round((acknowledged_at - float(ledger["managed_fills"][fid]["timestamp"])) * 1000),
                       fill_confirmed=False)
             # Reserve the FULL submitted size, even before the exchange's order
             # list catches up. A timeout/malformed acknowledgement exits above;

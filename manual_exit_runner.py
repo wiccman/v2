@@ -192,15 +192,16 @@ class ManualExitService:
     def read_entries(self):
         return read_journal(self.settings.entry_state)
 
-    def run_once(self):
+    def run_once(self, fill_tickers=()):
         # A fresh read detects another writer even if it bypasses the file lock.
         try:
             self.read_entries()
             read_journal(self.settings.automatic_exit_state)
             known = set(self.worker.state["markets"])
             # New positions and confirmed live markets precede historical cleanup.
-            tickers = sorted(self.worker.discover(), key=lambda ticker:
-                             (ticker in known, ticker not in self._live_tickers, ticker))
+            priority = {ticker for ticker in fill_tickers if self.worker.allowed(ticker)}
+            tickers = sorted(self.worker.discover() | priority, key=lambda ticker:
+                             (ticker not in priority, ticker in known, ticker not in self._live_tickers, ticker))
         except Exception as error:
             # A shared API cooldown (or 429 on the discovery request) is not
             # evidence of lost ownership. Do not turn a temporary read outage
@@ -347,7 +348,7 @@ def main(argv=None):
                       "series": settings.series,
                       "dry_run": settings.dry_run, "automatic_entries": False,
                       "poll_seconds": settings.poll, "connection_pooling": True,
-                      "latency_patch": "terminal-first-v1",
+                      "latency_patch": "fill-wake-v2",
                       "quantity_patch": "uncovered-fill-batch-v1"}), flush=True)
     if args.check_config:
         return 0
@@ -370,14 +371,25 @@ def main(argv=None):
             raise RuntimeError("Kalshi credentials are required; configure them privately in the hosting environment")
         service = ManualExitService(client, settings)
         stop = threading.Event()
+        stream = None
+        if not args.once and not settings.dry_run and settings.execution_mode == "resting_limit":
+            from manual_fill_stream import ManualFillStream
+            stream = ManualFillStream(client, service.worker.allowed, service.emit, stop)
+            threading.Thread(target=stream.run, name="manual-fill-stream", daemon=True).start()
+
+        def shutdown(*_):
+            stop.set()
+            if stream:
+                stream.wake.set()
+
         for sig in (signal.SIGTERM, signal.SIGINT):
-            signal.signal(sig, lambda *_: stop.set())
+            signal.signal(sig, shutdown)
         last_timing = float("-inf")
         while not stop.is_set():
             started = time.perf_counter()
             before = dict(client.http_stats)
             try:
-                ok = service.run_once()
+                ok = service.run_once(stream.take() if stream else ())
             except Exception as error:
                 ok = False
                 service.emit("MANUAL_EXIT_PASS_FAILED", **failure_context(error))
@@ -394,7 +406,8 @@ def main(argv=None):
             if args.once:
                 return 0 if ok else 1
             # Poll is a target cadence, not an extra sleep after network work.
-            stop.wait(max(0.05, settings.poll - elapsed))
+            if not stop.is_set():
+                (stream.wake if stream else stop).wait(max(0.05, settings.poll - elapsed))
     return 0
 
 

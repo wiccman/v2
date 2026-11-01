@@ -227,12 +227,23 @@ def round_target(raw: D, ranges: list[dict] | None, sign: int) -> D:
 
 class _DurableTransport(TakeProfitMonitor):
     """Reuse the tested IOC journal/reconciliation without starting another thread."""
+    _saved_json = None
+    _saved_stat = None
+
     def save(self):
+        payload = json.dumps(self.state, separators=(",", ":"))
+        # Reconciliation often observes the exact same resting orders. Skip the
+        # volume write only when our last durable file is still in place.
+        if payload == self._saved_json and self.path.exists():
+            current = self.path.stat()
+            if (current.st_ino, current.st_ctime_ns) == self._saved_stat:
+                return
+        self._saved_json = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as stream:
-            json.dump(self.state, stream, indent=2)
+            stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(tmp, self.path)
@@ -241,6 +252,9 @@ class _DurableTransport(TakeProfitMonitor):
             os.fsync(directory)
         finally:
             os.close(directory)
+        current = self.path.stat()
+        self._saved_stat = current.st_ino, current.st_ctime_ns
+        self._saved_json = payload
 
 
 class ManualLimitExitWorker:
