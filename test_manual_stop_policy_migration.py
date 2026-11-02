@@ -99,29 +99,32 @@ def test_20_to_15_preserves_tp_and_restarts_at_new_boundary(tmp_path, sign):
 
 
 @pytest.mark.parametrize("sign", [1, -1])
-def test_fractional_stop_migration_preserves_three_cent_tp_and_triggers_at_46_9(tmp_path, sign):
+@pytest.mark.parametrize("previous,target", [("15", "3.1"), ("3.1", "6")])
+def test_stop_migration_preserves_three_cent_tp_and_bid_boundary(tmp_path, sign, previous, target):
     e, _, config, events = setup(tmp_path)
     _, config = migrate(e, config, events)
     _, config = migrate(e, config, events, "15")
     config = replace(config, increment=D(".03"))
-    worker, config = migrate(e, config, events, "15")
+    worker, config = migrate(e, config, events, previous)
     e.bid = e.no_bid = D(".50")
     e.buy(5, ".50", sign)
     assert worker.run_once() and len(e.sent) == 1
     assert D(e.sent[0]["price"]) == (D(".53") if sign == 1 else D(".47"))
 
-    worker, config = migrate(e, config, events, "3.1")
-    worker, _ = migrate(e, config, events, "3.1")
+    worker, config = migrate(e, config, events, target)
+    worker, _ = migrate(e, config, events, target)
     history = worker.worker.state["stop_loss_policy_migrations"]
-    assert [h["to_cents"] for h in history].count("3.1") == 1
-    assert history[-1]["from_cents"] == "15"
-    assert worker.worker.stop_loss_increment == D(".031")
-    e.bid = e.no_bid = D(".4700")
+    assert [h["to_cents"] for h in history].count(target) == 1
+    assert history[-1]["from_cents"] == previous
+    distance = D(target) / 100
+    assert worker.worker.stop_loss_increment == distance
+    trigger = D(".50") - distance
+    e.bid = e.no_bid = trigger + D(".001")
     assert worker.run_once() and len(e.sent) == 1 and not e.cancelled
-    e.bid = e.no_bid = D(".4690")
+    e.bid = e.no_bid = trigger
     assert worker.run_once() and e.held[T] == 0 and len(e.cancelled) == 1
     assert len(e.sent) == 2 and e.sent[1]["reduce_only"] is True
-    assert D(e.sent[1]["price"]) == (D(".469") if sign == 1 else D(".531"))
+    assert D(e.sent[1]["price"]) == (trigger if sign == 1 else 1 - trigger)
 
 
 def test_per_fill_entry_costs_use_new_offset(tmp_path):

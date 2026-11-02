@@ -113,7 +113,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             # Only operator-approved transitions may reuse an existing journal.
             # All order reservations, acknowledgements and armed stops carry over.
             if (previous, self.stop_loss_increment) not in {
-                    (D(".11"), D(".20")), (D(".20"), D(".15")), (D(".15"), D(".031"))}:
+                    (D(".11"), D(".20")), (D(".20"), D(".15")),
+                    (D(".15"), D(".031")), (D(".031"), D(".06"))}:
                 raise ManualExitBlocked("Stop loss policy changed; review the existing journal")
             history = self.state.get("stop_loss_policy_migrations", [])
             if not isinstance(history, list):
