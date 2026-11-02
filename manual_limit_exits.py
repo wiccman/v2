@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from co_trading import MANUAL_GROSS_PROFIT_GOAL
+from kalshi import KalshiAPIError
 from price_pairs import InventorySyncError, _remaining_lots, _outcome_cost
 from take_profit import TakeProfitMonitor
 
@@ -348,6 +349,7 @@ class ManualLimitExitWorker:
         self.read_entries = lambda: {"markets": {}}
         self._snapshots: dict[str, dict] = {}
         self._plans: dict[str, list[dict]] = {}
+        self._skipped_entry_reports = defaultdict(set)
         self._last_discovery = None
         self._discovered: set[str] = set()
 
@@ -425,6 +427,34 @@ class ManualLimitExitWorker:
             raise ManualExitBlocked("An existing resting order can reduce the shared position")
         return D(0)
 
+    def _eligible_entry_order(self, order):
+        return order.get("type") == "limit" and str(order.get("action", "")).lower() != "sell"
+
+    def _inventory_orders(self, ticker, entry_ids):
+        orders = primary_orders(self.client.all_orders(ticker), ticker)
+        by_id = {row["order_id"]: row for row in orders}
+        if not entry_ids.difference(by_id):
+            return orders
+        # The aggregate can lag a live fill. Check resting reservations separately
+        # and recover only specific order IDs supplied by the account's fill history.
+        for row in primary_orders(self.client.all_orders(ticker, status="resting"), ticker):
+            oid = row["order_id"]
+            if oid in by_id and by_id[oid] != row:
+                raise ReconciliationPending("Resting reservation changed during reconciliation")
+            by_id[oid] = row
+        for oid in sorted(entry_ids.difference(by_id)):
+            try:
+                row = self.client.order(oid, ticker)
+            except KalshiAPIError as error:
+                if error.status_code != 404:
+                    raise
+                raise ReconciliationPending("External fill has no matching order yet") from error
+            if (row.get("order_id") != oid or row.get("ticker") != ticker
+                    or row.get("subaccount_number", 0) != 0):
+                raise ManualExitBlocked("Order identity/ticker is missing or mismatched")
+            by_id[oid] = row
+        return list(by_id.values())
+
     def observe(self, ticker, record, automatic_ledger, fills, entry_orders, exit_orders, held):
         started = self.clock()
         if self.pending(ticker) or automatic_ledger.get("pending"):
@@ -433,10 +463,18 @@ class ManualLimitExitWorker:
         if any(not i.get("order_id") and not i.get("entry_closed") and
                not recovered.get(i.get("client_id")) for i in record.get("entry_intents", [])):
             raise ManualExitBlocked("Unresolved automatic entry acknowledgement")
-        orders = primary_orders(self.client.all_orders(ticker), ticker)
-        by_order = {o["order_id"]: o for o in orders}
         bot_ids, bot_clients = known_ids(record)
         bot_ids |= set(entry_orders) | set(recovered.values()) | set(automatic_ledger.get("exit_orders", {}))
+        openings, reductions, outside = [], [], []
+        lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, outside,
+                              include_untracked=True, openings=openings, reductions=reductions)
+        entry_ids = {lot["fill"].get("order_id") for lot in openings
+                     if lot["entry"] is None and self.allowed(ticker)
+                     and timestamp(lot["fill"]) >= self.activation_time(ticker)} - bot_ids
+        if any(not isinstance(oid, str) or not oid for oid in entry_ids):
+            raise ManualExitBlocked("Fill order identity unavailable")
+        orders = self._inventory_orders(ticker, entry_ids)
+        by_order = {o["order_id"]: o for o in orders}
         external_orders = []
         for row in orders:
             if row.get("client_order_id") in bot_clients:
@@ -454,9 +492,6 @@ class ManualLimitExitWorker:
             elif status not in TERMINAL_ORDER_STATES:
                 raise ManualExitBlocked("Unknown order status")
         external_reserved = self.external_order_reservation(external_orders)
-        openings, reductions, outside = [], [], []
-        lots = _remaining_lots(fills, entry_orders, exit_orders, held, ticker, outside,
-                              include_untracked=True, openings=openings, reductions=reductions)
         unique = {f.get("fill_id") or f.get("trade_id"): f for f in fills}
         observed_counts = defaultdict(lambda: D(0))
         for row in unique.values():
@@ -498,7 +533,13 @@ class ManualLimitExitWorker:
             remote = by_order.get(oid)
             if remote is None:
                 raise ReconciliationPending("External fill has no matching order yet")
-            if remote.get("type") != "limit" or str(remote.get("action", "")).lower() == "sell":
+            if not self._eligible_entry_order(remote):
+                if oid not in self._skipped_entry_reports[ticker]:
+                    self._skipped_entry_reports[ticker].add(oid)
+                    self.emit("MANUAL_ENTRY_EXCLUDED", ticker=ticker, order_id=oid, fill_id=fid,
+                              order_type=remote.get("type"), order_action=remote.get("action"),
+                              fill_action=row.get("action"), fill_side=row.get("side"),
+                              book_side=row.get("book_side"), opened_quantity=str(lot["quantity"]))
                 continue
             if direction(remote) != lot["sign"]:
                 raise ManualExitBlocked("External order and fill directions disagree")
@@ -585,7 +626,7 @@ class ManualLimitExitWorker:
         if changed:
             self.save()
         self._plans[ticker] = plans
-        self._snapshots[ticker] = {"held": held, "fills": rows_digest(fills),
+        self._snapshots[ticker] = {"entry_ids": entry_ids, "held": held, "fills": rows_digest(fills),
                                   "orders": rows_digest(orders), "record": record_digest(record),
                                   "external_reserved": external_reserved, "checked_at": started}
 
@@ -595,7 +636,7 @@ class ManualLimitExitWorker:
             raise ReconciliationPending("Manual/automatic ownership snapshot is stale")
         held = position(self.client.positions(ticker), ticker)
         fills = self.client.all_fills(ticker)
-        orders = primary_orders(self.client.all_orders(ticker), ticker)
+        orders = self._inventory_orders(ticker, snapshot["entry_ids"])
         record = self.read_entries().get("markets", {}).get(ticker, {})
         if (held != snapshot["held"] or rows_digest(fills) != snapshot["fills"] or
                 rows_digest(orders) != snapshot["orders"] or record_digest(record) != snapshot["record"]
@@ -666,3 +707,4 @@ class ManualLimitExitWorker:
                       pending_ack=self.pending(ticker), action="no_new_orders_not_assumed_sold")
         self._plans.pop(ticker, None)
         self._snapshots.pop(ticker, None)
+        self._skipped_entry_reports.pop(ticker, None)

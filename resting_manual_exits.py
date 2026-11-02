@@ -139,6 +139,12 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         if migration is not None:
             self.emit("MANUAL_STOP_POLICY_MIGRATED", **migration)
 
+    def _eligible_entry_order(self, order):
+        # The phone's Quick Order can be reported as a market buy. Its fill
+        # provides the execution price; a market order has no limit to reuse.
+        return super()._eligible_entry_order(order) or (
+            order.get("type") == "market" and str(order.get("action", "")).lower() == "buy")
+
     def _accepts_target_policy(self, saved):
         # Resting intents retain their actual exchange terms until reconciled.
         # Only this configured transition may reprice unedited, verified exits.
@@ -556,7 +562,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             raise ReconciliationPending("Manual/automatic ownership snapshot is stale")
         held = position(self.client.positions(ticker), ticker)
         fills = self.client.all_fills(ticker)
-        orders = primary_orders(self.client.all_orders(ticker), ticker)
+        orders = self._inventory_orders(ticker, snapshot["entry_ids"])
         record = self.read_entries().get("markets", {}).get(ticker, {})
         acknowledged = {i["order_id"]: i for i in submitted}
         baseline_orders = []
