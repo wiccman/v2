@@ -462,7 +462,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             self._protection_report_at.pop((ticker, fid), None)
             self.emit("MANUAL_PROTECTION_CLOSED", ticker=ticker, fill_id=fid)
 
-    def _stop_candidate(self, ticker, plans):
+    def _stop_candidates(self, ticker, plans):
         """Check every open fill against its own downside trigger on each pass."""
         ledger = self.ledger(ticker)
         armed = ledger.setdefault("stop_armed", {})
@@ -474,7 +474,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             raise ManualExitBlocked("Market close requires a timezone")
         if market.get("status") not in {"active", "open"} or self.clock() >= close.timestamp():
             return None, market
-        candidate = None
+        candidates = {}
         for fid, plan in sorted(plans.items()):
             # Canceling one's TP suppresses automatic TP reposting, but does
             # not silently disable the independently configured stop monitor.
@@ -490,38 +490,54 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                 self.save()  # Never forget a crossed stop during cancellation.
                 self.emit("MANUAL_STOP_ARMED", ticker=ticker, fill_id=fid,
                           entry=str(entry), trigger=str(trigger), observed_bid=str(bid))
-            if fid in armed and candidate is None:
-                candidate = (fid, plan, bid)
+            if fid in armed:
+                candidates[fid] = plan
         self._stop_checked_cycle[ticker] = self._protection_cycles[ticker]
-        return candidate, market
+        return candidates, market
 
-    def _submit_stop(self, ticker, fid, plan, bid, market, reserved):
+    def _submit_stop(self, ticker, stops, market, reserved):
         ledger = self.ledger(ticker)
         if self.clock() < max(ledger.get("retry_after", 0), ledger.get("next_attempt_at", 0)):
             return False
+        sign = next(iter(stops.values()))["sign"]
+        if any(plan["sign"] != sign for plan in stops.values()):
+            raise ManualExitBlocked("Conflicting stop sides in one position")
+        side = "YES" if sign > 0 else "NO"
+        bid = number(market.get(side.lower() + "_bid_dollars"), "stop bid")
         if not 0 < bid < 1:
             return False  # No executable bid; retry next poll without a blind market order.
-        qty = quantity(plan["quantity"] - reserved[fid])
+        # Reconciliation already released all bot TPs for the stopped lots.
+        # Plan quantities exclude external sell reservations. Keep each lot's
+        # allocation so partial fills and restart recovery replay the same exit.
+        allocations = [{"fill_id": fid, "quantity": str(quantity(plan["quantity"]))}
+                       for fid, plan in stops.items()]
+        qty = sum((D(item["quantity"]) for item in allocations), D(0))
         if not qty:
             return False
         close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00")).timestamp()
         if self.clock() >= close:
             return False
-        self.verify_snapshot(ticker)
         snapshot = self._snapshots[ticker]
-        if (plan["sign"] * snapshot["held"] <= 0 or
+        if (sign * snapshot["held"] <= 0 or any(reserved[fid] for fid in stops) or
                 qty + sum(reserved.values(), D(0)) + snapshot["external_reserved"] > abs(snapshot["held"])):
             raise ManualExitBlocked("Stop exits exceed verified available inventory")
+        fill_id = allocations[0]["fill_id"] if len(allocations) == 1 else None
         if self.dry_run:
-            self.emit("MANUAL_DRY_RUN_STOP", ticker=ticker, fill_id=fid,
+            self.verify_snapshot(ticker)
+            self.emit("MANUAL_DRY_RUN_STOP", ticker=ticker, fill_id=fill_id, allocations=allocations,
                       quantity=str(qty), observed_bid=str(bid))
             return False
-        intent = {"client_id": "manualstop-" + str(uuid.uuid4()), "side": "YES" if plan["sign"] > 0 else "NO",
+        intent = {"client_id": "manualstop-" + str(uuid.uuid4()), "side": side,
                   "quantity": str(qty), "target": str(bid), "created_at": self.clock(),
-                  "purpose": "manual_stop_loss", "paired": False,
-                  "allocations": [{"fill_id": fid, "quantity": str(qty)}]}
+                  "purpose": "manual_stop_loss", "paired": False, "allocations": allocations}
         ledger["pending"] = intent
         self.save()  # Must survive a lost POST acknowledgement or restart.
+        try:
+            self.verify_snapshot(ticker)
+        except Exception:
+            ledger.pop("pending")  # No request has been sent.
+            self.save()
+            raise
         if self.clock() >= close:
             ledger.pop("pending")
             self.save()
@@ -542,7 +558,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         intent["order_id"] = result["order_id"]
         intent["placement_receipt"] = result
         self.save()
-        self.emit("MANUAL_STOP_SUBMITTED", ticker=ticker, fill_id=fid,
+        self.emit("MANUAL_STOP_SUBMITTED", ticker=ticker, fill_id=fill_id, allocations=allocations,
                   order_id=intent["order_id"], quantity=str(qty), limit=str(bid),
                   execution="reduce_only_ioc", fill_confirmed=False)
         return True
@@ -595,7 +611,7 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         # manual close to zero or reversal. Never cancel a user's own order.
         # The quote is checked for every eligible open fill, even when its
         # entire quantity is already reserved by a take-profit sell.
-        stop, stop_market = self._stop_candidate(ticker, plans)
+        stops, stop_market = self._stop_candidates(ticker, plans)
         cancel = []
         for intent in active:
             plan = plans.get(intent["fill_id"])
@@ -629,15 +645,14 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             return changed
         # Monitor even inventory reserved by +5c sell orders. Release it
         # before submitting a stop; never double-sell a reserved contract.
-        if stop:
-            fid, plan, bid = stop
-            matching = [i for i in active if i["fill_id"] == fid]
+        if stops:
+            matching = [i for i in active if i["fill_id"] in stops]
             if matching:
                 changed = False
                 for intent in matching:
                     changed = self._cancel(ticker, intent, "stop_loss") or changed
                 return changed
-            return self._submit_stop(ticker, fid, plan, bid, stop_market, reserved)
+            return self._submit_stop(ticker, stops, stop_market, reserved)
         if self.clock() < ledger.get("retry_after", 0):
             return False
         # No quote/market lookup when every eligible fill is already reserved.
