@@ -214,9 +214,12 @@ class TakeProfitMonitor:
             if "allocations" in intent:
                 ledger["exit_orders"][order["order_id"]]["allocations"] = intent["allocations"]
         elif intent.get("purpose") != "settlement_switch" and self.no_fill_pause:
-            # A known unfilled IOC cannot help until the book changes. Avoid
-            # repeating the same read/reconcile/write cycle every second.
-            ledger["next_attempt_at"] = self.clock() + self.no_fill_pause
+            # Recheck an armed stop on the next poll after a definitive zero
+            # fill. Unknown acknowledgements and API backoff have separate gates.
+            pause = self.no_fill_pause
+            if intent.get("purpose") == "manual_stop_loss":
+                pause = min(pause, self.poll)
+            ledger["next_attempt_at"] = self.clock() + pause
         ledger.pop("pending")
         self.save()
         return True

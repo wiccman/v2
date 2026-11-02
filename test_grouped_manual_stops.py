@@ -78,3 +78,23 @@ def test_manual_sell_reservation_is_excluded_from_group(tmp_path):
     assert len(stops(e)) == 1 and D(stops(e)[0]["count"]) == 7
     assert e.held[T] == 3 and manual not in e.cancelled
     assert e.remote[manual]["status"] == "resting"
+
+
+def test_confirmed_unfilled_group_reprices_after_one_second_but_respects_api_backoff(tmp_path):
+    e, service, _ = setup(tmp_path)
+    e.buy(2, ".62")
+    e.buy(3, ".63")
+    e.bid, e.liquidity = D(".55"), D(0)
+    assert service.run_once() and len(stops(e)) == 1 and e.held[T] == 5
+    ledger = service.worker.ledger(T)
+    assert ledger["next_attempt_at"] == e.clock() + 1 and not ledger.get("pending")
+    e.bid, e.liquidity = D(".54"), D(5)
+    e.clock_value += .9
+    assert service.run_once() and len(stops(e)) == 1
+    ledger["retry_after"] = e.clock() + .5
+    e.clock_value = ledger["next_attempt_at"]
+    service.run_once()
+    assert len(stops(e)) == 1
+    e.clock_value = ledger["retry_after"] + .01
+    assert service.run_once() and e.held[T] == 0 and len(stops(e)) == 2
+    assert D(stops(e)[1]["price"]) == D(".54")
