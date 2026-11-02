@@ -98,6 +98,32 @@ def test_20_to_15_preserves_tp_and_restarts_at_new_boundary(tmp_path, sign):
     assert len(stops) == 1 and stops[0]["reduce_only"] is True
 
 
+@pytest.mark.parametrize("sign", [1, -1])
+def test_fractional_stop_migration_preserves_three_cent_tp_and_triggers_at_46_9(tmp_path, sign):
+    e, _, config, events = setup(tmp_path)
+    _, config = migrate(e, config, events)
+    _, config = migrate(e, config, events, "15")
+    config = replace(config, increment=D(".03"))
+    worker, config = migrate(e, config, events, "15")
+    e.bid = e.no_bid = D(".50")
+    e.buy(5, ".50", sign)
+    assert worker.run_once() and len(e.sent) == 1
+    assert D(e.sent[0]["price"]) == (D(".53") if sign == 1 else D(".47"))
+
+    worker, config = migrate(e, config, events, "3.1")
+    worker, _ = migrate(e, config, events, "3.1")
+    history = worker.worker.state["stop_loss_policy_migrations"]
+    assert [h["to_cents"] for h in history].count("3.1") == 1
+    assert history[-1]["from_cents"] == "15"
+    assert worker.worker.stop_loss_increment == D(".031")
+    e.bid = e.no_bid = D(".4700")
+    assert worker.run_once() and len(e.sent) == 1 and not e.cancelled
+    e.bid = e.no_bid = D(".4690")
+    assert worker.run_once() and e.held[T] == 0 and len(e.cancelled) == 1
+    assert len(e.sent) == 2 and e.sent[1]["reduce_only"] is True
+    assert D(e.sent[1]["price"]) == (D(".469") if sign == 1 else D(".531"))
+
+
 def test_per_fill_entry_costs_use_new_offset(tmp_path):
     e, old, config, events = setup(tmp_path)
     service, _ = migrate(e, config, events)
