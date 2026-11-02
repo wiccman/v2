@@ -77,8 +77,8 @@ class Settings:
             raise ValueError("Live mode requires MANUAL_EXITS_ENABLED=true, MANUAL_EXITS_DRY_RUN=false, "
                              "and MANUAL_EXTERNAL_ORDERS_ARE_MANUAL=true")
         stop_cents = number(env.get("MANUAL_STOP_LOSS_CENTS", "11"), "stop loss cents")
-        if not D(0) < stop_cents < 100 or stop_cents.quantize(D(".01")) != stop_cents:
-            raise ValueError("MANUAL_STOP_LOSS_CENTS must be positive and below 100 with at most .01-cent precision")
+        if not D(0) <= stop_cents < 100 or stop_cents.quantize(D(".01")) != stop_cents:
+            raise ValueError("MANUAL_STOP_LOSS_CENTS must be in [0, 100) with at most .01-cent precision; 0 disables stops")
         respect_edits = flag(env, "MANUAL_EXIT_RESPECT_MANUAL_EDITS")
         return cls(entry, automatic, manual, series, increment, float(poll), not live, mode,
                    stop_cents, respect_edits)
@@ -344,6 +344,7 @@ def main(argv=None):
     print(json.dumps({"event": "MANUAL_EXIT_CONFIG", "mode": settings.execution_mode,
                       "increment_cents": str(settings.increment * 100),
                       "respect_manual_edits": settings.respect_manual_edits,
+                      "stop_loss_enabled": settings.execution_mode == "resting_limit" and settings.stop_loss_cents > 0,
                       "stop_loss_cents": str(settings.stop_loss_cents) if settings.execution_mode == "resting_limit" else None,
                       "series": settings.series,
                       "dry_run": settings.dry_run, "automatic_entries": False,

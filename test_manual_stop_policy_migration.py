@@ -8,6 +8,7 @@ import pytest
 
 from manual_exit_runner import ManualExitService, Settings
 from manual_limit_exits import ManualExitBlocked
+from test_grouped_manual_stops import setup as three_cent_setup
 from test_manual_limit_exits import T
 from test_manual_stop_loss import setup
 
@@ -23,6 +24,61 @@ def test_environment_20c_setting_preserves_5c_take_profit():
     settings = Settings.read({"MANUAL_STOP_LOSS_CENTS": "20"})
     assert settings.stop_loss_cents == D("20")
     assert settings.increment == D(".05")
+
+
+@pytest.mark.parametrize("sign", [1, -1])
+def test_disabled_six_cent_stop_keeps_existing_and_new_take_profits(tmp_path, sign):
+    e, _, config = three_cent_setup(tmp_path)
+    events = []
+    old, config = migrate(e, config, events, "6")
+    e.bid = e.no_bid = D(".50")
+    e.buy(5, ".50", sign)
+    assert old.run_once()
+    original = e.sent[0].copy()
+    off = Settings.read({"MANUAL_STOP_LOSS_CENTS": "0"})
+    service, config = migrate(e, config, events, off.stop_loss_cents)
+    e.bid = e.no_bid = D(".01")
+    e.buy(2, ".40", sign)
+    assert service.run_once()
+    restarted, _ = migrate(e, config, events, "0")
+    assert restarted.run_once() and e.held[T] == sign * 7
+    assert not e.cancelled and e.sent[0] == original
+    assert [o["price"] for o in e.sent] == (["0.5300", "0.4300"] if sign == 1
+                                             else ["0.4700", "0.5700"])
+    assert all(o["time_in_force"] == "good_till_canceled" for o in e.sent)
+    report = [r for event, r in events if event == "MANUAL_PROTECTION_CHECK"][-1]
+    assert report["sl_status"] == "disabled" and report["sl_trigger"] is None
+    assert report["tp_status"] == "active"
+
+
+def test_disabling_while_take_profit_cancel_is_in_flight_restores_coverage(tmp_path):
+    e, old, config, events = setup(tmp_path)
+    e.buy(5, ".42")
+    assert old.run_once()
+    e.bid, e.delay_cancel = D(".25"), True
+    assert not old.run_once() and old.worker.ledger(T)["stop_armed"]
+    service, config = migrate(e, config, events, "0")
+    assert not service.worker.ledger(T).get("stop_armed")
+    e.delay_cancel = False
+    e.clock_value += 6
+    service.run_once()
+    assert service.run_once() and e.held[T] == 5
+    assert len(e.sent) == 2 and all(o["time_in_force"] == "good_till_canceled" for o in e.sent)
+    assert e.sent[-1]["count"] == "5" and e.sent[-1]["price"] == "0.4700"
+
+
+def test_disabling_reconciles_partly_filled_stop_without_retry(tmp_path):
+    e, old, config, events = setup(tmp_path)
+    e.buy(5, ".42")
+    e.bid, e.lose_ack, e.liquidity = D(".25"), True, D(2)
+    assert not old.run_once() and old.worker.ledger(T).get("pending")
+    service, _ = migrate(e, config, events, "0")
+    e.lose_ack = False
+    assert service.run_once() and service.run_once()
+    assert not service.worker.ledger(T).get("pending")
+    assert e.held[T] == 3 and len(e.sent) == 2
+    assert e.sent[-1]["time_in_force"] == "good_till_canceled"
+    assert e.sent[-1]["count"] == "3"
 
 
 @pytest.mark.parametrize("sign", [1, -1])

@@ -136,7 +136,7 @@ def test_live_stop_policy_cannot_change_under_existing_journal(tmp_path):
                           clock=e.clock, emit=lambda *a, **kw: None)
 
 
-@pytest.mark.parametrize("value", ["0", "-11", "100", "nan", "x"])
+@pytest.mark.parametrize("value", ["0.001", "-11", "100", "nan", "x"])
 def test_invalid_stop_configuration_rejected(value):
     with pytest.raises((ManualExitBlocked, ValueError)):
         Settings.read({"MANUAL_STOP_LOSS_CENTS": value})

@@ -99,8 +99,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
     def __init__(self, *args, stop_loss_cents=D("11"), respect_manual_edits=False, **kwargs):
         self.respect_manual_edits = bool(respect_manual_edits)
         self.stop_loss_increment = number(stop_loss_cents, "stop loss cents") / 100
-        if not D(0) < self.stop_loss_increment < 1:
-            raise ValueError("Manual stop loss must be between zero and one dollar")
+        if not D(0) <= self.stop_loss_increment < 1:
+            raise ValueError("Manual stop loss must be at least zero and below one dollar")
         super().__init__(*args, **kwargs)
         if self.state.get("manual_edit_policy") and not self.respect_manual_edits:
             raise ManualExitBlocked("Manual edit policy cannot be silently disabled")
@@ -111,8 +111,9 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         migration = None
         if previous is not None and previous != self.stop_loss_increment:
             # Only operator-approved transitions may reuse an existing journal.
-            # All order reservations, acknowledgements and armed stops carry over.
-            if (previous, self.stop_loss_increment) not in {
+            # Disabling releases local triggers. In-flight exchange actions still reconcile.
+            disabling = self.stop_loss_increment == 0 and 0 < previous < 1
+            if not disabling and (previous, self.stop_loss_increment) not in {
                     (D(".11"), D(".20")), (D(".20"), D(".15")),
                     (D(".15"), D(".031")), (D(".031"), D(".06"))}:
                 raise ManualExitBlocked("Stop loss policy changed; review the existing journal")
@@ -122,9 +123,12 @@ class RestingManualExitWorker(ManualLimitExitWorker):
             to_cents = format((self.stop_loss_increment * 100).normalize(), "f")
             migration = {"from_cents": format((previous * 100).normalize(), "f"), "to_cents": to_cents,
                          "at": str(self.clock()),
-                         "reason": f"operator_requested_{to_cents}c_stop",
-                         "armed_stops_preserved": True}
+                         "reason": "operator_disabled_stop_loss" if disabling else f"operator_requested_{to_cents}c_stop",
+                         "armed_stops_preserved": not disabling}
             self.state["stop_loss_policy_migrations"] = [*history, migration]
+            if disabling:
+                for ledger in self.state["markets"].values():
+                    ledger.pop("stop_armed", None)
         previous_target = self.state["target_policy"]
         self.state["target_policy"] = self.target_policy
         self.state["stop_loss_increment"] = str(self.stop_loss_increment)
@@ -387,6 +391,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         current = set()
 
         def publish(report):
+            if self.stop_loss_increment == 0:
+                report.update(sl_status="disabled", sl_trigger=None, sl_order_type=None)
             key = (ticker, report["fill_id"])
             now = self.clock()
             if (self._protection_reports.get(key) != report or
@@ -465,11 +471,13 @@ class RestingManualExitWorker(ManualLimitExitWorker):
 
     def _stop_candidates(self, ticker, plans):
         """Check every open fill against its own downside trigger on each pass."""
-        ledger = self.ledger(ticker)
-        armed = ledger.setdefault("stop_armed", {})
         if not plans:
             return None, None
         market = self.client.market(ticker)
+        if self.stop_loss_increment == 0:
+            return None, market  # TP repricing still needs the current tick grid.
+        ledger = self.ledger(ticker)
+        armed = ledger.setdefault("stop_armed", {})
         close = datetime.fromisoformat(market["close_time"].replace("Z", "+00:00"))
         if close.tzinfo is None:
             raise ManualExitBlocked("Market close requires a timezone")
