@@ -124,6 +124,8 @@ class RestingManualExitWorker(ManualLimitExitWorker):
                          "reason": f"operator_requested_{to_cents}c_stop",
                          "armed_stops_preserved": True}
             self.state["stop_loss_policy_migrations"] = [*history, migration]
+        previous_target = self.state["target_policy"]
+        self.state["target_policy"] = self.target_policy
         self.state["stop_loss_increment"] = str(self.stop_loss_increment)
         self.state["execution_mode"] = "resting_limit"
         self._coverage_reports = {}
@@ -132,8 +134,18 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         self._protection_cycles = defaultdict(int)
         self._stop_checked_cycle = {}
         self.save()
+        if previous_target != self.target_policy:
+            self.emit("MANUAL_TP_POLICY_MIGRATED", previous=previous_target, current=self.target_policy)
         if migration is not None:
             self.emit("MANUAL_STOP_POLICY_MIGRATED", **migration)
+
+    def _accepts_target_policy(self, saved):
+        # Resting intents retain their actual exchange terms until reconciled.
+        # Only this configured transition may reprice unedited, verified exits.
+        return super()._accepts_target_policy(saved) or (
+            self.state.get("execution_mode") == "resting_limit"
+            and saved == {"mode": "price_increment", "increment": "0.05"}
+            and self.price_increment == D(".03"))
 
     def _validate_execution_mode(self):
         if self.price_increment is None:

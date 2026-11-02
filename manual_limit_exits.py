@@ -304,7 +304,7 @@ class ManualLimitExitWorker:
                     or len(previous) != len(set(previous))
                     or tuple(previous) != self.series[:len(previous)]):
                 raise ManualExitBlocked("Manual series scope changed; review the existing journal")
-            if self.state.get("target_policy", {"mode": "order_gross_profit"}) != self.target_policy:
+            if not self._accepts_target_policy(self.state.get("target_policy", {"mode": "order_gross_profit"})):
                 raise ManualExitBlocked("Manual target policy changed; do not reuse an incompatible journal")
             activation = number(self.state.get("activation_time"), "activation time")
             if activation < 0:
@@ -350,6 +350,9 @@ class ManualLimitExitWorker:
         self._plans: dict[str, list[dict]] = {}
         self._last_discovery = None
         self._discovered: set[str] = set()
+
+    def _accepts_target_policy(self, saved):
+        return saved == self.target_policy
 
     def _validate_execution_mode(self):
         """Subclass startup checks must finish before a journal upgrade is saved."""
