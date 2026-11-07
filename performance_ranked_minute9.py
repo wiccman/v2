@@ -4,7 +4,8 @@ Rank highest signed Coinbase USD return since this 15-minute window opened.
 This ranks coins, not Kalshi probabilities, and does not trade Crypto Leader.
 A priced-out leader falls through to the next ranked individual coin. All
 existing price, timing, ownership, one-attempt, TP, stop and budget rules remain.
-Missing, stale or incomplete performance data blocks new entries, not exits.
+Coins with unavailable data are skipped; rank the remaining valid observations.
+No valid observations blocks new entries, not exits.
 Run explicitly with: python performance_ranked_minute9.py --live
 """
 from __future__ import annotations
@@ -32,7 +33,7 @@ _CORE_RUN_PASS = core.run_pass
 
 
 class PerformanceUnavailable(ValueError):
-    """No defensible complete ranking; existing exits must continue."""
+    """No defensible ranking or observation; existing exits must continue."""
 
 
 @dataclass(frozen=True)
@@ -48,16 +49,20 @@ class Observation:
         return (self.price / self.opening - 1) * 100
 
 
-def ranked_observations(rows, series_list, window_start, now):
-    """Strict same-window ranking; no stale-coin or partial-basket fallback."""
+def ranked_observations(rows, series_list, window_start, now, *, allow_partial=False):
+    """Rank valid same-window data; explicitly allow missing coins when requested."""
     names = tuple(series_list)
     if (type(window_start) is not int or window_start % 900
             or not math.isfinite(now) or not window_start <= now < window_start + 900
             or not names or len(set(names)) != len(names)
             or any(s not in PRODUCTS for s in names)):
         raise PerformanceUnavailable("invalid_window_or_series")
-    if len(rows) != len(names) or {r.series for r in rows} != set(names):
+    observed = [r.series for r in rows]
+    if (len(set(observed)) != len(observed) or not set(observed).issubset(names)
+            or (not allow_partial and set(observed) != set(names))):
         raise PerformanceUnavailable("incomplete_coin_snapshot")
+    if not rows:
+        raise PerformanceUnavailable("no_valid_coin_observations")
     for r in rows:
         if (r.window_start != window_start or not math.isfinite(r.observed_at)
                 or not r.opening.is_finite() or not r.price.is_finite()
@@ -73,8 +78,9 @@ def ranked_observations(rows, series_list, window_start, now):
 
 class CoinbasePerformance:
     """Read-only public feed, separate from the authenticated trading client."""
-    def __init__(self, *, clock=time.time, session_factory=requests.Session):
+    def __init__(self, *, clock=time.time, session_factory=requests.Session, emit=None):
         self.clock, self.session_factory = clock, session_factory
+        self.emit = emit or core.event
         self.opens = {}
         self.cached = None
         self.last_attempt = float("-inf")
@@ -108,14 +114,27 @@ class CoinbasePerformance:
         names, now = tuple(series_list), self.clock()
         if self.cached is not None and self.cached[0:2] == (start, names):
             if 0 <= now - self.cached[2] < REFRESH_SECONDS:
-                return ranked_observations(self.cached[3], names, start, now)
+                return ranked_observations(self.cached[3], names, start, now,
+                                           allow_partial=True)
         if now - self.last_attempt < REFRESH_SECONDS:
             raise PerformanceUnavailable("performance_feed_retry_cooldown")
         self.last_attempt = now
         with ThreadPoolExecutor(max_workers=len(names)) as pool:
-            rows = list(pool.map(lambda s: self._one(s, start), names))
+            pending = [(series, pool.submit(self._one, series, start)) for series in names]
         finished = self.clock()
-        ranked = ranked_observations(rows, names, start, finished)
+        rows = []
+        for series, future in pending:
+            try:
+                row = future.result()
+                # Validate independently so a missing or stale coin cannot discard
+                # the rest. Never substitute a later candle or a different window.
+                ranked_observations([row], (series,), start, finished)
+            except Exception as error:
+                self.emit("M9_PERFORMANCE_COIN_SKIPPED", series=series,
+                          window_start_ms=start * 1000, **error_fields(error))
+                continue
+            rows.append(row)
+        ranked = ranked_observations(rows, names, start, finished, allow_partial=True)
         self.opens = {(start, r.series): r.opening for r in rows}
         self.cached = (start, names, finished, rows)
         return ranked
@@ -180,7 +199,7 @@ def run_ranked_pass(client, journal, series_list, base_budget, max_contracts,
             return
         try:
             rows = provider.snapshot(names, start)
-            rows = ranked_observations(rows, names, start, clock())
+            rows = ranked_observations(rows, names, start, clock(), allow_partial=True)
         except Exception as error:
             emit("M9_PERFORMANCE_UNAVAILABLE", **error_fields(error))
             return
@@ -191,6 +210,8 @@ def run_ranked_pass(client, journal, series_list, base_budget, max_contracts,
         proxy.ranks = {r.series: i + 1 for i, r in enumerate(rows)}
         emit("M9_PERFORMANCE_QUEUE", window_start_ms=start * 1000,
              source="coinbase_usd", metric="signed_return_from_window_open",
+             ranking_scope="available_coin_data",
+             excluded_series=[s for s in names if s not in proxy.ranks],
              queue=[{"rank": i + 1, "series": r.series,
                      "return_pct": str(r.return_pct), "observed_at": r.observed_at}
                     for i, r in enumerate(rows)])

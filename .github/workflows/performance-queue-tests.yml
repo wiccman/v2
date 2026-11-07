@@ -28,7 +28,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install -r requirements.txt
-      - run: python tools/run_offline_tests.py -q test_single_coin_minute9.py test_performance_ranked_minute9.py
+      - run: python tools/run_offline_tests.py -q test_single_coin_minute9.py test_minute9_queue.py test_performance_ranked_minute9.py
 
   public-feed-read-check:
     runs-on: ubuntu-latest
@@ -45,24 +45,14 @@ jobs:
         run: |
           python -u - <<'PY'
           import json, time, requests
-          from concurrent.futures import ThreadPoolExecutor
           from performance_ranked_minute9 import CoinbasePerformance, PRODUCTS, ranked_observations
           now = time.time()
           start = int(now // 900) * 900
           source = CoinbasePerformance()
-          def one(series):
-              try:
-                  row = source._one(series, start)
-                  print(json.dumps({'series':series, 'return_pct':str(row.return_pct),
-                                    'tick_age_seconds':round(time.time()-row.observed_at,3)}), flush=True)
-                  return row
-              except Exception as error:
-                  response = getattr(error, 'response', None)
-                  print(json.dumps({'series':series,'error_type':type(error).__name__,
-                                    'http_status':getattr(response,'status_code',None)}), flush=True)
-                  return None
-          with ThreadPoolExecutor(max_workers=5) as pool:
-              rows = list(pool.map(one, PRODUCTS))
+          rows = source.snapshot(tuple(PRODUCTS), start)
+          for row in rows:
+              print(json.dumps({'series':row.series, 'return_pct':str(row.return_pct),
+                                'tick_age_seconds':round(time.time()-row.observed_at,3)}), flush=True)
           ticker='KXBTC15M-26NOV071415-15'
           r=requests.get('https://external-api.kalshi.com/trade-api/v2/markets/'+ticker, timeout=8)
           if r.status_code==200:
@@ -71,6 +61,7 @@ jobs:
                                 'open_time':market.get('open_time'),'close_time':market.get('close_time')}),flush=True)
           else:
               print(json.dumps({'event':'public_market_time_check','http_status':r.status_code}),flush=True)
-          ranked = ranked_observations([r for r in rows if r is not None], tuple(PRODUCTS), start, time.time())
-          print(json.dumps({'event':'complete_fresh_queue_validated', 'queue':[r.series for r in ranked]}),flush=True)
+          ranked = ranked_observations(rows, tuple(PRODUCTS), start, time.time(), allow_partial=True)
+          print(json.dumps({'event':'available_fresh_queue_validated', 'queue':[r.series for r in ranked],
+                            'excluded_series':[s for s in PRODUCTS if s not in {r.series for r in ranked}]}),flush=True)
           PY

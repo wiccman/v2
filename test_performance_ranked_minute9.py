@@ -65,11 +65,12 @@ def test_ranking_is_signed_percentage_not_contract_price():
     assert ranked.ranked_observations(rows, NAMES, START, NOW)[0].series == 'KXHYPE15M'
 
 
-@pytest.mark.parametrize('change', ['missing', 'duplicate', 'old_window', 'stale', 'future', 'nan', 'zero', 'skew'])
-def test_invalid_snapshot_never_silently_ranks_partial_coins(change):
+@pytest.mark.parametrize('allow_partial', [False, True])
+@pytest.mark.parametrize('change', ['duplicate', 'unknown', 'old_window', 'stale', 'future', 'nan', 'zero', 'skew'])
+def test_invalid_observations_are_rejected_even_with_partial_ranking(change, allow_partial):
     rows = observations()
-    if change == 'missing': rows.pop()
     if change == 'duplicate': rows[-1] = rows[0]
+    if change == 'unknown': rows[-1] = replace(rows[-1], series='UNSUPPORTED')
     if change == 'old_window': rows[0] = replace(rows[0], window_start=START-900)
     if change == 'stale': rows[0] = replace(rows[0], observed_at=NOW-16)
     if change == 'future': rows[0] = replace(rows[0], observed_at=NOW+2)
@@ -77,7 +78,116 @@ def test_invalid_snapshot_never_silently_ranks_partial_coins(change):
     if change == 'zero': rows[0] = replace(rows[0], opening=D('0'))
     if change == 'skew': rows[0] = replace(rows[0], observed_at=NOW-11)
     with pytest.raises(ranked.PerformanceUnavailable):
+        ranked.ranked_observations(rows, NAMES, START, NOW, allow_partial=allow_partial)
+
+
+def test_missing_coin_requires_explicit_partial_ranking():
+    rows = observations()[:-1]
+    with pytest.raises(ranked.PerformanceUnavailable):
         ranked.ranked_observations(rows, NAMES, START, NOW)
+    result = ranked.ranked_observations(rows, NAMES, START, NOW, allow_partial=True)
+    assert [r.series for r in result] == ['KXETH15M', 'KXSOL15M', 'KXBTC15M', 'KXXRP15M']
+
+
+def public_feed(monkeypatch, missing=(), *, clock=lambda: NOW):
+    """Exercise candle parsing and parallel collection without any network access."""
+    events, requested = [], []
+    rows = {ranked.PRODUCTS[r.series]: r for r in observations()}
+
+    class Response:
+        def __init__(self, data): self.data = data
+        def raise_for_status(self): pass
+        def json(self): return self.data
+
+    class Session:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, url, **kwargs):
+            product, resource = url.rsplit('/', 2)[-2:]
+            row = rows[product]
+            requested.append((row.series, resource))
+            if resource == 'candles':
+                # Reproduce HYPE: the next minute exists, the opening minute does not.
+                ts = START + 60 if row.series in missing else START
+                return Response([[ts, 99, 101, 100, 100, 1]])
+            return Response({'price': str(row.price),
+                'time': ranked.datetime.fromtimestamp(clock(), ranked.timezone.utc).isoformat()})
+
+    provider = ranked.CoinbasePerformance(clock=clock, session_factory=Session,
+        emit=lambda name, **data: events.append((name, data)))
+    return provider, events, requested
+
+
+@pytest.mark.parametrize('missing', ['KXHYPE15M', 'KXETH15M'])
+def test_missing_opening_candle_skips_only_that_coin_and_buys_backup(tmp_path, monkeypatch, missing):
+    provider, feed_events, _ = public_feed(monkeypatch, {missing})
+    exchange, journal, events = run(tmp_path, monkeypatch, provider=provider)
+    # ETH is either missing or priced out. SOL remains the next eligible coin.
+    assert len(exchange.posted) == 1
+    assert exchange.posted[0][0].startswith('KXSOL15M-')
+    assert missing not in exchange.checked
+    assert core.window_entry_count(journal, START * 1000) == 1
+    skipped = [data for name, data in feed_events if name == 'M9_PERFORMANCE_COIN_SKIPPED']
+    assert skipped == [{'series': missing, 'window_start_ms': START * 1000,
+        'error_type': 'PerformanceUnavailable', 'reason': 'opening_candle_missing_or_ambiguous'}]
+    queue = next(data for name, data in events if name == 'M9_PERFORMANCE_QUEUE')
+    assert queue['excluded_series'] == [missing]
+    assert queue['ranking_scope'] == 'available_coin_data'
+
+
+def test_one_remaining_valid_coin_can_be_selected(tmp_path, monkeypatch):
+    provider, _, _ = public_feed(monkeypatch, set(NAMES) - {'KXBTC15M'})
+    exchange, _, _ = run(tmp_path, monkeypatch, provider=provider)
+    assert exchange.checked == ['KXBTC15M']
+    assert len(exchange.posted) == 1
+    assert exchange.posted[0][0].startswith('KXBTC15M-')
+
+
+def test_no_valid_coins_skips_entries_and_still_runs_exit_pass(tmp_path, monkeypatch):
+    order = []
+    monkeypatch.setattr(core, 'apply_new_outcomes', lambda journal: order.append('exits'))
+    provider, feed_events, _ = public_feed(monkeypatch, set(NAMES))
+    exchange, journal, events = run(tmp_path, monkeypatch, provider=provider)
+    assert order == ['exits']
+    assert not exchange.posted and not exchange.checked and not journal.data['windows']
+    assert len(feed_events) == len(NAMES)
+    assert events[-1] == ('M9_PERFORMANCE_UNAVAILABLE', {
+        'error_type': 'PerformanceUnavailable', 'reason': 'no_valid_coin_observations'})
+
+
+@pytest.mark.parametrize('problem', ['timeout', 'http_error', 'stale', 'old_window', 'nan', 'zero'])
+def test_single_coin_error_is_isolated(monkeypatch, problem):
+    provider, events, _ = public_feed(monkeypatch)
+    original = provider._one
+    def one(series, start):
+        if series != 'KXETH15M': return original(series, start)
+        if problem == 'timeout': raise ranked.requests.Timeout('private response text')
+        if problem == 'http_error': raise ranked.requests.HTTPError('private response text')
+        row = observations()[1]
+        if problem == 'stale': return replace(row, observed_at=NOW - 16)
+        if problem == 'old_window': return replace(row, window_start=START - 900)
+        if problem == 'nan': return replace(row, price=D('NaN'))
+        return replace(row, opening=D('0'))
+    monkeypatch.setattr(provider, '_one', one)
+    rows = provider.snapshot(NAMES, START)
+    assert len(rows) == 4 and rows[0].series == 'KXSOL15M'
+    assert all(row.series != 'KXETH15M' for row in rows)
+    assert events[0][1]['series'] == 'KXETH15M'
+    assert 'private response text' not in str(events)
+
+
+def test_partial_cache_expires_and_recovered_coin_rejoins(monkeypatch):
+    missing, now = {'KXETH15M'}, [NOW]
+    provider, _, requested = public_feed(monkeypatch, missing, clock=lambda: now[0])
+    assert provider.snapshot(NAMES, START)[0].series == 'KXSOL15M'
+    calls = len(requested)
+    missing.clear()
+    now[0] += 2
+    assert provider.snapshot(NAMES, START)[0].series == 'KXSOL15M'
+    assert len(requested) == calls
+    now[0] += 2
+    assert provider.snapshot(NAMES, START)[0].series == 'KXETH15M'
+    assert len(requested) > calls
 
 
 def test_priced_out_leader_falls_to_second_without_consuming_slot(tmp_path, monkeypatch):
