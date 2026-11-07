@@ -315,7 +315,12 @@ class StopExchange(FakeTradeClient):
                                  "limit": D(outcome_price), "client_id": client_order_id})
         if self.lost_ack:
             raise TimeoutError("simulated lost acknowledgement")
-        return {"order": {"order_id": f"exit-{len(self.submissions)}"}}
+        order_id = f"exit-{len(self.submissions)}"
+        # An accepted IOC order can remain pending while the venue's fill view
+        # catches up. A pending order must never be treated as a confirmed exit.
+        self.orders[order_id] = {"order_id": order_id, "ticker": ticker,
+                                 "status": "pending", "fill_count_fp": "0"}
+        return {"order": {"order_id": order_id}}
 
     def simulate_partial_fill(self, quantity="1", price=".60"):
         name = "exit-1"
