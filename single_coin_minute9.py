@@ -4,8 +4,11 @@ For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
 whichever side has a quoted ask from 59c through 91c during elapsed minute 9.
 No basket mean, leader rank, direction indicator or other coin-selection rule.
 Both sides qualifying is ambiguous, so the market is skipped. By default
-only the first eligible single-coin market per 15-minute window is entered;
-M9_MAX_ENTRIES_PER_WINDOW can increase this limit.
+only one filled or potentially-filled market per 15-minute window is allowed.
+Candidates keep M9_SERIES order. A priced-out candidate advances to the next;
+a proven terminal zero-fill entry releases its slot for the backup candidate.
+Partial fills and unknown acknowledgements NEVER release the window slot.
+M9_MAX_ENTRIES_PER_WINDOW can increase the filled/pending-market limit.
 Only orders matched to this runner's saved client/order IDs are managed.
 Outside positions and orders are left untouched; overlapping markets are skipped.
 
@@ -42,6 +45,7 @@ DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
 MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = D(".59"), D(".91"), D(".05"), D(".45")
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
+ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
 
 
 def event(name, **details):
@@ -201,8 +205,24 @@ def verify_completed_trade(client, journal, record, now):
     if bought > D(record["quantity"]):
         raise RuntimeError("Buy quantity exceeds saved authorization")
     if bought == 0:
+        # Release a window slot only after the exact owned order is terminal,
+        # both counts are explicitly zero, and no inventory/order can still fill.
+        # Missing counts or an HTTP error are NOT proof of zero execution.
+        remaining_count = buy.get("remaining_count_fp", buy.get("remaining_count"))
+        if (buy.get("status") not in {"canceled", "cancelled", "expired", "rejected"}
+                or remaining_count is None or D(str(remaining_count)) != 0
+                or buy.get("subaccount_number", 0) not in {0, None}
+                or buy_rows or record.get("sells")):
+            return
+        if position_for(client, ticker) != 0 or client.all_orders(ticker, "resting"):
+            return
+        record["entry_zero_fill_verified"] = {
+            "order_id": buy["order_id"], "client_id": record["buy"]["client_id"],
+            "status": buy["status"], "filled": "0", "remaining": "0",
+            "checked_at": now,
+        }
         record["outcome"] = {"status": "no_fill", "completed_at": now, "counted": False}
-        journal.save()
+        journal.save()  # Proof and classification are one atomic journal write.
         return
     valid_order_ids = {record["buy"]["order_id"]}
     sold, sell_rows = D(0), []
@@ -440,14 +460,70 @@ def reconcile_exit(client, journal, record, now):
         journal.save()
 
 
+def entry_slot_released(record):
+    """Only this runner's saved, verified zero-fill proof releases a slot."""
+    proof = record.get("entry_zero_fill_verified") or {}
+    intent = record.get("buy") or {}
+    return bool(record.get("outcome", {}).get("status") == "no_fill"
+                and intent.get("order_id") and intent.get("client_id")
+                and proof.get("order_id") == intent["order_id"]
+                and proof.get("client_id") == intent["client_id"]
+                and proof.get("status") in {"canceled", "cancelled", "expired", "rejected"}
+                and proof.get("filled") == "0" and proof.get("remaining") == "0"
+                and not record.get("sells"))
+
+
 def window_entry_count(journal, window_start_ms):
-    """Count durable attempts across every configured single-coin market."""
+    """Count filled or potentially-filled entries, not proven zero-fill misses."""
     if type(window_start_ms) is not int or window_start_ms % 900000:
         raise ValueError("Invalid 15-minute window start")
     return sum(1 for record in journal.data["windows"].values()
                if record.get("window_start_ms") == window_start_ms
-               and isinstance(record.get("buy"), dict))
+               and isinstance(record.get("buy"), dict)
+               and not entry_slot_released(record))
 
+
+
+def queue_skip(client_market, now, series):
+    """Explain in-window quote skips; do not spam logs for future markets."""
+    try:
+        start = parse_time(client_market["close_time"]) - 900
+        if not 540 <= now - start < 600:
+            return
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return
+    asks = {}
+    for side in ("yes", "no"):
+        try:
+            value = D(str(client_market[side + "_ask_dollars"]))
+            asks[side] = str(value) if value.is_finite() else None
+        except (KeyError, TypeError, ValueError, ArithmeticError):
+            asks[side] = None
+    eligible = [v for v in asks.values() if v is not None and MIN_PRICE <= D(v) <= MAX_PRICE]
+    reason = ("market_not_active" if client_market.get("status") not in {"active", "open"}
+              else "ambiguous_sides" if len(eligible) > 1
+              else "missing_quote" if None in asks.values()
+              else "outside_59_91_price_band")
+    event("M9_QUEUE_SKIP", ticker=client_market.get("ticker"), series=series,
+          reason=reason, yes_ask=asks["yes"], no_ask=asks["no"])
+
+
+def candidate_queue(client, series_list, now):
+    """Price-eligible single coins in configured order, not basket ranking."""
+    candidates = []
+    for series in series_list:
+        try:
+            markets = client.markets(series_ticker=series, status="open", limit=100)
+        except Exception as error:
+            event("M9_MARKET_DISCOVERY_PAUSED", series=series, error_type=type(error).__name__)
+            continue
+        for market in markets:
+            plan = plan_single_coin(market, now, series)
+            if plan is None:
+                queue_skip(market, now, series)
+            else:
+                candidates.append(plan)
+    return candidates
 
 def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
              max_entries_per_window=1):
@@ -463,74 +539,96 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                     event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
                           error_type=type(error).__name__)
         apply_new_outcomes(journal)
-    # Only one entry per quarter hour matches the 96-trade/day illustration;
-    # selecting the first price-eligible individual coin is not a basket signal.
-    # Preview does not write attempts, so deduplicate its signals in memory.
+    # Queue order is unchanged (M9_SERIES). Refresh each candidate before use;
+    # never reuse a backup's stale snapshot as an executable quote.
     preview_windows = set()
-    for series in series_list:
-        try:
-            markets = client.markets(series_ticker=series, status="open", limit=100)
-        except Exception as error:
-            event("M9_MARKET_DISCOVERY_PAUSED", series=series, error_type=type(error).__name__)
+    candidates = candidate_queue(client, series_list, now)
+    if candidates:
+        event("M9_ENTRY_QUEUE", tickers=[p["ticker"] for p in candidates],
+              policy=ENTRY_QUEUE_POLICY)
+    for plan in candidates:
+        ticker, series = plan["ticker"], plan["series"]
+        start_ms = plan["window_start_ms"]
+        if (window_entry_count(journal, start_ms) >= max_entries_per_window
+                or (not live and start_ms in preview_windows)):
             continue
-        for market in markets:
-            plan = plan_single_coin(market, now, series)
-            if plan is None:
-                continue
-            ticker = plan["ticker"]
-            start_ms = plan["window_start_ms"]
-            if (window_entry_count(journal, start_ms) >= max_entries_per_window
-                    or (not live and start_ms in preview_windows)):
-                continue  # No overtrading when five coins qualify in one period.
-            if ticker in journal.data["windows"]:
-                continue  # One attempt per individual coin market and 15m window.
-            if entry_market_occupied(client, ticker):
-                event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
-                continue
-            allocation = trade_budget(journal.data["streak"], base_budget)
-            quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts)
-            if quantity < 1:
-                event("M9_ENTRY_BUDGET_TOO_SMALL", ticker=ticker,
-                      allocated_dollars=str(allocation), limit=plan["limit"])
-                continue
-            if not live:
-                preview_windows.add(start_ms)
-                event("M9_DRY_RUN_SIGNAL", **plan, quantity=quantity,
-                      allocated_dollars=str(allocation),
-                      reduced_budget=journal.data["streak"]["reduced_budget"],
-                      consecutive_wins=journal.data["streak"]["consecutive_wins"],
-                      target_example=str(D(plan["limit"]) + PROFIT))
-                continue
-            # Fresh quote, same side, same 15-minute market, and still minute 9.
-            market = client.market(ticker)
-            current = plan_single_coin(market, time.time(), series)
-            if current is None or current["side"] != plan["side"]:
-                continue
-            quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts)
-            if quantity < 1:
-                continue
-            if entry_market_occupied(client, ticker):
-                event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
-                continue
-            intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
-                      "created_at": time.time()}
-            record = {"ticker": ticker, "series": series, "side": current["side"],
-                      "window_start_ms": current["window_start_ms"],
-                      "quantity": str(quantity), "allocated_dollars": str(allocation),
-                      "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
-                      "buy": intent, "sells": []}
-            journal.data["windows"][ticker] = record
-            journal.save()  # Durably forbid duplicate entry even if ACK is lost.
-            event("M9_BUY_SUBMIT", ticker=ticker, side=current["side"],
-                  quantity=str(quantity), price=current["limit"])
+        if ticker in journal.data["windows"]:
+            continue  # Never retry the same coin: move to its queued backup.
+        if entry_market_occupied(client, ticker):
+            event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
+            continue
+        allocation = trade_budget(journal.data["streak"], base_budget)
+        quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts)
+        if quantity < 1:
+            event("M9_ENTRY_BUDGET_TOO_SMALL", ticker=ticker,
+                  allocated_dollars=str(allocation), limit=plan["limit"])
+            continue
+        if not live:
+            preview_windows.add(start_ms)
+            event("M9_DRY_RUN_SIGNAL", **plan, quantity=quantity,
+                  allocated_dollars=str(allocation),
+                  reduced_budget=journal.data["streak"]["reduced_budget"],
+                  consecutive_wins=journal.data["streak"]["consecutive_wins"],
+                  target_example=str(D(plan["limit"]) + PROFIT))
+            continue
+        market = client.market(ticker)
+        current = plan_single_coin(market, time.time(), series)
+        if (current is None or current["side"] != plan["side"]
+                or current["window_start_ms"] != start_ms):
+            queue_skip(market, time.time(), series)
+            event("M9_QUEUE_ADVANCE", ticker=ticker, reason="fresh_quote_not_eligible")
+            continue
+        quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts)
+        if quantity < 1:
+            continue
+        if entry_market_occupied(client, ticker):
+            event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
+            continue
+        # Portfolio checks may have taken time. Never extend minute 9.
+        if not start_ms / 1000 + 540 <= time.time() < start_ms / 1000 + 600:
+            event("M9_QUEUE_ADVANCE", ticker=ticker, reason="entry_window_ended")
+            continue
+        intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
+                  "created_at": time.time()}
+        record = {"ticker": ticker, "series": series, "side": current["side"],
+                  "window_start_ms": start_ms,
+                  "quantity": str(quantity), "allocated_dollars": str(allocation),
+                  "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
+                  "buy": intent, "sells": []}
+        journal.data["windows"][ticker] = record
+        journal.save()  # A pending/ambiguous POST consumes the slot durably.
+        event("M9_BUY_SUBMIT", ticker=ticker, side=current["side"],
+              quantity=str(quantity), price=current["limit"])
+        try:
             response = client.place_entry(ticker, current["side"], quantity, D(current["limit"]),
-                parse_time(market["close_time"]), submit_before=(
-                    current["window_start_ms"] + 600000) / 1000,
+                parse_time(market["close_time"]), submit_before=(start_ms + 600000) / 1000,
                 client_order_id=intent["client_id"], ioc=True)
-            row = response.get("order", response)
-            if row.get("order_id"):
-                intent["order_id"] = row["order_id"]
-                journal.save()
+        except Exception as error:
+            # Log structured diagnostics, not raw responses or credentials.
+            code = getattr(error, "code", None)
+            safe_code = code if isinstance(code, str) and len(code) <= 80 and all(
+                ch.isalnum() or ch in "_-" for ch in code) else None
+            status = getattr(error, "status_code", None)
+            event("M9_BUY_SUBMISSION_ERROR", ticker=ticker,
+                  error_type=type(error).__name__,
+                  http_status=status if type(status) is int else None, api_code=safe_code)
+            raise  # Unknown acceptance is never permission to try another coin.
+        row = response.get("order", response)
+        if row.get("order_id"):
+            intent["order_id"] = row["order_id"]
+            journal.save()
+            try:
+                # Do not infer a miss from a quote or a missing acknowledgement.
+                # Only an exact terminal-order read + fills can release this slot.
+                verify_completed_trade(client, journal, record, time.time())
+            except Exception as error:
+                event("M9_ENTRY_CONFIRMATION_PENDING", ticker=ticker,
+                      error_type=type(error).__name__)
+        if entry_slot_released(record):
+            event("M9_QUEUE_ADVANCE", ticker=ticker, reason="confirmed_zero_fill")
+            apply_new_outcomes(journal)  # no_fill never changes the win streak
+        # On any positive fill or unresolved order the count still blocks backups.
+
 
 def main(argv=None):
     load_dotenv()
@@ -583,6 +681,7 @@ def main(argv=None):
         event("M9_READY", live=args.live, series=series_list,
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               max_entries_per_window=max_entries_per_window,
+              entry_queue_policy=ENTRY_QUEUE_POLICY,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents="59-91", take_profit_cents=5,
