@@ -5,7 +5,8 @@ from decimal import Decimal as D
 import pytest
 from single_coin_minute9 import (Journal, DEFAULT_SERIES, plan_single_coin,
     starting_streak, next_streak, trade_budget, budgeted_quantity,
-    apply_new_outcomes, verify_completed_trade, exit_decision, reconcile_exit)
+    apply_new_outcomes, verify_completed_trade, exit_decision, reconcile_exit,
+    window_entry_count, run_pass)
 
 START = 1793763000  # 15-minute-aligned contract window
 CLOSE = START + 900
@@ -421,3 +422,76 @@ def test_stop_execution_realized_loss_resets_win_streak(tmp_path):
     assert record["outcome"]["status"] == "loss"
     apply_new_outcomes(journal)
     assert journal.data["streak"] == starting_streak()
+
+
+class PreviewCoinClient:
+    def __init__(self):
+        self.signals = 0
+        self.posted = []
+        self.series = ("KXBTC15M", "KXETH15M", "KXSOL15M")
+
+    def markets(self, *, series_ticker, status, limit):
+        assert status == "open"
+        return [market(yes=".75", no=".24", series=series_ticker)]
+
+    def positions(self, ticker):
+        return []
+
+    def all_orders(self, ticker, status=None):
+        return []
+
+    def market(self, ticker):
+        return market(yes=".75", no=".24", series=ticker.split("-")[0])
+
+    def place_entry(self, ticker, side, quantity, limit, expiry, **kwargs):
+        self.posted.append((ticker, side, quantity, limit))
+        return {"order": {"order_id": "entry-1"}}
+
+
+def test_one_global_entry_in_five_single_coin_markets(tmp_path, monkeypatch):
+    import single_coin_minute9 as mod
+    bot = PreviewCoinClient()
+    j = Journal(tmp_path / "cap.json")
+    events = []
+    monkeypatch.setattr(mod, "event", lambda name, **data: events.append((name, data)))
+    # Freeze clock so the single minute-9 window remains eligible.
+    monkeypatch.setattr(mod.time, "time", lambda: START + 550)
+    run_pass(bot, j, bot.series, D("20"), 100, False, START + 550)
+    preview = [e for e in events if e[0] == "M9_DRY_RUN_SIGNAL"]
+    assert len(preview) == 1
+    assert preview[0][1]["series"] == "KXBTC15M"
+    # The actual live run records a durable one-window attempt, no other coin buy.
+    run_pass(bot, j, bot.series, D("20"), 100, True, START + 550)
+    assert len(bot.posted) == 1
+    assert window_entry_count(j, START * 1000) == 1
+    assert list(j.data["windows"]) == [bot.posted[0][0]]
+    assert j.data["windows"][bot.posted[0][0]]["quantity"] == "25"
+    # Even across a restart, the pending first attempt blocks other coin entries.
+    from single_coin_minute9 import Journal as Reopened
+    reopened = Reopened(j.path)
+    run_pass(bot, reopened, bot.series, D("20"), 100, True, START + 550)
+    assert len(bot.posted) == 1
+
+
+def test_more_than_one_coin_trade_requires_explicit_override(tmp_path, monkeypatch):
+    import single_coin_minute9 as mod
+    bot = PreviewCoinClient()
+    j = Journal(tmp_path / "cap-two.json")
+    monkeypatch.setattr(mod.time, "time", lambda: START + 550)
+    run_pass(bot, j, bot.series, D("20"), 100, True, START + 550,
+             max_entries_per_window=2)
+    assert len(bot.posted) == 2
+    assert window_entry_count(j, START * 1000) == 2
+
+
+def test_window_attempts_are_exactly_scoped(tmp_path):
+    j = Journal(tmp_path / "cap-scope.json")
+    j.data["windows"]["a"] = {"ticker": "a", "window_start_ms": START * 1000,
+                                "buy": {"client_id": "unconfirmed"}}
+    j.data["windows"]["b"] = {"ticker": "b", "window_start_ms": (START+900) * 1000,
+                                "buy": {"client_id": "confirmed"}}
+    j.save()
+    assert window_entry_count(Journal(j.path), START * 1000) == 1
+    assert window_entry_count(Journal(j.path), (START+900) * 1000) == 1
+    with pytest.raises(ValueError):
+        window_entry_count(j, START * 1000 + 123)
