@@ -8,7 +8,8 @@ Both sides qualifying is ambiguous, so the market is skipped.
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
-No stop is created. IOC exits require the process to stay running.
+An 11c per-contract loss threshold triggers a price-protected reduce-only IOC;
+this is not a guaranteed 11c maximum loss. IOC exits require the process to run.
 After three confirmed profitable trades, the per-entry budget drops to
 one third of the normal allocation until the next confirmed losing trade; then the consecutive-win count resets.
 """
@@ -33,7 +34,7 @@ from kalshi import KalshiClient
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, MAX_PRICE, PROFIT = D(".59"), D(".91"), D(".05")
+MIN_PRICE, MAX_PRICE, PROFIT, STOP_LOSS = D(".59"), D(".91"), D(".05"), D(".11")
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 
@@ -80,6 +81,27 @@ def plan_single_coin(market, now, series):
     return {"ticker": ticker, "series": series, "side": side, "ask": str(ask),
             "limit": str(limit), "window_start_ms": int(open_at * 1000),
             "window_end_ms": int(close * 1000)}
+
+
+def exit_decision(cost, bid, *, stop_armed=False):
+    """Return (exit kind, protected IOC limit) from executable bid and fill cost.
+
+    The 11-cent threshold is a trigger, not guaranteed realized slippage control:
+    on a gap the exit limit is the currently quoted bid, not the stop threshold.
+    A latched stop keeps priority over TP through later price recovery/restarts.
+    """
+    cost, bid = D(str(cost)), D(str(bid))
+    if not cost.is_finite() or not D(0) < cost < D(1):
+        raise ValueError("Invalid verified entry cost")
+    if not bid.is_finite() or not D(0) <= bid <= D(1):
+        raise ValueError("Invalid executable bid")
+    if stop_armed or bid <= cost - STOP_LOSS:
+        # No executable bid means stop stays armed and is retried next pass.
+        return "stop_loss", bid if D(0) < bid < D(1) else None
+    target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
+    if target > D(".99"):
+        return None, None
+    return ("take_profit", target) if bid >= target else (None, None)
 
 
 def starting_streak():
@@ -356,18 +378,29 @@ def reconcile_exit(client, journal, record, now):
         return
     cost = sum((D(str(f.get("count_fp", f.get("count")))) * _outcome_cost(f, sign)
                 for f in buy_rows), D(0)) / bought
-    target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
-    if target > D(".99"):
-        raise RuntimeError("TP above maximum tradable quote")
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
-    if bid < target:
+    purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
+    if purpose is None:
+        return
+    if purpose == "stop_loss" and not record.get("stop_armed"):
+        # Latch the trigger even if the book temporarily loses its best bid.
+        record["stop_armed"] = {
+            "at": now, "trigger_bid": str(bid), "threshold": str(cost - STOP_LOSS)
+        }
+        journal.save()
+        event("M9_STOP_TRIGGERED", ticker=ticker, entry_cost=str(cost),
+              trigger_bid=str(bid), threshold=str(cost - STOP_LOSS))
+    if limit is None:
+        event("M9_STOP_NO_EXECUTABLE_BID", ticker=ticker)
         return
     intent = {"client_id": str(uuid.uuid4()), "quantity": str(remaining),
-              "target": str(target), "created_at": now}
+              "target": str(limit), "purpose": purpose, "created_at": now}
     record["sells"].append(intent)
     journal.save()  # Intent is durable before any POST
-    event("M9_TP_SUBMIT", ticker=ticker, quantity=str(remaining), target=str(target))
-    response = client.place_take_profit(ticker, sign * remaining, target,
+    event("M9_STOP_SUBMIT" if purpose == "stop_loss" else "M9_TP_SUBMIT",
+          ticker=ticker, quantity=str(remaining), target=str(limit),
+          entry_cost=str(cost), trigger_bid=str(bid), execution="reduce_only_ioc")
+    response = client.place_take_profit(ticker, sign * remaining, limit,
                                         client_order_id=intent["client_id"])
     row = response.get("order", response)
     if row.get("order_id"):
@@ -491,7 +524,8 @@ def main(argv=None):
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
-              price_range_cents="59-91", take_profit_cents=5, no_stop=True)
+              price_range_cents="59-91", take_profit_cents=5,
+              stop_loss_cents=11, stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()
             try:
