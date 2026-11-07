@@ -67,6 +67,15 @@ def test_journal_persists_one_order_per_coin(tmp_path):
     first.save()
     assert len(Journal(state).data["windows"]) == 2
 
+def test_older_preview_half_budget_state_migrates_to_reduced_mode(tmp_path):
+    path = tmp_path / "old_streak.json"
+    path.write_text('{"schema":1,"windows":{},"streak":{"consecutive_wins":3,"half_budget":true}}')
+    migrated = Journal(path)
+    assert migrated.data["streak"] == {"consecutive_wins": 3, "reduced_budget": True}
+    assert trade_budget(migrated.data["streak"], D("20")) == D("20") / D(3)
+    assert Journal(path).data == migrated.data
+
+
 def test_corrupt_journal_refused(tmp_path):
     state = tmp_path / "minute9.json"
     state.write_text('{"windows": {}}')
@@ -74,21 +83,21 @@ def test_corrupt_journal_refused(tmp_path):
         Journal(state)
 
 
-def test_three_wins_trigger_half_budget_and_repeat_after_loss():
+def test_three_wins_trigger_third_budget_and_repeat_after_loss():
     s = starting_streak()
     for wins in (1, 2):
         s = next_streak(s, "win")
-        assert s == {"consecutive_wins": wins, "half_budget": False}
+        assert s == {"consecutive_wins": wins, "reduced_budget": False}
     s = next_streak(s, "win")
-    assert s == {"consecutive_wins": 3, "half_budget": True}
+    assert s == {"consecutive_wins": 3, "reduced_budget": True}
     for _ in range(6):
         s = next_streak(s, "win")
-        assert s["half_budget"] and trade_budget(s, D("20")) == D("10")
+        assert s["reduced_budget"] and trade_budget(s, D("20")) == D("20") / D(3)
     s = next_streak(s, "loss")
     assert s == starting_streak()
     for _ in range(3):
         s = next_streak(s, "win")
-    assert s["half_budget"]
+    assert s["reduced_budget"]
 
 
 def test_loss_before_streak_resets_progress():
@@ -101,17 +110,19 @@ def test_flat_interrupts_streak_but_does_not_restore_half_mode():
     s = next_streak(starting_streak(), "win")
     assert next_streak(s, "flat") == starting_streak()
     s = next_streak(next_streak(next_streak(starting_streak(), "win"), "win"), "win")
-    assert next_streak(s, "flat")["half_budget"] is True
+    assert next_streak(s, "flat")["reduced_budget"] is True
 
 
-def test_budget_uses_half_dollars_not_half_contracts():
+def test_budget_uses_one_third_of_base_dollars_not_contracts():
     base = D("20")
     normal = budgeted_quantity(trade_budget(starting_streak(), base), D(".72"))
     s = starting_streak()
     for _ in range(3):
         s = next_streak(s, "win")
     reduced = budgeted_quantity(trade_budget(s, base), D(".72"))
-    assert normal == 26 and reduced == 13
+    assert normal == 26 and reduced == 8
+    assert trade_budget(s, D("20")) > D("6.66")
+    assert trade_budget(s, D("20")) < D("6.67")
     assert budgeted_quantity(D(".60"), D(".59")) == 0
     assert budgeted_quantity(D("10"), D(".91")) == 10
     assert budgeted_quantity(D("1000"), D(".59"), cap=8) == 8
@@ -129,7 +140,7 @@ def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
         }
     j.save()
     apply_new_outcomes(j)
-    assert j.data["streak"]["half_budget"] is True
+    assert j.data["streak"]["reduced_budget"] is True
     apply_new_outcomes(Journal(state))  # No double-counting after restart
     assert Journal(state).data["streak"] == j.data["streak"]
     j = Journal(state)
@@ -148,7 +159,7 @@ def test_no_fill_does_not_break_three_win_streak(tmp_path):
     j.data["windows"]["miss"] = {"ticker": "miss",
         "outcome": {"status": "no_fill", "completed_at": 200, "counted": False}}
     apply_new_outcomes(j)
-    assert j.data["streak"] == {"consecutive_wins": 2, "half_budget": False}
+    assert j.data["streak"] == {"consecutive_wins": 2, "reduced_budget": False}
 
 
 def test_invalid_streak_fails_closed(tmp_path):
@@ -221,7 +232,7 @@ def test_full_verified_take_profit_counts_net_win(tmp_path):
     assert j.data["streak"]["consecutive_wins"] == 1
 
 
-def test_market_settlement_loss_resets_half_budget(tmp_path):
+def test_market_settlement_loss_resets_reduced_budget(tmp_path):
     j = Journal(tmp_path / "settlement.json")
     client = FakeTradeClient(result="no", fully_sold=False, side="YES")
     r = fake_record(client, fully_sold=False)
