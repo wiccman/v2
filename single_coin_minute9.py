@@ -368,15 +368,17 @@ def reconcile_exit(client, journal, record, now):
         journal.save()
 
 
-def run_pass(client, journal, series_list, quantity, live, now):
+def run_pass(client, journal, series_list, base_budget, max_contracts, live, now):
     # Check exits first. Never require TradingView or a mean data collector.
     for record in list(journal.data["windows"].values()):
-        if record.get("buy"):
+        if record.get("buy") and not record.get("outcome"):
             try:
                 reconcile_exit(client, journal, record, now)
+                verify_completed_trade(client, journal, record, now)
             except Exception as error:
-                event("M9_EXIT_RECONCILIATION_PAUSED", ticker=record["ticker"],
+                event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
                       error_type=type(error).__name__)
+    apply_new_outcomes(journal)
     for series in series_list:
         try:
             markets = client.markets(series_ticker=series, status="open", limit=100)
@@ -393,8 +395,17 @@ def run_pass(client, journal, series_list, quantity, live, now):
             if position_for(client, ticker) != 0 or client.all_orders(ticker, "resting"):
                 event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
                 continue
+            allocation = trade_budget(journal.data["streak"], base_budget)
+            quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts)
+            if quantity < 1:
+                event("M9_ENTRY_BUDGET_TOO_SMALL", ticker=ticker,
+                      allocated_dollars=str(allocation), limit=plan["limit"])
+                continue
             if not live:
                 event("M9_DRY_RUN_SIGNAL", **plan, quantity=quantity,
+                      allocated_dollars=str(allocation),
+                      half_budget=journal.data["streak"]["half_budget"],
+                      consecutive_wins=journal.data["streak"]["consecutive_wins"],
                       target_example=str(D(plan["limit"]) + PROFIT))
                 continue
             # Fresh quote, same side, same 15-minute market, and still minute 9.
@@ -402,10 +413,15 @@ def run_pass(client, journal, series_list, quantity, live, now):
             current = plan_single_coin(market, time.time(), series)
             if current is None or current["side"] != plan["side"]:
                 continue
+            quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts)
+            if quantity < 1:
+                continue
             intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
                       "created_at": time.time()}
             record = {"ticker": ticker, "series": series, "side": current["side"],
-                      "quantity": str(quantity), "buy": intent, "sells": []}
+                      "quantity": str(quantity), "allocated_dollars": str(allocation),
+                      "half_budget_at_entry": journal.data["streak"]["half_budget"],
+                      "buy": intent, "sells": []}
             journal.data["windows"][ticker] = record
             journal.save()  # Durably forbid duplicate entry even if ACK is lost.
             event("M9_BUY_SUBMIT", ticker=ticker, side=current["side"],
@@ -427,9 +443,15 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.live and os.getenv("M9_TRADING_ENABLED", "false").lower() != "true":
         raise RuntimeError("Live mode requires M9_TRADING_ENABLED=true")
-    qty = D(os.getenv("M9_QUANTITY", "1"))
-    if qty < 1 or qty != qty.to_integral_value() or qty > 20:
-        raise ValueError("M9_QUANTITY must be between 1 and 20 whole contracts")
+    if "M9_QUANTITY" in os.environ:
+        raise ValueError("M9_QUANTITY is retired; configure M9_TRADE_BUDGET_DOLLARS instead")
+    base_budget = D(os.getenv("M9_TRADE_BUDGET_DOLLARS",
+                            os.getenv("MARKET_BUDGET_DOLLARS", "20")))
+    if not base_budget.is_finite() or not D("1") <= base_budget <= D("1000"):
+        raise ValueError("M9_TRADE_BUDGET_DOLLARS must be $1–$1000")
+    max_contracts = int(os.getenv("M9_MAX_CONTRACTS", "100"))
+    if not 1 <= max_contracts <= 100:
+        raise ValueError("M9_MAX_CONTRACTS must be between 1 and 100")
     poll = float(os.getenv("M9_POLL_SECONDS", "2"))
     if not 1 <= poll <= 30:
         raise ValueError("M9_POLL_SECONDS must be between 1 and 30")
@@ -458,12 +480,15 @@ def main(argv=None):
             timeout=5, role="entry", quote_ttl=0.1, session=session)
         if not client.key_id or client.private_key is None:
             raise RuntimeError("Kalshi API credentials missing")
-        event("M9_READY", live=args.live, series=series_list, quantity=str(qty),
+        event("M9_READY", live=args.live, series=series_list,
+              base_budget_dollars=str(base_budget), max_contracts=max_contracts,
+              consecutive_wins=journal.data["streak"]["consecutive_wins"],
+              half_budget=journal.data["streak"]["half_budget"],
               price_range_cents="59-91", take_profit_cents=5, no_stop=True)
         while not stop:
             started = time.monotonic()
             try:
-                run_pass(client, journal, series_list, qty, args.live, time.time())
+                run_pass(client, journal, series_list, base_budget, max_contracts, args.live, time.time())
             except Exception as error:
                 event("M9_PASS_PAUSED", error_type=type(error).__name__)
             if args.once:
