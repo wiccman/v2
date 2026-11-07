@@ -9,6 +9,8 @@ Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
 No stop is created. IOC exits require the process to stay running.
+After three confirmed profitable trades, per-entry budget is halved until the
+next confirmed losing trade; then the consecutive-win count resets.
 """
 from __future__ import annotations
 
@@ -21,7 +23,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
-from decimal import Decimal as D, ROUND_CEILING
+from decimal import Decimal as D, ROUND_CEILING, ROUND_FLOOR
 from pathlib import Path
 
 import requests
@@ -33,6 +35,7 @@ from price_pairs import _outcome_cost
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
 MIN_PRICE, MAX_PRICE, PROFIT = D(".59"), D(".91"), D(".05")
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
+FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 
 
 def event(name, **details):
@@ -79,6 +82,151 @@ def plan_single_coin(market, now, series):
             "window_end_ms": int(close * 1000)}
 
 
+def starting_streak():
+    return {"consecutive_wins": 0, "half_budget": False}
+
+
+def next_streak(streak, outcome):
+    """A win must be confirmed, not a submitted order or an unrealized gain."""
+    wins = streak["consecutive_wins"]
+    half = streak["half_budget"]
+    if type(wins) is not int or wins < 0 or wins > 3 or type(half) is not bool:
+        raise ValueError("Invalid persisted streak")
+    if outcome == "loss":
+        return starting_streak()
+    if outcome == "flat":
+        return {"consecutive_wins": wins if half else 0, "half_budget": half}
+    if outcome != "win":
+        raise ValueError("Only finalized trade results advance the streak")
+    if half:
+        return {"consecutive_wins": 3, "half_budget": True}
+    wins = min(3, wins + 1)
+    return {"consecutive_wins": wins, "half_budget": wins >= 3}
+
+
+def trade_budget(streak, base_budget):
+    """Half *dollars*, not half the number of contracts; no compounding."""
+    amount = D(str(base_budget))
+    if not amount.is_finite() or amount <= 0:
+        raise ValueError("Trade budget must be positive")
+    return amount / 2 if streak["half_budget"] else amount
+
+
+def budgeted_quantity(budget, ask, cap=100):
+    """Protect against exceeding the allocation including fee allowance."""
+    amount, price = D(str(budget)), D(str(ask))
+    if (not amount.is_finite() or not price.is_finite() or amount <= 0
+            or price < MIN_PRICE or price > MAX_PRICE or type(cap) is not int or not 1 <= cap <= 100):
+        raise ValueError("Invalid budget, entry price or quantity cap")
+    return min(cap, int((amount / (price + FEE_RESERVE)).to_integral_value(rounding=ROUND_FLOOR)))
+
+
+def apply_new_outcomes(journal):
+    """Count each completed trade once, in verified completion-time order."""
+    pending = sorted(
+        (r for r in journal.data["windows"].values()
+         if isinstance(r.get("outcome"), dict) and not r["outcome"].get("counted")),
+        key=lambda r: (r["outcome"]["completed_at"], r["ticker"]))
+    for record in pending:
+        status = record["outcome"]["status"]
+        if status not in {"win", "loss", "flat", "no_fill"}:
+            raise RuntimeError("Invalid trade outcome; streak not advanced")
+        if status != "no_fill":
+            journal.data["streak"] = next_streak(journal.data["streak"], status)
+        record["outcome"]["counted"] = True
+        journal.save()  # atomic outcome + streak update (restart-safe)
+        event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
+              net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
+              consecutive_wins=journal.data["streak"]["consecutive_wins"],
+              half_budget=journal.data["streak"]["half_budget"])
+
+
+def fill_fee(row):
+    fee = D(str(row["fee_cost"]))
+    if not fee.is_finite() or fee < 0:
+        raise ValueError("Invalid exchange-reported fill fee")
+    return fee
+
+
+def fill_timestamp(row):
+    if row.get("created_time"):
+        return parse_time(row["created_time"])
+    if row.get("ts") is not None:
+        return float(row["ts"])
+    raise ValueError("Cannot establish completion time from fill")
+
+
+def verify_completed_trade(client, journal, record, now):
+    """Only fully reconciled exits or finalized market payouts affect streak."""
+    if record.get("outcome") or not record.get("buy"):
+        return
+    ticker = record["ticker"]
+    market = client.market(ticker)
+    buy = find_order(client, ticker, record["buy"])
+    if buy is None or buy.get("status") not in TERMINAL:
+        return
+    journal.save()  # persist discovered order ID
+    fills = client.all_fills(ticker)
+    bought, buy_rows = filled_quantity(fills, record["buy"]["order_id"])
+    receipt = buy.get("fill_count_fp", buy.get("fill_count"))
+    if receipt is None or D(str(receipt)) != bought:
+        return  # exchange read models may have different propagation delays
+    if bought > D(record["quantity"]):
+        raise RuntimeError("Buy quantity exceeds saved authorization")
+    if bought == 0:
+        record["outcome"] = {"status": "no_fill", "completed_at": now, "counted": False}
+        journal.save()
+        return
+    valid_order_ids = {record["buy"]["order_id"]}
+    sold, sell_rows = D(0), []
+    for intent in record["sells"]:
+        order = find_order(client, ticker, intent)
+        if order is None or order.get("status") not in TERMINAL:
+            return
+        journal.save()
+        count, rows = filled_quantity(fills, intent["order_id"])
+        receipt = order.get("fill_count_fp", order.get("fill_count"))
+        if receipt is None or D(str(receipt)) != count or count > D(intent["quantity"]):
+            return
+        sold += count
+        sell_rows.extend(rows)
+        valid_order_ids.add(intent["order_id"])
+    if sold > bought:
+        raise RuntimeError("Exit quantity exceeds verified purchases")
+    # A manual fill or another worker's order compromises ownership accounting.
+    if any(row.get("order_id") not in valid_order_ids for row in fills):
+        return
+    sign = 1 if record["side"] == "YES" else -1
+    remaining = bought - sold
+    if remaining:
+        if market.get("status") not in {"finalized", "settled"}:
+            return
+        result = str(market.get("result", "")).lower()
+        if result not in {"yes", "no"}:
+            return
+        payout = D(1) if result == record["side"].lower() else D(0)
+        proceeds = payout * remaining
+        stamp = market.get("settlement_ts") or market.get("settled_time")
+        completed_at = parse_time(stamp) if stamp else parse_time(market["close_time"])
+    else:
+        proceeds = D(0)
+        completed_at = max(fill_timestamp(row) for row in sell_rows)
+    # Evaluate the entire entry, including partial TP fills and any settlement
+    # payout, using actual exchange fill prices and exact reported fill fees.
+    costs = sum((D(str(r.get("count_fp", r.get("count")))) * _outcome_cost(r, sign)
+                 for r in buy_rows), D(0))
+    proceeds += sum((D(str(r.get("count_fp", r.get("count")))) * _outcome_cost(r, sign)
+                     for r in sell_rows), D(0))
+    fees = sum((fill_fee(r) for r in buy_rows + sell_rows), D(0))
+    pnl = proceeds - costs - fees
+    status = "win" if pnl > 0 else "loss" if pnl < 0 else "flat"
+    record["outcome"] = {"status": status, "net_pnl_dollars": str(pnl),
+                          "completed_at": completed_at, "counted": False,
+                          "bought": str(bought), "sold": str(sold),
+                          "remaining_at_settlement": str(remaining)}
+    journal.save()
+
+
 class Journal:
     def __init__(self, path):
         self.path = Path(path)
@@ -88,8 +236,13 @@ class Journal:
             if obj.get("schema") != 1 or not isinstance(obj.get("windows"), dict):
                 raise RuntimeError("Invalid minute-9 journal; manual recovery required")
             self.data = obj
+            if "streak" not in self.data:
+                self.data["streak"] = starting_streak()
+                self.save()
+            else:
+                next_streak(self.data["streak"], "flat")  # validate before trading
         else:
-            self.data = {"schema": 1, "windows": {}}
+            self.data = {"schema": 1, "windows": {}, "streak": starting_streak()}
             self.save()
 
     def save(self):
