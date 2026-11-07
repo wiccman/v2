@@ -10,8 +10,8 @@ M9_MAX_ENTRIES_PER_WINDOW can increase this limit.
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
-An 11c per-contract loss threshold triggers a price-protected reduce-only IOC;
-this is not a guaranteed 11c maximum loss. IOC exits require the process to run.
+A 45c per-contract loss threshold triggers a price-protected reduce-only IOC;
+this is not a guaranteed 45c maximum loss. IOC exits require the process to run.
 After three confirmed profitable trades, the per-entry budget drops to
 one third of the normal allocation until the next confirmed losing trade; then the consecutive-win count resets.
 """
@@ -36,7 +36,7 @@ from kalshi import KalshiClient
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, MAX_PRICE, PROFIT, STOP_LOSS = D(".59"), D(".91"), D(".05"), D(".11")
+MIN_PRICE, MAX_PRICE, PROFIT, STOP_LOSS = D(".59"), D(".91"), D(".05"), D(".45")
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 
@@ -88,7 +88,7 @@ def plan_single_coin(market, now, series):
 def exit_decision(cost, bid, *, stop_armed=False):
     """Return (exit kind, protected IOC limit) from executable bid and fill cost.
 
-    The 11-cent threshold is a trigger, not guaranteed realized slippage control:
+    The 45-cent threshold is a trigger, not guaranteed realized slippage control:
     on a gap the exit limit is the currently quoted bid, not the stop threshold.
     A latched stop keeps priority over TP through later price recovery/restarts.
     """
@@ -551,7 +551,7 @@ def main(argv=None):
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents="59-91", take_profit_cents=5,
-              stop_loss_cents=11, stop_execution="bid_limited_reduce_only_ioc")
+              stop_loss_cents=int(STOP_LOSS * 100), stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()
             try:
