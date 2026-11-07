@@ -1,5 +1,6 @@
 """Offline tests for the separate 15-minute coin markets (not Coin Race)."""
 from datetime import datetime, timezone
+from decimal import Decimal as D
 
 import pytest
 from single_coin_minute9 import Journal, DEFAULT_SERIES, plan_single_coin
@@ -27,7 +28,7 @@ def test_no_coin_race_or_basket_selection():
 @pytest.mark.parametrize("price", [".59", ".60", ".72", ".90", ".91"])
 def test_yes_boundaries_are_inclusive(price):
     p = plan_single_coin(market(yes=price, no=".01"), START + 550, "KXBTC15M")
-    assert p and p["side"] == "YES" and p["ask"] == price
+    assert p and p["side"] == "YES" and D(p["ask"]) == D(price)
 
 @pytest.mark.parametrize("price", [".01", ".58", ".5899", ".9101", ".92", ".99"])
 def test_no_buy_outside_price_band(price):
@@ -36,7 +37,7 @@ def test_no_buy_outside_price_band(price):
 @pytest.mark.parametrize("price", [".59", ".72", ".91"])
 def test_no_side_can_qualify_independently(price):
     p = plan_single_coin(market(yes=".01", no=price), START + 550, "KXBTC15M")
-    assert p and p["side"] == "NO" and p["ask"] == price
+    assert p and p["side"] == "NO" and D(p["ask"]) == D(price)
 
 @pytest.mark.parametrize("elapsed", [0, 539.9, 600, 610, 890])
 def test_outside_minute_nine_rejected(elapsed):
