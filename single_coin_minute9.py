@@ -9,8 +9,8 @@ Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
 No stop is created. IOC exits require the process to stay running.
-After three confirmed profitable trades, per-entry budget is halved until the
-next confirmed losing trade; then the consecutive-win count resets.
+After three confirmed profitable trades, the per-entry budget drops to
+one third of the normal allocation until the next confirmed losing trade; then the consecutive-win count resets.
 """
 from __future__ import annotations
 
@@ -83,33 +83,33 @@ def plan_single_coin(market, now, series):
 
 
 def starting_streak():
-    return {"consecutive_wins": 0, "half_budget": False}
+    return {"consecutive_wins": 0, "reduced_budget": False}
 
 
 def next_streak(streak, outcome):
     """A win must be confirmed, not a submitted order or an unrealized gain."""
     wins = streak["consecutive_wins"]
-    half = streak["half_budget"]
+    half = streak["reduced_budget"]
     if type(wins) is not int or wins < 0 or wins > 3 or type(half) is not bool:
         raise ValueError("Invalid persisted streak")
     if outcome == "loss":
         return starting_streak()
     if outcome == "flat":
-        return {"consecutive_wins": wins if half else 0, "half_budget": half}
+        return {"consecutive_wins": wins if half else 0, "reduced_budget": half}
     if outcome != "win":
         raise ValueError("Only finalized trade results advance the streak")
     if half:
-        return {"consecutive_wins": 3, "half_budget": True}
+        return {"consecutive_wins": 3, "reduced_budget": True}
     wins = min(3, wins + 1)
-    return {"consecutive_wins": wins, "half_budget": wins >= 3}
+    return {"consecutive_wins": wins, "reduced_budget": wins >= 3}
 
 
 def trade_budget(streak, base_budget):
-    """Half *dollars*, not half the number of contracts; no compounding."""
+    """One third of base dollars, not one third of contracts; no compounding."""
     amount = D(str(base_budget))
     if not amount.is_finite() or amount <= 0:
         raise ValueError("Trade budget must be positive")
-    return amount / 2 if streak["half_budget"] else amount
+    return amount / D(3) if streak["reduced_budget"] else amount
 
 
 def budgeted_quantity(budget, ask, cap=100):
@@ -138,7 +138,7 @@ def apply_new_outcomes(journal):
         event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
-              half_budget=journal.data["streak"]["half_budget"])
+              reduced_budget=journal.data["streak"]["reduced_budget"])
 
 
 def fill_fee(row):
@@ -240,7 +240,14 @@ class Journal:
                 self.data["streak"] = starting_streak()
                 self.save()
             else:
-                next_streak(self.data["streak"], "flat")  # validate before trading
+                saved_streak = self.data["streak"]
+                if "half_budget" in saved_streak and "reduced_budget" not in saved_streak:
+                    saved_streak["reduced_budget"] = saved_streak.pop("half_budget")
+                    for record in self.data["windows"].values():
+                        if "half_budget_at_entry" in record and "reduced_budget_at_entry" not in record:
+                            record["reduced_budget_at_entry"] = record.pop("half_budget_at_entry")
+                    self.save()
+                next_streak(saved_streak, "flat")  # validate before trading
         else:
             self.data = {"schema": 1, "windows": {}, "streak": starting_streak()}
             self.save()
@@ -404,7 +411,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             if not live:
                 event("M9_DRY_RUN_SIGNAL", **plan, quantity=quantity,
                       allocated_dollars=str(allocation),
-                      half_budget=journal.data["streak"]["half_budget"],
+                      reduced_budget=journal.data["streak"]["reduced_budget"],
                       consecutive_wins=journal.data["streak"]["consecutive_wins"],
                       target_example=str(D(plan["limit"]) + PROFIT))
                 continue
@@ -420,7 +427,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                       "created_at": time.time()}
             record = {"ticker": ticker, "series": series, "side": current["side"],
                       "quantity": str(quantity), "allocated_dollars": str(allocation),
-                      "half_budget_at_entry": journal.data["streak"]["half_budget"],
+                      "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
                       "buy": intent, "sells": []}
             journal.data["windows"][ticker] = record
             journal.save()  # Durably forbid duplicate entry even if ACK is lost.
@@ -483,7 +490,7 @@ def main(argv=None):
         event("M9_READY", live=args.live, series=series_list,
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
-              half_budget=journal.data["streak"]["half_budget"],
+              reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents="59-91", take_profit_cents=5, no_stop=True)
         while not stop:
             started = time.monotonic()
