@@ -6,6 +6,8 @@ No basket mean, leader rank, direction indicator or other coin-selection rule.
 Both sides qualifying is ambiguous, so the market is skipped. By default
 only the first eligible single-coin market per 15-minute window is entered;
 M9_MAX_ENTRIES_PER_WINDOW can increase this limit.
+Only orders matched to this runner's saved client/order IDs are managed.
+Outside positions and orders are left untouched; overlapping markets are skipped.
 
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
@@ -297,10 +299,16 @@ class Journal:
 
 
 def find_order(client, ticker, intent):
+    """Resolve only the exact order identity recorded before this bot's POST."""
+    expected_client_id = intent.get("client_id")
+    if not isinstance(expected_client_id, str) or not expected_client_id:
+        raise RuntimeError("Missing saved order ownership identity")
     if intent.get("order_id"):
         order = client.order(intent["order_id"], ticker)
-        if order.get("ticker") != ticker:
-            raise RuntimeError("Order ticker mismatch")
+        if (order.get("ticker") != ticker
+                or order.get("order_id") != intent["order_id"]
+                or order.get("client_order_id") != expected_client_id):
+            raise RuntimeError("Order ownership mismatch")
         return order
     # Lost acknowledgement: reconcile by durable client_order_id. Never repeat POST.
     matching = [row for row in client.all_orders(ticker)
@@ -308,6 +316,8 @@ def find_order(client, ticker, intent):
     if len(matching) > 1:
         raise RuntimeError("Multiple orders matched one client id")
     if matching:
+        if matching[0].get("ticker") != ticker or not matching[0].get("order_id"):
+            raise RuntimeError("Order ownership mismatch")
         intent["order_id"] = matching[0]["order_id"]
         return matching[0]
     return None
@@ -329,6 +339,13 @@ def position_for(client, ticker):
     return D(str(positions[0].get("position_fp", "0"))) if positions else D(0)
 
 
+def entry_market_occupied(client, ticker):
+    """New entries need an untouched market; never adopt outside activity."""
+    return bool(position_for(client, ticker) != 0
+                or client.all_orders(ticker, "resting")
+                or client.all_fills(ticker))
+
+
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
     market = client.market(ticker)
@@ -348,6 +365,10 @@ def reconcile_exit(client, journal, record, now):
         return
     if bought > D(record["quantity"]):
         raise RuntimeError("Bought more contracts than authorized")
+    receipt = buy.get("fill_count_fp", buy.get("fill_count"))
+    if receipt is None or D(str(receipt)) != bought:
+        event("M9_BUY_FILL_RECONCILING", ticker=ticker)
+        return
     sold = D(0)
     for intent in record["sells"]:
         order = find_order(client, ticker, intent)
@@ -364,6 +385,14 @@ def reconcile_exit(client, journal, record, now):
             event("M9_SELL_FILL_RECONCILING", ticker=ticker)
             return
         sold += count
+    owned_ids = {record["buy"]["order_id"]} | {
+        intent["order_id"] for intent in record["sells"]
+    }
+    if any(row.get("order_id") not in owned_ids for row in all_fills):
+        # Account positions are netted. Do not assume matching net quantity
+        # proves ownership after an outside trade on this same contract.
+        event("M9_EXTERNAL_ACTIVITY_SKIPPED", ticker=ticker)
+        return
     remaining = bought - sold
     if remaining <= 0:
         return
@@ -422,16 +451,18 @@ def window_entry_count(journal, window_start_ms):
 
 def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
              max_entries_per_window=1):
-    # Check exits first. Never require TradingView or a mean data collector.
-    for record in list(journal.data["windows"].values()):
-        if record.get("buy") and not record.get("outcome"):
-            try:
-                reconcile_exit(client, journal, record, now)
-                verify_completed_trade(client, journal, record, now)
-            except Exception as error:
-                event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
-                      error_type=type(error).__name__)
-    apply_new_outcomes(journal)
+    # Preview must never send exits, even if pointed at an existing live journal.
+    # Live exits operate only on this runner's durable order identities.
+    if live:
+        for record in list(journal.data["windows"].values()):
+            if record.get("buy") and not record.get("outcome"):
+                try:
+                    reconcile_exit(client, journal, record, now)
+                    verify_completed_trade(client, journal, record, now)
+                except Exception as error:
+                    event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
+                          error_type=type(error).__name__)
+        apply_new_outcomes(journal)
     # Only one entry per quarter hour matches the 96-trade/day illustration;
     # selecting the first price-eligible individual coin is not a basket signal.
     # Preview does not write attempts, so deduplicate its signals in memory.
@@ -453,7 +484,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                 continue  # No overtrading when five coins qualify in one period.
             if ticker in journal.data["windows"]:
                 continue  # One attempt per individual coin market and 15m window.
-            if position_for(client, ticker) != 0 or client.all_orders(ticker, "resting"):
+            if entry_market_occupied(client, ticker):
                 event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
                 continue
             allocation = trade_budget(journal.data["streak"], base_budget)
@@ -477,6 +508,9 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                 continue
             quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts)
             if quantity < 1:
+                continue
+            if entry_market_occupied(client, ticker):
+                event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
                 continue
             intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
                       "created_at": time.time()}

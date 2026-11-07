@@ -182,12 +182,12 @@ class FakeTradeClient:
         self.result = result
         self.fees = fees
         self.orders = {
-            "entry": {"order_id": "entry", "ticker": self.ticker,
+            "entry": {"order_id": "entry", "client_order_id": "entry-id", "ticker": self.ticker,
                       "status": "executed", "fill_count_fp": "2"},
         }
         if fully_sold:
             self.orders["exit"] = {
-                "order_id": "exit", "ticker": self.ticker,
+                "order_id": "exit", "client_order_id": "exit-id", "ticker": self.ticker,
                 "status": "executed", "fill_count_fp": "2"
             }
         def fill(order_id, price, at):
@@ -322,13 +322,14 @@ class StopExchange(FakeTradeClient):
         order_id = f"exit-{len(self.submissions)}"
         # An accepted IOC order can remain pending while the venue's fill view
         # catches up. A pending order must never be treated as a confirmed exit.
-        self.orders[order_id] = {"order_id": order_id, "ticker": ticker,
+        self.orders[order_id] = {"order_id": order_id, "client_order_id": client_order_id, "ticker": ticker,
                                  "status": "pending", "fill_count_fp": "0"}
         return {"order": {"order_id": order_id}}
 
     def simulate_partial_fill(self, quantity="1", price=".44"):
         name = "exit-1"
         self.orders[name] = {"ticker": self.ticker, "order_id": name,
+                             "client_order_id": self.orders[name]["client_order_id"],
                              "status": "canceled", "fill_count_fp": quantity}
         yes_price = D(price) if self.side == "YES" else D(1) - D(price)
         self.rows.append({"order_id": name, "ticker": self.ticker,
@@ -449,6 +450,9 @@ class PreviewCoinClient:
     def all_orders(self, ticker, status=None):
         return []
 
+    def all_fills(self, ticker):
+        return []
+
     def market(self, ticker):
         return market(yes=".75", no=".24", series=ticker.split("-")[0])
 
@@ -504,3 +508,113 @@ def test_window_attempts_are_exactly_scoped(tmp_path):
     assert window_entry_count(Journal(j.path), (START+900) * 1000) == 1
     with pytest.raises(ValueError):
         window_entry_count(j, START * 1000 + 123)
+
+
+@pytest.mark.parametrize("foreign_kind", ["long", "short", "resting", "past_fill"])
+def test_external_market_is_untouched_and_free_coin_still_enters(tmp_path, monkeypatch, foreign_kind):
+    import single_coin_minute9 as mod
+    class MixedAccount(PreviewCoinClient):
+        def positions(self, ticker):
+            if ticker.startswith("KXBTC15M-") and foreign_kind in {"long", "short"}:
+                return [{"ticker": ticker, "position_fp": "2" if foreign_kind == "long" else "-2"}]
+            return []
+
+        def all_orders(self, ticker, status=None):
+            return [{"order_id": "manual-order"}] if ticker.startswith("KXBTC15M-") and foreign_kind == "resting" else []
+
+        def all_fills(self, ticker):
+            return [{"order_id": "manual-fill"}] if ticker.startswith("KXBTC15M-") and foreign_kind == "past_fill" else []
+
+        def cancel(self, *args, **kwargs):
+            pytest.fail("Outside orders must never be canceled")
+
+        def place_take_profit(self, *args, **kwargs):
+            pytest.fail("Outside inventory must never receive bot exits")
+
+    client = MixedAccount()
+    journal = Journal(tmp_path / "mixed.json")
+    monkeypatch.setattr(mod.time, "time", lambda: START + 550)
+    run_pass(client, journal, client.series, D("20"), 100, True, START + 550)
+    assert len(client.posted) == 1
+    assert client.posted[0][0].startswith("KXETH15M-")
+    assert list(journal.data["windows"]) == [client.posted[0][0]]
+
+
+def test_external_position_appearing_during_quote_blocks_entry(tmp_path, monkeypatch):
+    import single_coin_minute9 as mod
+    class LateManualPosition(PreviewCoinClient):
+        occupied = False
+
+        def market(self, ticker):
+            self.occupied = True
+            return super().market(ticker)
+
+        def positions(self, ticker):
+            return [{"ticker": ticker, "position_fp": "2"}] if self.occupied else []
+
+    client = LateManualPosition()
+    journal = Journal(tmp_path / "late-manual.json")
+    monkeypatch.setattr(mod.time, "time", lambda: START + 550)
+    run_pass(client, journal, ("KXBTC15M",), D("20"), 100, True, START + 550)
+    assert not client.posted and not journal.data["windows"]
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_foreign_fills_block_exits_even_when_net_quantity_matches(tmp_path, side):
+    journal = Journal(tmp_path / "foreign-fill.json")
+    client = StopExchange(side=side, bid=".45")
+    client.rows.append(dict(client.rows[0], order_id="outside-order"))
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    reconcile_exit(client, journal, record, START + 574)
+    assert not client.submissions and not record["sells"]
+    assert "stop_armed" not in record
+
+
+@pytest.mark.parametrize("field,value", [
+    ("client_order_id", "outside-client"), ("client_order_id", None),
+    ("order_id", "outside-order"), ("ticker", "OTHER-MARKET"),
+])
+def test_saved_order_must_match_bot_ownership(tmp_path, field, value):
+    journal = Journal(tmp_path / "ownership.json")
+    client = StopExchange(bid=".45")
+    client.orders["entry"][field] = value
+    record = fake_record(client, fully_sold=False)
+    with pytest.raises(RuntimeError, match="ownership mismatch"):
+        reconcile_exit(client, journal, record, START + 574)
+    assert not client.submissions
+
+
+def test_partial_entry_read_model_cannot_exit_incomplete_quantity(tmp_path):
+    journal = Journal(tmp_path / "lagged-entry.json")
+    client = StopExchange(bid=".45")
+    client.orders["entry"]["fill_count_fp"] = "3"
+    record = fake_record(client, fully_sold=False)
+    record["quantity"] = "3"
+    reconcile_exit(client, journal, record, START + 574)
+    assert not client.submissions
+
+
+@pytest.mark.parametrize("bid", [".45", ".77"])
+def test_preview_never_exits_positions_from_existing_journal(tmp_path, bid):
+    journal = Journal(tmp_path / "existing-live.json")
+    client = StopExchange(bid=bid)
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    journal.save()
+    before = journal.path.read_text()
+    run_pass(client, journal, (), D("20"), 100, False, START + 574)
+    assert not client.submissions
+    assert journal.path.read_text() == before
+
+
+def test_outside_trade_results_do_not_affect_win_streak(tmp_path):
+    journal = Journal(tmp_path / "outside-results.json")
+    client = FakeTradeClient(fully_sold=True)
+    client.rows.append(dict(client.rows[-1], order_id="manual-sale"))
+    record = fake_record(client)
+    journal.data["windows"][client.ticker] = record
+    verify_completed_trade(client, journal, record, START + 585)
+    apply_new_outcomes(journal)
+    assert "outcome" not in record
+    assert journal.data["streak"] == starting_streak()
