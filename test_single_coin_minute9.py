@@ -275,13 +275,12 @@ def test_missing_fee_does_not_count_unverified_result(tmp_path):
     assert "outcome" not in r
 
 
-@pytest.mark.parametrize("entry,threshold,target", [
-    (".59", ".14", ".64"), (".72", ".27", ".77"),
-    (".725", ".275", ".78"), (".80", ".35", ".85"),
-    (".91", ".46", ".96"),
+@pytest.mark.parametrize("entry,target", [
+    (".59", ".64"), (".72", ".77"), (".725", ".78"),
+    (".80", ".85"), (".91", ".96"),
 ])
-def test_forty_five_cent_stop_is_relative_to_actual_fill(entry, threshold, target):
-    cost, trigger, tp = D(entry), D(threshold), D(target)
+def test_fixed_forty_five_cent_stop_is_independent_of_actual_fill(entry, target):
+    cost, trigger, tp = D(entry), D(".45"), D(target)
     assert exit_decision(cost, trigger + D(".0001")) == (None, None)
     assert exit_decision(cost, trigger) == ("stop_loss", trigger)
     assert exit_decision(cost, trigger - D(".01")) == ("stop_loss", trigger - D(".01"))
@@ -289,13 +288,13 @@ def test_forty_five_cent_stop_is_relative_to_actual_fill(entry, threshold, targe
 
 
 def test_gap_through_stop_uses_executable_bid_not_fictional_forty_five_cent_fill():
-    assert exit_decision(D(".75"), D(".24")) == ("stop_loss", D(".24"))
+    assert exit_decision(D(".75"), D(".44")) == ("stop_loss", D(".44"))
     assert exit_decision(D(".75"), D("0")) == ("stop_loss", None)
     assert exit_decision(D(".75"), D(".83"), stop_armed=True) == ("stop_loss", D(".83"))
 
 
 class StopExchange(FakeTradeClient):
-    def __init__(self, *, side="YES", bid=".26"):
+    def __init__(self, *, side="YES", bid=".44"):
         super().__init__(side=side, fully_sold=False)
         self.market_status = "active"
         self.bid = D(bid)
@@ -327,7 +326,7 @@ class StopExchange(FakeTradeClient):
                                  "status": "pending", "fill_count_fp": "0"}
         return {"order": {"order_id": order_id}}
 
-    def simulate_partial_fill(self, quantity="1", price=".26"):
+    def simulate_partial_fill(self, quantity="1", price=".44"):
         name = "exit-1"
         self.orders[name] = {"ticker": self.ticker, "order_id": name,
                              "status": "canceled", "fill_count_fp": quantity}
@@ -342,18 +341,22 @@ class StopExchange(FakeTradeClient):
 
 
 @pytest.mark.parametrize("side,expected_sign", [("YES", 2), ("NO", -2)])
-def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, side, expected_sign):
+@pytest.mark.parametrize("entry", [".59", ".72", ".725", ".80", ".91"])
+def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, side, expected_sign, entry):
     journal = Journal(tmp_path / f"stop-{side}.json")
-    client = StopExchange(side=side, bid=".27")
+    client = StopExchange(side=side, bid=".45")
+    yes_price = D(entry) if side == "YES" else D(1) - D(entry)
+    client.rows[0]["yes_price_dollars"] = str(yes_price)
+    client.rows[0]["no_price_dollars"] = str(D(1) - yes_price)
     record = fake_record(client, fully_sold=False)
     journal.data["windows"][client.ticker] = record
     journal.save()
     reconcile_exit(client, journal, record, START + 574)
-    assert record["stop_armed"]["threshold"] == "0.27"
+    assert record["stop_armed"]["threshold"] == "0.45"
     assert record["sells"][0]["purpose"] == "stop_loss"
     assert client.submissions == [
         {"ticker": client.ticker, "signed": D(expected_sign),
-         "limit": D(".27"), "client_id": record["sells"][0]["client_id"]}
+         "limit": D(".45"), "client_id": record["sells"][0]["client_id"]}
     ]
     assert Journal(journal.path).data["windows"][client.ticker]["stop_armed"]
     # Unknown exit status cannot send a second order.
@@ -364,11 +367,11 @@ def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, s
 @pytest.mark.parametrize("side", ["YES", "NO"])
 def test_partial_stop_fill_retries_only_remainder_even_after_quote_recovers(tmp_path, side):
     journal = Journal(tmp_path / f"partial-{side}.json")
-    client = StopExchange(side=side, bid=".26")
+    client = StopExchange(side=side, bid=".44")
     record = fake_record(client, fully_sold=False)
     journal.data["windows"][client.ticker] = record
     reconcile_exit(client, journal, record, START + 571)
-    client.simulate_partial_fill("1", ".26")
+    client.simulate_partial_fill("1", ".44")
     client.bid = D(".75")
     saved = Journal(journal.path)
     record = saved.data["windows"][client.ticker]
@@ -382,7 +385,7 @@ def test_partial_stop_fill_retries_only_remainder_even_after_quote_recovers(tmp_
 
 def test_unacknowledged_stop_not_repeated(tmp_path):
     journal = Journal(tmp_path / "unknown.json")
-    client = StopExchange(bid=".26")
+    client = StopExchange(bid=".44")
     client.lost_ack = True
     record = fake_record(client, fully_sold=False)
     journal.data["windows"][client.ticker] = record
@@ -397,7 +400,7 @@ def test_unacknowledged_stop_not_repeated(tmp_path):
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
-@pytest.mark.parametrize("bid", [".61", ".45", ".28", ".2701"])
+@pytest.mark.parametrize("bid", [".72", ".61", ".46", ".4501"])
 def test_stop_not_sent_before_threshold_and_tp_unchanged(tmp_path, side, bid):
     journal = Journal(tmp_path / "not_yet.json")
     client = StopExchange(side=side, bid=bid)
@@ -415,11 +418,11 @@ def test_stop_not_sent_before_threshold_and_tp_unchanged(tmp_path, side, bid):
 def test_stop_execution_realized_loss_resets_win_streak(tmp_path):
     journal = Journal(tmp_path / "realized-loss.json")
     client = FakeTradeClient(fully_sold=True, fees=".01")
-    # A stop exit at 26c following a 72c entry loses 46c/contract.
-    client.rows[-1]["yes_price_dollars"] = ".26"
-    client.rows[-1]["no_price_dollars"] = ".74"
+    # A stop exit at 44c following a 72c entry loses 28c/contract.
+    client.rows[-1]["yes_price_dollars"] = ".44"
+    client.rows[-1]["no_price_dollars"] = ".56"
     record = fake_record(client)
-    record["stop_armed"] = {"at": START + 565, "threshold": ".27", "trigger_bid": ".26"}
+    record["stop_armed"] = {"at": START + 565, "threshold": ".45", "trigger_bid": ".44"}
     record["sells"][0]["purpose"] = "stop_loss"
     journal.data["windows"][client.ticker] = record
     for _ in range(3):
