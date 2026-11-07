@@ -3,7 +3,9 @@
 For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
 whichever side has a quoted ask from 59c through 91c during elapsed minute 9.
 No basket mean, leader rank, direction indicator or other coin-selection rule.
-Both sides qualifying is ambiguous, so the market is skipped.
+Both sides qualifying is ambiguous, so the market is skipped. By default
+only the first eligible single-coin market per 15-minute window is entered;
+M9_MAX_ENTRIES_PER_WINDOW can increase this limit.
 
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
@@ -408,7 +410,17 @@ def reconcile_exit(client, journal, record, now):
         journal.save()
 
 
-def run_pass(client, journal, series_list, base_budget, max_contracts, live, now):
+def window_entry_count(journal, window_start_ms):
+    """Count durable attempts across every configured single-coin market."""
+    if type(window_start_ms) is not int or window_start_ms % 900000:
+        raise ValueError("Invalid 15-minute window start")
+    return sum(1 for record in journal.data["windows"].values()
+               if record.get("window_start_ms") == window_start_ms
+               and isinstance(record.get("buy"), dict))
+
+
+def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
+             max_entries_per_window=1):
     # Check exits first. Never require TradingView or a mean data collector.
     for record in list(journal.data["windows"].values()):
         if record.get("buy") and not record.get("outcome"):
@@ -419,6 +431,10 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                 event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
                       error_type=type(error).__name__)
     apply_new_outcomes(journal)
+    # Only one entry per quarter hour matches the 96-trade/day illustration;
+    # selecting the first price-eligible individual coin is not a basket signal.
+    # Preview does not write attempts, so deduplicate its signals in memory.
+    preview_windows = set()
     for series in series_list:
         try:
             markets = client.markets(series_ticker=series, status="open", limit=100)
@@ -430,6 +446,10 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             if plan is None:
                 continue
             ticker = plan["ticker"]
+            start_ms = plan["window_start_ms"]
+            if (window_entry_count(journal, start_ms) >= max_entries_per_window
+                    or (not live and start_ms in preview_windows)):
+                continue  # No overtrading when five coins qualify in one period.
             if ticker in journal.data["windows"]:
                 continue  # One attempt per individual coin market and 15m window.
             if position_for(client, ticker) != 0 or client.all_orders(ticker, "resting"):
@@ -442,6 +462,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                       allocated_dollars=str(allocation), limit=plan["limit"])
                 continue
             if not live:
+                preview_windows.add(start_ms)
                 event("M9_DRY_RUN_SIGNAL", **plan, quantity=quantity,
                       allocated_dollars=str(allocation),
                       reduced_budget=journal.data["streak"]["reduced_budget"],
@@ -459,6 +480,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
                       "created_at": time.time()}
             record = {"ticker": ticker, "series": series, "side": current["side"],
+                      "window_start_ms": current["window_start_ms"],
                       "quantity": str(quantity), "allocated_dollars": str(allocation),
                       "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
                       "buy": intent, "sells": []}
@@ -498,6 +520,9 @@ def main(argv=None):
     series_list = tuple(s.strip().upper() for s in os.getenv("M9_SERIES", ",".join(DEFAULT_SERIES)).split(",") if s.strip())
     if not series_list or len(set(series_list)) != len(series_list) or any(s not in DEFAULT_SERIES for s in series_list):
         raise ValueError("M9_SERIES must be a unique subset of BTC, ETH, SOL, XRP, HYPE 15m series")
+    max_entries_per_window = int(os.getenv("M9_MAX_ENTRIES_PER_WINDOW", "1"))
+    if not 1 <= max_entries_per_window <= len(series_list):
+        raise ValueError("M9_MAX_ENTRIES_PER_WINDOW must be between 1 and the enabled series count")
     state = Path(os.getenv("M9_STATE_PATH",
                   "/data/minute9_live.json" if args.live else "/data/minute9_preview.json"))
     if os.getenv("RAILWAY_ENVIRONMENT_ID"):
@@ -522,6 +547,7 @@ def main(argv=None):
             raise RuntimeError("Kalshi API credentials missing")
         event("M9_READY", live=args.live, series=series_list,
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
+              max_entries_per_window=max_entries_per_window,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents="59-91", take_profit_cents=5,
@@ -529,7 +555,8 @@ def main(argv=None):
         while not stop:
             started = time.monotonic()
             try:
-                run_pass(client, journal, series_list, base_budget, max_contracts, args.live, time.time())
+                run_pass(client, journal, series_list, base_budget, max_contracts,
+                         args.live, time.time(), max_entries_per_window)
             except Exception as error:
                 event("M9_PASS_PAUSED", error_type=type(error).__name__)
             if args.once:
