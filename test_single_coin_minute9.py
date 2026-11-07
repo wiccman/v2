@@ -3,7 +3,9 @@ from datetime import datetime, timezone
 from decimal import Decimal as D
 
 import pytest
-from single_coin_minute9 import Journal, DEFAULT_SERIES, plan_single_coin
+from single_coin_minute9 import (Journal, DEFAULT_SERIES, plan_single_coin,
+    starting_streak, next_streak, trade_budget, budgeted_quantity,
+    apply_new_outcomes, verify_completed_trade)
 
 START = 1793763000  # 15-minute-aligned contract window
 CLOSE = START + 900
@@ -70,3 +72,192 @@ def test_corrupt_journal_refused(tmp_path):
     state.write_text('{"windows": {}}')
     with pytest.raises(RuntimeError):
         Journal(state)
+
+
+def test_three_wins_trigger_half_budget_and_repeat_after_loss():
+    s = starting_streak()
+    for wins in (1, 2):
+        s = next_streak(s, "win")
+        assert s == {"consecutive_wins": wins, "half_budget": False}
+    s = next_streak(s, "win")
+    assert s == {"consecutive_wins": 3, "half_budget": True}
+    for _ in range(6):
+        s = next_streak(s, "win")
+        assert s["half_budget"] and trade_budget(s, D("20")) == D("10")
+    s = next_streak(s, "loss")
+    assert s == starting_streak()
+    for _ in range(3):
+        s = next_streak(s, "win")
+    assert s["half_budget"]
+
+
+def test_loss_before_streak_resets_progress():
+    s = next_streak(next_streak(starting_streak(), "win"), "win")
+    assert next_streak(s, "loss") == starting_streak()
+    assert next_streak(starting_streak(), "win")["consecutive_wins"] == 1
+
+
+def test_flat_interrupts_streak_but_does_not_restore_half_mode():
+    s = next_streak(starting_streak(), "win")
+    assert next_streak(s, "flat") == starting_streak()
+    s = next_streak(next_streak(next_streak(starting_streak(), "win"), "win"), "win")
+    assert next_streak(s, "flat")["half_budget"] is True
+
+
+def test_budget_uses_half_dollars_not_half_contracts():
+    base = D("20")
+    normal = budgeted_quantity(trade_budget(starting_streak(), base), D(".72"))
+    s = starting_streak()
+    for _ in range(3):
+        s = next_streak(s, "win")
+    reduced = budgeted_quantity(trade_budget(s, base), D(".72"))
+    assert normal == 26 and reduced == 13
+    assert budgeted_quantity(D(".60"), D(".59")) == 0
+    assert budgeted_quantity(D("10"), D(".91")) == 10
+    assert budgeted_quantity(D("1000"), D(".59"), cap=8) == 8
+
+
+def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
+    state = tmp_path / "journal.json"
+    j = Journal(state)
+    for name, status, time_s in [
+        ("btc", "win", 100), ("eth", "win", 102), ("xrp", "win", 104),
+    ]:
+        j.data["windows"][name] = {
+            "ticker": name,
+            "outcome": {"status": status, "completed_at": time_s, "counted": False}
+        }
+    j.save()
+    apply_new_outcomes(j)
+    assert j.data["streak"]["half_budget"] is True
+    apply_new_outcomes(Journal(state))  # No double-counting after restart
+    assert Journal(state).data["streak"] == j.data["streak"]
+    j = Journal(state)
+    j.data["windows"]["sol"] = {"ticker": "sol",
+        "outcome": {"status": "win", "completed_at": 107, "counted": False}}
+    j.data["windows"]["hype"] = {"ticker": "hype",
+        "outcome": {"status": "loss", "completed_at": 108, "counted": False}}
+    j.save()
+    apply_new_outcomes(j)
+    assert Journal(state).data["streak"] == starting_streak()
+
+
+def test_no_fill_does_not_break_three_win_streak(tmp_path):
+    j = Journal(tmp_path / "no_fill.json")
+    j.data["streak"] = next_streak(next_streak(starting_streak(), "win"), "win")
+    j.data["windows"]["miss"] = {"ticker": "miss",
+        "outcome": {"status": "no_fill", "completed_at": 200, "counted": False}}
+    apply_new_outcomes(j)
+    assert j.data["streak"] == {"consecutive_wins": 2, "half_budget": False}
+
+
+def test_invalid_streak_fails_closed(tmp_path):
+    state = tmp_path / "broken.json"
+    j = Journal(state)
+    j.data["streak"]["consecutive_wins"] = 100
+    j.save()
+    with pytest.raises(ValueError):
+        Journal(state)
+    with pytest.raises(ValueError):
+        next_streak(starting_streak(), "pending")
+
+
+class FakeTradeClient:
+    def __init__(self, *, result=None, fees="0.01", fully_sold=True, side="YES"):
+        self.ticker = "KXBTC15M-TEST"
+        self.side = side
+        self.market_status = "active" if fully_sold else "finalized"
+        self.result = result
+        self.fees = fees
+        self.orders = {
+            "entry": {"order_id": "entry", "ticker": self.ticker,
+                      "status": "executed", "fill_count_fp": "2"},
+        }
+        if fully_sold:
+            self.orders["exit"] = {
+                "order_id": "exit", "ticker": self.ticker,
+                "status": "executed", "fill_count_fp": "2"
+            }
+        def fill(order_id, price, at):
+            yes_price = D(price) if side == "YES" else D("1") - D(price)
+            return {"order_id": order_id, "ticker": self.ticker,
+                "count_fp": "2", "yes_price_dollars": str(yes_price),
+                "no_price_dollars": str(D("1") - yes_price),
+                "fee_cost": fees,
+                "created_time": datetime.fromtimestamp(at, timezone.utc).isoformat()}
+        self.rows = [fill("entry", ".72", START + 550)]
+        if fully_sold:
+            self.rows.append(fill("exit", ".77", START + 570))
+
+    def market(self, ticker):
+        assert ticker == self.ticker
+        return {"ticker": ticker, "status": self.market_status,
+                "result": self.result, "close_time": datetime.fromtimestamp(CLOSE, timezone.utc).isoformat()}
+
+    def order(self, order_id, ticker):
+        assert ticker == self.ticker
+        return self.orders[order_id]
+
+    def all_fills(self, ticker):
+        return list(self.rows)
+
+
+def fake_record(client, *, fully_sold=True):
+    return {"ticker": client.ticker, "side": client.side, "quantity": "2",
+            "buy": {"client_id": "entry-id", "order_id": "entry"},
+            "sells": ([{"client_id": "exit-id", "order_id": "exit",
+                        "quantity": "2"}] if fully_sold else [])}
+
+
+def test_full_verified_take_profit_counts_net_win(tmp_path):
+    j = Journal(tmp_path / "wins.json")
+    client = FakeTradeClient(fully_sold=True, fees=".01")
+    r = fake_record(client)
+    j.data["windows"][client.ticker] = r
+    verify_completed_trade(client, j, r, START + 575)
+    assert r["outcome"]["status"] == "win"
+    assert D(r["outcome"]["net_pnl_dollars"]) == D(".08")
+    apply_new_outcomes(j)
+    assert j.data["streak"]["consecutive_wins"] == 1
+
+
+def test_market_settlement_loss_resets_half_budget(tmp_path):
+    j = Journal(tmp_path / "settlement.json")
+    client = FakeTradeClient(result="no", fully_sold=False, side="YES")
+    r = fake_record(client, fully_sold=False)
+    j.data["windows"][client.ticker] = r
+    for _ in range(3):
+        j.data["streak"] = next_streak(j.data["streak"], "win")
+    verify_completed_trade(client, j, r, CLOSE + 15)
+    assert r["outcome"]["status"] == "loss"
+    apply_new_outcomes(j)
+    assert j.data["streak"] == starting_streak()
+
+
+def test_market_settlement_win_qualifies_as_win(tmp_path):
+    j = Journal(tmp_path / "settlement_win.json")
+    client = FakeTradeClient(result="yes", fully_sold=False, side="YES")
+    r = fake_record(client, fully_sold=False)
+    j.data["windows"][client.ticker] = r
+    verify_completed_trade(client, j, r, CLOSE + 15)
+    assert r["outcome"]["status"] == "win"
+
+
+def test_fee_can_turn_gross_win_into_net_loss(tmp_path):
+    j = Journal(tmp_path / "fees.json")
+    client = FakeTradeClient(fully_sold=True, fees=".06")
+    r = fake_record(client)
+    j.data["windows"][client.ticker] = r
+    verify_completed_trade(client, j, r, START + 575)
+    assert r["outcome"]["status"] == "loss"
+
+
+def test_missing_fee_does_not_count_unverified_result(tmp_path):
+    j = Journal(tmp_path / "fee_missing.json")
+    client = FakeTradeClient(fully_sold=True)
+    client.rows[-1].pop("fee_cost")
+    r = fake_record(client)
+    j.data["windows"][client.ticker] = r
+    with pytest.raises(KeyError):
+        verify_completed_trade(client, j, r, START + 575)
+    assert "outcome" not in r
