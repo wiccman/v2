@@ -239,9 +239,7 @@ def main(argv=None):
                    late_entry_policy="ranked-top-two-96c-plus-v1",
                    late_entry_start_seconds=late.LATE_START_SECONDS,
                    late_entry_end_seconds=late.LATE_END_SECONDS,
-                   late_entry_min_cents=89, late_entry_max_cents=97,
-                   late_take_profit_cents=98,
-                   late_take_profit_execution="gtc_after_confirmed_fill",
+                   late_entry_min_cents=96, late_entry_max_cents=99,
                    late_budget_fraction="1/2-active-trade-budget",
                    late_max_coins_per_window=late.MAX_LATE_COINS,
                    late_win_streak_independent=True)
