@@ -227,7 +227,9 @@ def completed_outcomes_in_order(windows):
         if not outcome:
             continue
         status = outcome.get("status")
-        if status == "no_fill":
+        if status == "no_fill" or record.get("entry_kind") == "late_basket_rank":
+            # Extra near-settlement positions contribute to account P&L,
+            # but not the regular trade budget's win/loss progression.
             continue
         if status not in {"win", "loss", "flat"}:
             raise RuntimeError("Invalid trade outcome; streak not advanced")
@@ -279,6 +281,7 @@ def apply_new_outcomes(journal):
         status = record["outcome"]["status"]
         event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
+              entry_kind=record.get("entry_kind", "regular"),
               result_completed_at=record["outcome"].get("completed_at"),
               streak_replayed_in_completion_order=True,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
@@ -709,6 +712,7 @@ def window_entry_count(journal, window_start_ms):
         raise ValueError("Invalid 15-minute window start")
     return sum(1 for record in journal.data["windows"].values()
                if record.get("window_start_ms") == window_start_ms
+               and record.get("entry_kind") != "late_basket_rank"
                and isinstance(record.get("buy"), dict)
                and not entry_slot_released(record))
 
