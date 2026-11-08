@@ -579,14 +579,36 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
     # Preview must never send exits, even if pointed at an existing live journal.
     # Live exits operate only on this runner's durable order identities.
     if live:
+        closed_checked = getattr(journal, "_closed_reconciliation_checked", None)
+        if closed_checked is None:
+            closed_checked = {}
+            journal._closed_reconciliation_checked = closed_checked
+        active, closed = [], []
         for record in list(journal.data["windows"].values()):
-            if record.get("buy") and not record.get("outcome"):
-                try:
+            if not record.get("buy") or record.get("outcome"):
+                continue
+            start_ms = record.get("window_start_ms")
+            is_closed = (type(start_ms) is int and start_ms % 900000 == 0
+                         and start_ms / 1000 + 900 <= now)
+            (closed if is_closed else active).append(record)
+        # Active exits get API capacity first. Closed records only need payout
+        # reconciliation, at most once per minute, including failed attempts.
+        for record in active + closed:
+            ticker = record["ticker"]
+            is_closed = record in closed
+            if is_closed:
+                previous = closed_checked.get(ticker)
+                if previous is not None and 0 <= now - previous < 60:
+                    continue
+                closed_checked[ticker] = now
+            try:
+                if not is_closed:
                     reconcile_exit(client, journal, record, now)
-                    verify_completed_trade(client, journal, record, now)
-                except Exception as error:
-                    event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
-                          error_type=type(error).__name__)
+                verify_completed_trade(client, journal, record, now)
+            except Exception as error:
+                event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=ticker,
+                      error_type=type(error).__name__,
+                      http_status=getattr(error, "status_code", None))
         apply_new_outcomes(journal)
     # Queue order is unchanged (M9_SERIES). Refresh each candidate before use;
     # never reuse a backup's stale snapshot as an executable quote.
