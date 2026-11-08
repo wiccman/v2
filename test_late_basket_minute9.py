@@ -171,6 +171,35 @@ def test_late_only_cannot_activate_ordinary_window_slot(scenario):
     assert policy.window_attempts(journal, START) == []
 
 
+def test_no_rank_three_promotion_even_if_96c_eligible(scenario):
+    now, _, journal, client = scenario
+    feed = Feed(now, ["KXBTC15M", "KXSOL15M", "KXETH15M",
+                      "KXHYPE15M", "KXXRP15M"])
+    # BTC is excluded and second-ranked SOL has no qualifying 96c quote.
+    client.initial["KXSOL15M"] = ".93"
+    client.fresh["KXSOL15M"] = ".93"
+    run(journal, client, now, feed)
+    assert client.posted == []  # Rank-three ETH must not be promoted.
+
+
+def test_high_price_fill_has_no_impossible_5cent_tp_but_keeps_stop(scenario):
+    now, _, journal, _ = scenario
+    class FilledLate(CashExchange):
+        def market(self, ticker):
+            data = super().market(ticker)
+            data["yes_bid_dollars"] = ".96"
+            return data
+    client = FilledLate(outcomes={"KXETH15M": "partial"})
+    client.initial = {x: ".97" for x in core.DEFAULT_SERIES}
+    client.fresh = dict(client.initial)
+    run(journal, client, now, Feed(now))
+    record = next(iter(journal.data["windows"].values()))
+    assert record["entry_kind"] == late.LATE_KIND
+    assert not record["sells"]  # A 102c take-profit is impossible.
+    assert core.exit_decision(D(".97"), D(".76")) == ("stop_loss", D(".76"))
+    assert core.exit_decision(D(".97"), D(".96")) == (None, None)
+
+
 def test_preview_never_writes_or_sends_orders(scenario):
     now, events, journal, client = scenario
     initial = journal.path.read_bytes()
