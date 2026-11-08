@@ -257,7 +257,9 @@ def test_zone1_ambiguous_order_blocks_zone2_even_without_exchange_inventory(scen
     journal.data["windows"][ticker] = record
     journal.save()
     run(journal, client, now, Feed(now))
-    assert client.posted == []
+    assert all(not ticker.startswith("KXETH15M-") for ticker, _, _, _ in client.posted)
+    # Rank-two SOL can still trade: the restriction belongs to ETH's Zone 1.
+    assert client.posted and client.posted[0][0].startswith("KXSOL15M-")
     assert any(n == "M9_LATE_ZONE_BLOCKED" and d["reason"] == "zone1_order_unresolved"
                for n, d in events)
 
@@ -269,7 +271,8 @@ def test_zone1_no_fill_without_proof_cannot_enable_zone2(scenario):
     record.pop("entry_zero_fill_verified")
     journal.data["windows"][ticker] = record
     run(journal, client, now, Feed(now))
-    assert client.posted == []
+    assert all(not ticker.startswith("KXETH15M-") for ticker, _, _, _ in client.posted)
+    assert client.posted and client.posted[0][0].startswith("KXSOL15M-")
     assert any(n == "M9_LATE_ZONE_BLOCKED" and d["reason"] == "zone1_zero_fill_unverified"
                for n, d in events)
 
