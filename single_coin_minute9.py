@@ -20,8 +20,9 @@ all outside buys as manual inventory: competing take-profits could oversell.
 An absolute executable bid at M9_STOP_BID_CENTS (default 45c) triggers a price-protected reduce-only IOC,
 regardless of entry price. The actual exit fill can be below 45c on a gap;
 IOC exits require the process to run.
-After three confirmed profitable trades, the per-entry budget drops to
-the full normal allocation after three confirmed wins until a losing trade; before three wins, the budget is one third of normal.
+At startup use one third of the normal budget. A verified loss enables the full
+budget; two consecutive wins at full budget return to one third, which stays
+active until the next verified loss. A loss at full budget resets its win count.
 """
 from __future__ import annotations
 
@@ -141,22 +142,39 @@ def starting_streak():
 
 
 def next_streak(streak, outcome):
-    """Track true consecutive wins while preserving the three-win budget rule."""
+    """Track global wins separately from consecutive wins at the full budget.
+
+    The persisted legacy 'reduced_budget' flag is True for the $6.66
+    allocation after the previous inversion. Keep it for journal compatibility.
+    Missing full_budget_wins in legacy journals means zero wins in that phase.
+    """
     wins = streak["consecutive_wins"]
-    reduced = streak["reduced_budget"]
-    if (type(wins) is not int or wins < 0 or wins > RELAX_FLOOR_AFTER_WINS
-            or type(reduced) is not bool):
+    full_budget = streak["reduced_budget"]
+    full_wins = streak.get("full_budget_wins", 0)
+    if (type(wins) is not int or not 0 <= wins <= RELAX_FLOOR_AFTER_WINS
+            or type(full_budget) is not bool
+            or type(full_wins) is not int or not 0 <= full_wins <= 1
+            or (not full_budget and "full_budget_wins" in streak)):
         raise ValueError("Invalid persisted streak")
     if outcome == "loss":
-        return starting_streak()
+        # First loss at $2.22 returns to $6.66; a loss at $6.66
+        # resets the two-win counter but stays at $6.66.
+        return {"consecutive_wins": 0, "reduced_budget": True,
+                "full_budget_wins": 0}
     if outcome == "flat":
-        # A flat is not a win, so it breaks the 10-win floor-unlock streak.
-        # Reduced-budget mode, once earned, remains until a confirmed loss.
-        return {"consecutive_wins": 0, "reduced_budget": reduced}
+        # Flat breaks consecutive wins, without changing the active budget.
+        return ({"consecutive_wins": 0, "reduced_budget": True,
+                 "full_budget_wins": 0} if full_budget else starting_streak())
     if outcome != "win":
         raise ValueError("Only finalized trade results advance the streak")
     wins = min(RELAX_FLOOR_AFTER_WINS, wins + 1)
-    return {"consecutive_wins": wins, "reduced_budget": reduced or wins >= 3}
+    if full_budget:
+        if full_wins == 1:
+            # Two full-budget wins: return to $2.22 until first loss.
+            return {"consecutive_wins": wins, "reduced_budget": False}
+        return {"consecutive_wins": wins, "reduced_budget": True,
+                "full_budget_wins": 1}
+    return {"consecutive_wins": wins, "reduced_budget": False}
 
 
 def entry_min_price(streak):
@@ -167,11 +185,11 @@ def entry_min_price(streak):
 
 
 def trade_budget(streak, base_budget):
-    """One third of normal until three verified wins, then full; no compounding."""
+    """$2.22 until loss, $6.66 until two straight wins (when base is $6.66)."""
     amount = D(str(base_budget))
     if not amount.is_finite() or amount <= 0:
         raise ValueError("Trade budget must be positive")
-    # Keep the persisted legacy milestone flag; invert only dollar allocation.
+    # Existing journal flag True denotes the full-budget phase; no cash transfers.
     return amount if streak["reduced_budget"] else amount / D(3)
 
 
@@ -205,6 +223,7 @@ def apply_new_outcomes(journal):
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
+              full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
               entry_floor_cents=int(entry_min_price(journal.data["streak"]) * 100))
 
 
@@ -844,6 +863,8 @@ def main(argv=None):
               entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
+              full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
+              active_budget_dollars=str(trade_budget(journal.data["streak"], base_budget)),
               price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
               relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",

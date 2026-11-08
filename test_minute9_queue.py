@@ -186,13 +186,12 @@ def test_unverified_legacy_no_fill_does_not_free_slot(setup):
     assert mod.window_entry_count(j, START*1000) == 1
 
 
-def test_full_budget_after_three_wins_and_fixed_stop_unchanged(setup):
+def test_full_budget_after_small_mode_loss_and_fixed_stop_unchanged(setup):
     j, _, now = setup
     c = QueueExchange({'KXBTC15M': 'zero'})
-    for _ in range(3):
-        j.data['streak'] = mod.next_streak(j.data['streak'], 'win')
+    j.data['streak'] = mod.next_streak(j.data['streak'], 'loss')
     run(c, j, now)
     assert len(c.posted) == 2
-    assert all(p[2] == 19 for p in c.posted)  # $15 after three wins; 75c+3c reserve
+    assert all(p[2] == 19 for p in c.posted)  # $15 after a small-budget loss; 75c+3c reserve
     assert all(D(r['allocated_dollars']) == 15 for r in j.data['windows'].values())
     assert mod.STOP_BID == D('.45') and mod.PROFIT == D('.05')
