@@ -61,6 +61,7 @@ def stop_drop_from_cents(value):
 
 
 STOP_DROP = stop_drop_from_cents(os.getenv("M9_STOP_DROP_CENTS", "21"))
+SOL_ABSOLUTE_KILL_BID = D(".20")  # independent emergency close, both zones
 
 
 def stop_threshold_for_entry(cost):
@@ -212,13 +213,133 @@ def entry_min_price(streak):
     return RELAXED_MIN_PRICE if streak["consecutive_wins"] >= RELAX_FLOOR_AFTER_WINS else MIN_PRICE
 
 
-def trade_budget(streak, base_budget):
-    """$2.22 until loss, $6.66 until two straight wins (when base is $6.66)."""
+BUDGET_CYCLE_POLICY = "zone1-full3-third-until-loss-half2-v1"
+BUDGET_PHASES = ("full", "third", "half")
+SOL_BUDGET_FACTOR = D("0.5")
+
+
+def new_budget_cycle(started_at):
+    """Start a new strategy at full size, ignoring earlier journal outcomes."""
+    timestamp = float(started_at)
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError("Invalid budget cycle start")
+    return {"policy": BUDGET_CYCLE_POLICY, "started_at": timestamp,
+            "phase": "full", "phase_wins": 0}
+
+
+def validate_budget_cycle(cycle):
+    if (not isinstance(cycle, dict)
+            or cycle.get("policy") != BUDGET_CYCLE_POLICY
+            or cycle.get("phase") not in BUDGET_PHASES
+            or type(cycle.get("phase_wins")) is not int
+            or not 0 <= cycle["phase_wins"] <= 2
+            or (cycle["phase"] == "third" and cycle["phase_wins"] != 0)
+            or (cycle["phase"] == "half" and cycle["phase_wins"] > 1)
+            or isinstance(cycle.get("started_at"), bool)
+            or not isinstance(cycle.get("started_at"), (int, float))
+            or not math.isfinite(cycle["started_at"])
+            or cycle["started_at"] < 0):
+        raise ValueError("Invalid persisted three-stage budget cycle")
+    return cycle
+
+
+def advance_budget_cycle(cycle, outcome):
+    """Full: 3 consecutive wins -> third; third: loss -> half;
+    half: 2 consecutive wins -> full. Losses in full/half reset counters.
+    Zone 2 and no-fills are excluded by caller.
+    """
+    validate_budget_cycle(cycle)
+    phase, wins = cycle["phase"], cycle["phase_wins"]
+    if outcome == "flat":
+        wins = 0
+    elif outcome == "loss":
+        wins = 0
+        if phase == "third":
+            phase = "half"
+    elif outcome == "win":
+        if phase != "third":
+            wins += 1
+            if (phase == "full" and wins == 3 or
+                    phase == "half" and wins == 2):
+                phase = "third" if phase == "full" else "full"
+                wins = 0
+    else:
+        raise ValueError("Only verified Zone 1 results advance budget phase")
+    return dict(cycle, phase=phase, phase_wins=wins)
+
+
+def rebuild_budget_cycle(journal):
+    """Reconcile delayed outcomes by completion time, scoped to this policy.
+
+    Only entries SUBMITTED after this policy was enabled are counted.
+    A recovered old trade cannot change the budget stage.
+    """
+    existing = journal.data.get("budget_cycle_v2")
+    if existing is None:
+        return None
+    validate_budget_cycle(existing)
+    cycle = new_budget_cycle(existing["started_at"])
+    events = []
+    for record in journal.data["windows"].values():
+        if record.get("entry_kind") == "late_basket_rank":
+            continue
+        outcome = record.get("outcome") or {}
+        if outcome.get("status") not in {"win", "loss", "flat"}:
+            continue
+        buy = record.get("buy") or {}
+        at = buy.get("created_at")
+        if (type(at) not in (int, float) or not math.isfinite(at)
+                or at < cycle["started_at"]):
+            continue
+        completed = outcome.get("completed_at")
+        if type(completed) not in (int, float) or not math.isfinite(completed):
+            raise RuntimeError("Invalid budget-cycle trade completion timestamp")
+        ticker = record.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            raise RuntimeError("Invalid budget-cycle ticker")
+        events.append((completed, ticker, outcome["status"]))
+    for _, _, status in sorted(events):
+        cycle = advance_budget_cycle(cycle, status)
+    if cycle != existing:
+        journal.data["budget_cycle_v2"] = cycle
+        journal.save()
+        event("M9_BUDGET_CYCLE_CHANGED", policy=BUDGET_CYCLE_POLICY,
+              phase=cycle["phase"], phase_wins=cycle["phase_wins"],
+              qualifying_outcomes=len(events))
+    return cycle
+
+
+def ensure_budget_cycle(journal, *, now=None):
+    """Migrate live journal once without relabeling old results as new wins."""
+    current = journal.data.get("budget_cycle_v2")
+    if current is None:
+        current = new_budget_cycle(time.time() if now is None else now)
+        journal.data["budget_cycle_v2"] = current
+        journal.save()
+        event("M9_BUDGET_CYCLE_STARTED", policy=BUDGET_CYCLE_POLICY,
+              started_at=current["started_at"], phase="full")
+    validate_budget_cycle(current)
+    return rebuild_budget_cycle(journal)
+
+
+def trade_budget(streak, base_budget, *, budget_cycle=None):
+    """Active phase allocation. Without a cycle retain test/legacy semantics."""
     amount = D(str(base_budget))
     if not amount.is_finite() or amount <= 0:
         raise ValueError("Trade budget must be positive")
-    # Existing journal flag True denotes the full-budget phase; no cash transfers.
+    if budget_cycle is not None:
+        phase = validate_budget_cycle(budget_cycle)["phase"]
+        return (amount if phase == "full" else
+                amount / D(3) if phase == "third" else amount / D(2))
     return amount if streak["reduced_budget"] else amount / D(3)
+
+
+def budget_for_series(active_budget, series):
+    """SOL receives half the active allocation in BOTH trading zones."""
+    allocation = D(str(active_budget))
+    if not allocation.is_finite() or allocation <= 0:
+        raise ValueError("Invalid allocation")
+    return allocation * SOL_BUDGET_FACTOR if series == "KXSOL15M" else allocation
 
 
 def budgeted_quantity(budget, ask, cap=100, *, min_price=None):
@@ -294,6 +415,7 @@ def apply_new_outcomes(journal):
             raise RuntimeError("Invalid trade outcome; streak not advanced")
         record["outcome"]["counted"] = True
     journal.save()  # Atomic journal/streak update; no historical order edits.
+    rebuild_budget_cycle(journal)
     for record in sorted(pending, key=lambda r: (r["outcome"].get("completed_at", 0),
                                                  r.get("ticker", ""))):
         status = record["outcome"]["status"]
@@ -306,7 +428,9 @@ def apply_new_outcomes(journal):
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
-              entry_floor_cents=int(entry_min_price(journal.data["streak"]) * 100))
+              entry_floor_cents=int(entry_min_price(journal.data["streak"]) * 100),
+              budget_phase=(journal.data.get("budget_cycle_v2") or {}).get("phase"),
+              budget_phase_wins=(journal.data.get("budget_cycle_v2") or {}).get("phase_wins"))
 
 
 def fill_fee(row):
@@ -693,6 +817,31 @@ def cancel_stale_zone1_buy(client, journal, record, now, *, order=None):
     return True
 
 
+def maybe_arm_sol_20c_kill(journal, record, bid, now):
+    """Latch a SOL-only absolute 20c executable-bid emergency exit.
+
+    This is an additional stop, NOT a replacement for the entry-relative
+    21c stop. The exchange is never guaranteed to fill at the trigger.
+    """
+    if (record.get("series") != "KXSOL15M"
+            and not str(record.get("ticker", "")).startswith("KXSOL15M-")):
+        return False
+    price = D(str(bid))
+    if not price.is_finite() or not D(0) <= price <= SOL_ABSOLUTE_KILL_BID:
+        return False
+    if not record.get("sol_20c_kill"):
+        record["sol_20c_kill"] = {
+            "at": now, "trigger_bid": str(price),
+            "threshold": str(SOL_ABSOLUTE_KILL_BID),
+            "kind": "absolute_contract_price",
+        }
+        journal.save()
+        event("M9_SOL_20C_KILL_TRIGGERED", ticker=record["ticker"],
+              entry_zone=record.get("entry_zone", ZONE1),
+              trigger_bid=str(price), threshold=str(SOL_ABSOLUTE_KILL_BID))
+    return True
+
+
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
     buy = find_order(client, ticker, record["buy"])
@@ -731,7 +880,8 @@ def reconcile_exit(client, journal, record, now):
                 market = client.market(ticker)
                 bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
                 observe_trade_mae(journal, record, cost, bid, now)
-                if bid.is_finite() and (bid <= threshold or record.get("stop_armed")):
+                sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+                if bid.is_finite() and (bid <= threshold or record.get("stop_armed") or sol_kill):
                     if not record.get("stop_armed"):
                         record["stop_armed"] = {"at": now, "trigger_bid": str(bid),
                                                 "threshold": str(threshold),
@@ -793,7 +943,9 @@ def reconcile_exit(client, journal, record, now):
         return
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     observe_trade_mae(journal, record, cost, bid, now)
-    purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
+    sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+    purpose, limit = exit_decision(
+        cost, bid, stop_armed=bool(record.get("stop_armed")) or sol_kill)
     if purpose != "stop_loss" and record.get("entry_kind") == "late_basket_rank":
         # Zone 2 is an independent near-close 98c exit, never the regular
         # +5c target. Post a resting order as soon as inventory is verified,
@@ -979,7 +1131,10 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         if entry_market_occupied(client, ticker):
             event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
             continue
-        allocation = trade_budget(journal.data["streak"], base_budget)
+        base_allocation = trade_budget(
+            journal.data["streak"], base_budget,
+            budget_cycle=journal.data.get("budget_cycle_v2"))
+        allocation = budget_for_series(base_allocation, series)
         quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts,
                                      min_price=min_price)
         if quantity < 1:
@@ -1018,6 +1173,8 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         record = {"ticker": ticker, "series": series, "side": current["side"],
                   "entry_zone": ZONE1, "window_start_ms": start_ms,
                   "quantity": str(quantity), "allocated_dollars": str(allocation),
+                  "budget_phase_at_entry": (journal.data.get("budget_cycle_v2") or {}).get("phase"),
+                  "sol_budget_factor_at_entry": str(SOL_BUDGET_FACTOR) if series == "KXSOL15M" else "1",
                   "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
                   "entry_floor_at_entry": str(min_price),
                   "buy": intent, "sells": []}
@@ -1102,6 +1259,7 @@ def main(argv=None):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         session.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
         journal = Journal(state)
+        ensure_budget_cycle(journal)
         # Bounded read-only replay lets diagnostics inspect prior exit incidents.
         completed = [r for r in journal.data["windows"].values()
                      if r.get("outcome") and r.get("sells")]
@@ -1122,11 +1280,18 @@ def main(argv=None):
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
-              active_budget_dollars=str(trade_budget(journal.data["streak"], base_budget)),
+              active_budget_dollars=str(trade_budget(
+                  journal.data["streak"], base_budget,
+                  budget_cycle=journal.data.get("budget_cycle_v2"))),
+              budget_cycle_policy=BUDGET_CYCLE_POLICY,
+              budget_phase=journal.data["budget_cycle_v2"]["phase"],
+              budget_phase_wins=journal.data["budget_cycle_v2"]["phase_wins"],
+              sol_budget_factor=str(SOL_BUDGET_FACTOR),
               price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
               relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",
               stop_drop_cents=int(STOP_DROP * 100), stop_basis="verified_average_entry_cost",
+              sol_absolute_kill_bid_cents=int(SOL_ABSOLUTE_KILL_BID * 100),
               stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()

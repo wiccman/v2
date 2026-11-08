@@ -163,3 +163,106 @@ def test_zone2_mae_low_water_has_own_zone_label(tmp_path, monkeypatch):
     assert core.observe_trade_mae(journal, record, ".91", ".85", START + 800)
     assert D(record["observed_mae"]["mae_cents_lower_bound"]) == D(6)
     assert events[-1][1]["entry_zone"] == core.ZONE2
+
+
+
+def make_sol_stop_exchange(*, side="YES", bid=".20"):
+    c = StopExchange(side=side, bid=bid)
+    c.ticker = "KXSOL15M-TEST"
+    for order in c.orders.values():
+        order["ticker"] = c.ticker
+    for row in c.rows:
+        row["ticker"] = c.ticker
+    return c
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("zone", [core.ZONE1, core.ZONE2])
+def test_sol_absolute_20c_emergency_trigger_executes_both_zones(
+        tmp_path, monkeypatch, side, zone):
+    captured = []
+    monkeypatch.setattr(core, "event",
+                        lambda name, **fields: captured.append((name, fields)))
+    client = make_sol_stop_exchange(side=side, bid=".20")
+    journal = core.Journal(tmp_path / f"sol-kill-{zone}-{side}.json")
+    record = fake_record(client, fully_sold=False)
+    record["series"] = "KXSOL15M"
+    record["entry_zone"] = zone
+    journal.data["windows"][core.zone_record_key(client.ticker, zone)] = record
+    core.reconcile_exit(client, journal, record, START + 570)
+    assert D(record["sol_20c_kill"]["threshold"]) == D(".20")
+    assert record["stop_armed"]
+    assert record["sells"][0]["purpose"] == "stop_loss"
+    assert record["sells"][0]["execution"] == "reduce_only_ioc"
+    assert client.submissions[0]["limit"] == D(".20")
+    assert client.submissions[0]["signed"] == (D(2) if side == "YES" else D(-2))
+    assert len([n for n, _ in captured if n == "M9_SOL_20C_KILL_TRIGGERED"]) == 1
+    # Unknown/pending acknowledgement never duplicates a sell or the trigger.
+    journal = core.Journal(journal.path)
+    record = journal.data["windows"][core.zone_record_key(client.ticker, zone)]
+    core.reconcile_exit(client, journal, record, START + 572)
+    assert len(client.submissions) == 1
+    assert len([n for n, _ in captured if n == "M9_SOL_20C_KILL_TRIGGERED"]) == 1
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_sol_20c_emergency_cancels_existing_resting_tp_before_selling(
+        tmp_path, side):
+    client = make_sol_stop_exchange(side=side, bid=".60")
+    journal = core.Journal(tmp_path / f"sol-tp-cancel-{side}.json")
+    record = fake_record(client, fully_sold=False)
+    record["series"] = "KXSOL15M"
+    journal.data["windows"][client.ticker] = record
+    core.reconcile_exit(client, journal, record, START + 570)
+    assert len(client.submissions) == 1
+    assert record["sells"][0]["execution"] == "gtc"
+    assert "sol_20c_kill" not in record
+    client.bid = D(".20")
+    core.reconcile_exit(client, journal, record, START + 572)
+    assert client.orders["exit-1"]["status"] == "canceled"
+    assert record["stop_armed"] and record["sol_20c_kill"]
+    assert len(client.submissions) == 1
+    core.reconcile_exit(client, journal, record, START + 574)
+    assert len(client.submissions) == 2
+    assert record["sells"][-1]["purpose"] == "stop_loss"
+    assert client.submissions[-1]["limit"] == D(".20")
+
+
+def test_sol_absolute_kill_waits_when_no_executable_bid(tmp_path):
+    client = make_sol_stop_exchange(bid="0")
+    journal = core.Journal(tmp_path / "sol-zero.json")
+    record = fake_record(client, fully_sold=False)
+    record["series"] = "KXSOL15M"
+    journal.data["windows"][client.ticker] = record
+    core.reconcile_exit(client, journal, record, START + 570)
+    assert record["sol_20c_kill"]
+    assert record["stop_armed"]
+    assert client.submissions == []  # No buyer; no fabricated fill or zero-price sell.
+
+
+def test_sol_marker_does_not_fire_for_eth_even_at_20c(tmp_path):
+    c = StopExchange(side="YES", bid=".20")
+    c.ticker = "KXETH15M-TEST"
+    for order in c.orders.values():
+        order["ticker"] = c.ticker
+    for row in c.rows:
+        row["ticker"] = c.ticker
+    j = core.Journal(tmp_path / "eth-stop.json")
+    r = fake_record(c, fully_sold=False)
+    r["series"] = "KXETH15M"
+    j.data["windows"][c.ticker] = r
+    core.reconcile_exit(c, j, r, START + 570)
+    assert "sol_20c_kill" not in r
+    assert r["sells"][0]["purpose"] == "stop_loss"  # Normal 21c entry-relative stop.
+
+
+def test_sol_marker_exact_20c_boundary(tmp_path):
+    c = make_sol_stop_exchange(bid=".201")
+    j = core.Journal(tmp_path / "boundary.json")
+    r = fake_record(c, fully_sold=False)
+    r["series"] = "KXSOL15M"
+    j.data["windows"][c.ticker] = r
+    assert core.maybe_arm_sol_20c_kill(j, r, D(".201"), START + 570) is False
+    assert "sol_20c_kill" not in r
+    assert core.maybe_arm_sol_20c_kill(j, r, D(".20"), START + 572) is True
+    assert D(r["sol_20c_kill"]["trigger_bid"]) == D(".20")

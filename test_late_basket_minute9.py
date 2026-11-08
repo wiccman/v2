@@ -31,6 +31,10 @@ def scenario(tmp_path, monkeypatch):
     events = []
     monkeypatch.setattr(core.time, "time", lambda: now[0])
     monkeypatch.setattr(core, "event", lambda event, **details: events.append((event, details)))
+    # These legacy tests exercise Zone 2 entry gates under their original
+    # generic budget assumption. The new SOL-specific half allocation has
+    # independent explicit regression coverage in test_three_stage_budget_sol.py.
+    monkeypatch.setattr(core, "budget_for_series", lambda amount, series: D(str(amount)))
     journal = core.Journal(tmp_path / "late.json")
     client = CashExchange()
     client.initial = {series: ".97" for series in core.DEFAULT_SERIES}
