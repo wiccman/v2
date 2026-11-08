@@ -6,7 +6,7 @@ from kalshi import KalshiClient, KalshiAPIError
 from test_take_profit_monitor import Exchange, monitor
 
 
-def test_routed_lookup_sends_ticker(monkeypatch):
+def test_single_order_lookup_uses_documented_path_only(monkeypatch):
     client = KalshiClient()
     calls = []
     def request(method, path, **kw):
@@ -14,7 +14,7 @@ def test_routed_lookup_sends_ticker(monkeypatch):
         return {'order': {'order_id': 'O', 'ticker': 'T', 'status': 'executed'}}
     monkeypatch.setattr(client, 'request', request)
     assert client.order('O', 'T')['status'] == 'executed'
-    assert calls == [('GET', '/portfolio/orders/O', {'params': {'market_ticker': 'T', 'exchange_index': -1}, 'auth': True})]
+    assert calls == [('GET', '/portfolio/orders/O', {'auth': True})]
 
 
 def test_404_recovers_exact_order_on_later_page(monkeypatch):
@@ -22,7 +22,7 @@ def test_404_recovers_exact_order_on_later_page(monkeypatch):
     def request(method, path, params=None, **kw):
         assert method == 'GET'
         if path.endswith('/O'):
-            assert params == {'market_ticker': 'T', 'exchange_index': -1}
+            assert params is None  # GetOrder has no shard-routing query parameters.
             raise KalshiAPIError(404, 'not found')
         assert params['ticker'] == 'T'
         assert 'exchange_index' not in params and 'market_ticker' not in params
