@@ -69,6 +69,9 @@ def test_total_sixteen_but_market_zero_never_posts(setup):
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
     assert check['total_cash_dollars']=='16.00' and check['market_cash_dollars']=='0.00'
     assert check['cash_check_scope']=='market_exchange_cash'
+    skipped=next(d for n,d in events if n=='M9_ENTRY_NOT_SENT')
+    assert skipped['reason']=='insufficient_market_cash'
+    assert skipped['minimum_one_contract_with_fee_reserve_dollars']=='0.78'
 
 
 def test_funded_shard_preserves_budget_quantity_side_and_price(setup):

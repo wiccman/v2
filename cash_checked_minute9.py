@@ -192,12 +192,13 @@ class CashCheckedClient:
         record["cash_preflight"] = {"exchange_index": index, "total_cash_dollars": str(total),
                                     "market_cash_dollars": str(market_cash) if market_cash is not None else None,
                                     "cash_check_scope": "market_exchange_cash",
+                                    "minimum_one_contract_with_fee_reserve_dollars": str(unit_cost),
                                     "required_with_fee_reserve_dollars": str(required)}
         core.event("M9_CASH_CHECK", ticker=ticker, **record["cash_preflight"])
         if quantity < 1:
             finish_no_order(self.journal, record, kind="not_dispatched",
                             reason="insufficient_market_cash", now=core.time.time())
-            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_total_cash",
+            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_market_cash",
                        **record["cash_preflight"])
             raise EntryNotSubmitted("insufficient_market_cash")
         # Check the fresh selected coin's direction after cash/ownership reads,
