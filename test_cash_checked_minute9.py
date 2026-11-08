@@ -54,22 +54,21 @@ def run(c,j,now,live=True):
     return safe.run_cash_checked_pass(c,j,c.series,D(10),100,live,now[0])
 
 
-def test_total_sixteen_but_market_zero_never_dispatches(setup):
+def test_total_sixteen_but_market_zero_defers_funding_to_venue(setup):
     j,now,events=setup
     c=CashExchange(payload={'balance':1600,'balance_dollars':'16.00',
                            'balance_breakdown':[{'exchange_index':0,'balance':'16.00'},
                                                 {'exchange_index':2,'balance':'0.00'}]})
     run(c,j,now)
-    assert c.posted==[] and c.balance_calls==1
-    assert core.window_entry_count(j,START*1000)==0
+    assert len(c.posted)==1 and c.balance_calls==1
+    assert core.window_entry_count(j,START*1000)==1
     r=next(iter(j.data['windows'].values()))
-    assert r['outcome']['status']=='no_fill' and r['outcome']['counted']
-    assert r['outcome']['reason']=='insufficient_market_cash'
-    assert safe.release_proven_no_order(r)
+    assert 'entry_no_order_proof' not in r
     assert core.Journal(j.path).data==j.data
     assert j.data['streak']==core.starting_streak()
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
     assert check['total_cash_dollars']=='16.00' and check['market_cash_dollars']=='0.00'
+    assert check['cash_check_scope']=='aggregate_account_cash'
 
 
 def test_funded_shard_preserves_budget_quantity_side_and_price(setup):
@@ -158,11 +157,11 @@ def test_cash_preflight_never_extends_entry_window(setup):
     assert next(iter(j.data['windows'].values()))['outcome']['reason']=='entry_deadline_passed'
 
 
-def test_no_partial_funding_or_budget_increase(setup):
+def test_low_shard_does_not_increase_budget_or_quantity(setup):
     j,now,_=setup
     c=CashExchange(payload={'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'8.00'}]})
     run(c,j,now)
-    assert not c.posted
+    assert len(c.posted)==1 and c.posted[0][2]==12
     assert next(iter(j.data['windows'].values()))['quantity']=='12'
     assert core.STOP_BID==D('.45') and core.PROFIT==D('.05')
 
