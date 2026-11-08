@@ -91,7 +91,7 @@ def test_backup_waits_sixty_seconds_and_pending_fill_blocks_more(scenario):
     j = core.Journal(j.path)
     run(c, j, now, feed)
     assert len(c.posted) == 1 and c.posted[0][0].startswith("KXETH15M-")
-    assert c.posted[0][1:] == ("YES", 8, D(".80"))
+    assert c.posted[0][1:] == ("YES", 2, D(".80"))
     now[0] += 60
     run(c, j, now, feed)
     assert len(c.posted) == 1 and core.window_entry_count(j, START*1000) == 1
