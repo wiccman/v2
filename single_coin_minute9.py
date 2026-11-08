@@ -342,6 +342,48 @@ def emit_exit_summary(record, *, source):
                      "acknowledged": bool(x.get("order_id"))} for x in sells])
 
 
+def observe_trade_mae(journal, record, cost, bid, now):
+    """Save the lowest observed executable bid for a verified owned entry.
+
+    No extra exchange requests or order actions. This gives an observed MAE
+    lower bound, not the exact intrapoll low or a guaranteed executable exit.
+    Persist only a fresh low-water mark, so ordinary polling adds no writes.
+    """
+    cost, bid = D(str(cost)), D(str(bid))
+    if (not cost.is_finite() or not D(0) < cost < D(1)
+            or not bid.is_finite() or not D(0) <= bid <= D(1)
+            or isinstance(now, bool) or not isinstance(now, (int, float))
+            or not math.isfinite(now)):
+        return False
+    old = record.get("observed_mae")
+    if isinstance(old, dict):
+        try:
+            previous = D(str(old["lowest_bid"]))
+        except (ValueError, KeyError, TypeError, ArithmeticError):
+            return False  # Preserve suspect history rather than overwrite.
+        if not previous.is_finite() or bid >= previous:
+            return False
+        first = old.get("first_observed_at", now)
+    else:
+        first = now
+    adverse = max(D(0), cost - bid) * D(100)
+    record["observed_mae"] = {
+        "entry_cost": str(cost),
+        "lowest_bid": str(bid),
+        "mae_cents_lower_bound": str(adverse),
+        "lowest_bid_observed_at": now,
+        "first_observed_at": first,
+        "basis": "polled_executable_bid",
+        "coverage": "not_continuous",
+    }
+    journal.save()
+    event("M9_MAE_LOW_OBSERVED", ticker=record.get("ticker"),
+          entry_zone=record.get("entry_zone", ZONE1),
+          lowest_bid=str(bid), entry_cost=str(cost),
+          mae_cents_lower_bound=str(adverse), observed_at=now)
+    return True
+
+
 def verify_completed_trade(client, journal, record, now):
     """Only fully reconciled exits or finalized market payouts affect streak."""
     if record.get("outcome") or not record.get("buy"):
@@ -427,6 +469,16 @@ def verify_completed_trade(client, journal, record, now):
                           "bought": str(bought), "sold": str(sold),
                           "remaining_at_settlement": str(remaining)}
     journal.save()
+    mae = record.get("observed_mae")
+    if isinstance(mae, dict):
+        event("M9_TRADE_MAE", ticker=ticker,
+              entry_zone=record.get("entry_zone", ZONE1),
+              result=status, net_pnl_dollars=str(pnl),
+              entry_cost=mae.get("entry_cost"),
+              lowest_observed_bid=mae.get("lowest_bid"),
+              mae_cents_lower_bound=mae.get("mae_cents_lower_bound"),
+              lowest_bid_observed_at=mae.get("lowest_bid_observed_at"),
+              coverage="polled_executable_bid_not_continuous")
     emit_exit_summary(record, source="live_reconciliation")
 
 
@@ -678,6 +730,7 @@ def reconcile_exit(client, journal, record, now):
             if intent.get("execution") == "gtc" and order.get("status") == "resting":
                 market = client.market(ticker)
                 bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+                observe_trade_mae(journal, record, cost, bid, now)
                 if bid.is_finite() and (bid <= threshold or record.get("stop_armed")):
                     if not record.get("stop_armed"):
                         record["stop_armed"] = {"at": now, "trigger_bid": str(bid),
@@ -739,6 +792,7 @@ def reconcile_exit(client, journal, record, now):
     if parse_time(market["close_time"]) <= now or market.get("status") not in {"active", "open"}:
         return
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+    observe_trade_mae(journal, record, cost, bid, now)
     purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
     if purpose != "stop_loss" and record.get("entry_kind") == "late_basket_rank":
         # Zone 2 is an independent near-close 98c exit, never the regular
