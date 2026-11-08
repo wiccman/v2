@@ -111,22 +111,44 @@ def test_explicit_rejection_also_waits_one_minute(setup):
     assert len(c.posted) == 2
 
 
-def test_cash_not_sent_also_waits_and_no_money_moved(setup):
-    j, now, _, feed = setup
+def test_target_rebalance_wait_does_not_consume_candidate_attempt(setup, monkeypatch):
+    j, now, events, feed = setup
+    monkeypatch.setenv('M9_TARGET_EXCHANGE_INDEX', '2')
     c = CashExchange(payload={'balance':2500,
         'balance_breakdown':[{'exchange_index':0,'balance':'24'},
                              {'exchange_index':2,'balance':'1'}]})
-    original = copy.deepcopy(c.payload)
     run(c, j, now, feed)
-    assert len(j.data['windows']) == 1 and c.posted == []
-    now[0] += 59
-    run(c, core.Journal(j.path), now, feed)
-    assert len(core.Journal(j.path).data['windows']) == 1
-    now[0] += 1
-    reopened = core.Journal(j.path)
-    run(c, reopened, now, feed)
-    assert len(reopened.data['windows']) == 2
-    assert c.posted == [] and c.payload == original
+    assert c.posted == [] and j.data['windows'] == {}
+    wait = next(d for n,d in events if n == 'M8_TARGET_BALANCE_WAIT')
+    assert wait['target_exchange_index'] == 2
+    assert wait['target_cash_dollars'] == '1'
+    assert wait['required_entry_budget_dollars'] == '10'
+
+    # Once Kalshi's automatic rebalance reaches the target shard, the same
+    # candidate is still eligible because waiting never consumed an attempt.
+    c.payload = {'balance':2500,
+        'balance_breakdown':[{'exchange_index':0,'balance':'1'},
+                             {'exchange_index':2,'balance':'24'}]}
+    now[0] += 2
+    run(c, j, now, feed)
+    assert len(c.posted) == 1
+    assert len(j.data['windows']) == 1
+
+
+def test_target_rebalance_wait_does_not_block_exit_reconciliation(setup, monkeypatch):
+    j, now, _, feed = setup
+    c = CashExchange({'KXBTC15M':'pending'})
+    run(c, j, now, feed)
+    calls = []
+    monkeypatch.setattr(core, 'reconcile_exit', lambda *a: calls.append(a[2]['ticker']))
+    monkeypatch.setenv('M9_TARGET_EXCHANGE_INDEX', '2')
+    c.payload = {'balance':2500,
+        'balance_breakdown':[{'exchange_index':0,'balance':'24'},
+                             {'exchange_index':2,'balance':'1'}]}
+    # Expire the cached balance so this pass sees the low target-shard cash.
+    now[0] += 2
+    run(c, j, now, feed)
+    assert calls and len(c.posted) == 1
 
 
 def test_never_promotes_third_when_top_two_priced_out(setup):
