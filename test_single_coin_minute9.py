@@ -330,52 +330,55 @@ def test_missing_fee_does_not_count_unverified_result(tmp_path):
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("30", D(".30")), ("1", D(".01")), ("99", D(".99")), ("45", D(".45")),
+    ("21", D(".21")), ("1", D(".01")), ("99", D(".99")),
 ])
-def test_explicit_stop_setting_parses_integer_cents(raw, expected):
-    from single_coin_minute9 import stop_bid_from_cents
-    assert stop_bid_from_cents(raw) == expected
+def test_explicit_entry_relative_stop_setting_parses_integer_cents(raw, expected):
+    from single_coin_minute9 import stop_drop_from_cents
+    assert stop_drop_from_cents(raw) == expected
 
 
-@pytest.mark.parametrize("invalid", ["", "0", "100", "30.0", "-30", "3O", "30c", " 30", "30 ", None])
-def test_invalid_stop_setting_refused(invalid):
-    from single_coin_minute9 import stop_bid_from_cents
-    with pytest.raises(ValueError, match="M9_STOP_BID_CENTS"):
-        stop_bid_from_cents(invalid)
+@pytest.mark.parametrize("invalid", ["", "0", "100", "21.0", "-21", "2I", "21c", " 21", "21 ", None])
+def test_invalid_entry_relative_stop_setting_refused(invalid):
+    from single_coin_minute9 import stop_drop_from_cents
+    with pytest.raises(ValueError, match="M9_STOP_DROP_CENTS"):
+        stop_drop_from_cents(invalid)
 
 
-def test_configurable_absolute_thirty_cent_stop_and_journal(tmp_path, monkeypatch):
+def test_entry_relative_21c_stop_and_durable_journal(tmp_path):
     import single_coin_minute9 as mod
-    monkeypatch.setattr(mod, "STOP_BID", mod.stop_bid_from_cents("30"))
-    assert mod.exit_decision(D(".75"), D(".31")) == (None, None)
-    assert mod.exit_decision(D(".75"), D(".30")) == ("stop_loss", D(".30"))
-    assert mod.exit_decision(D(".75"), D(".29")) == ("stop_loss", D(".29"))
-    journal = Journal(tmp_path / "stop-30c.json")
-    client = StopExchange(side="YES", bid=".30")
+    assert mod.STOP_DROP == D(".21")
+    assert mod.exit_decision(D(".75"), D(".55")) == (None, None)
+    assert mod.exit_decision(D(".75"), D(".54")) == ("stop_loss", D(".54"))
+    assert mod.exit_decision(D(".75"), D(".53")) == ("stop_loss", D(".53"))
+    journal = Journal(tmp_path / "stop-entry-relative.json")
+    client = StopExchange(side="YES", bid=".51")  # actual entry cost .72
     record = fake_record(client, fully_sold=False)
     journal.data["windows"][client.ticker] = record
     journal.save()
     mod.reconcile_exit(client, journal, record, START + 574)
-    assert D(record["stop_armed"]["threshold"]) == D("0.30")
+    assert D(record["stop_armed"]["threshold"]) == D(".51")
+    assert record["stop_armed"]["entry_cost"] == ".72"
     assert record["sells"][0]["purpose"] == "stop_loss"
-    assert client.submissions[0]["limit"] == D(".30")
-    assert D(Journal(journal.path).data["windows"][client.ticker]["stop_armed"]["threshold"]) == D("0.30")
+    assert client.submissions[0]["limit"] == D(".51")
+    reopened = Journal(journal.path).data["windows"][client.ticker]
+    assert D(reopened["stop_armed"]["threshold"]) == D(".51")
 
 
 @pytest.mark.parametrize("entry,target", [
-    (".59", ".64"), (".72", ".77"), (".725", ".78"),
+    (".60", ".65"), (".72", ".77"), (".725", ".78"),
     (".80", ".85"), (".91", ".96"),
 ])
-def test_fixed_forty_five_cent_stop_is_independent_of_actual_fill(entry, target):
-    cost, trigger, tp = D(entry), D(".45"), D(target)
+def test_stop_threshold_always_21c_below_actual_fill(entry, target):
+    cost, tp = D(entry), D(target)
+    trigger = cost - D(".21")
     assert exit_decision(cost, trigger + D(".0001")) == (None, None)
     assert exit_decision(cost, trigger) == ("stop_loss", trigger)
     assert exit_decision(cost, trigger - D(".01")) == ("stop_loss", trigger - D(".01"))
     assert exit_decision(cost, tp) == ("take_profit", tp)
 
 
-def test_gap_through_stop_uses_executable_bid_not_fictional_forty_five_cent_fill():
-    assert exit_decision(D(".75"), D(".44")) == ("stop_loss", D(".44"))
+def test_gap_below_21c_stop_uses_executable_bid_not_a_guaranteed_fill():
+    assert exit_decision(D(".75"), D(".32")) == ("stop_loss", D(".32"))
     assert exit_decision(D(".75"), D("0")) == ("stop_loss", None)
     assert exit_decision(D(".75"), D(".83"), stop_armed=True) == ("stop_loss", D(".83"))
 
@@ -440,7 +443,8 @@ class StopExchange(FakeTradeClient):
 @pytest.mark.parametrize("entry", [".59", ".72", ".725", ".80", ".91"])
 def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, side, expected_sign, entry):
     journal = Journal(tmp_path / f"stop-{side}.json")
-    client = StopExchange(side=side, bid=".45")
+    threshold = D(entry) - D(".21")
+    client = StopExchange(side=side, bid=str(threshold))
     yes_price = D(entry) if side == "YES" else D(1) - D(entry)
     client.rows[0]["yes_price_dollars"] = str(yes_price)
     client.rows[0]["no_price_dollars"] = str(D(1) - yes_price)
@@ -448,11 +452,11 @@ def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, s
     journal.data["windows"][client.ticker] = record
     journal.save()
     reconcile_exit(client, journal, record, START + 574)
-    assert record["stop_armed"]["threshold"] == "0.45"
+    assert D(record["stop_armed"]["threshold"]) == threshold
     assert record["sells"][0]["purpose"] == "stop_loss"
     assert client.submissions == [
         {"ticker": client.ticker, "signed": D(expected_sign),
-         "limit": D(".45"), "client_id": record["sells"][0]["client_id"]}
+         "limit": threshold, "client_id": record["sells"][0]["client_id"]}
     ]
     assert Journal(journal.path).data["windows"][client.ticker]["stop_armed"]
     # Unknown exit status cannot send a second order.
@@ -496,7 +500,7 @@ def test_unacknowledged_stop_not_repeated(tmp_path):
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
-@pytest.mark.parametrize("bid", [".72", ".61", ".46", ".4501"])
+@pytest.mark.parametrize("bid", [".72", ".61", ".52", ".515"])
 def test_stop_not_sent_before_threshold_and_tp_unchanged(tmp_path, side, bid):
     journal = Journal(tmp_path / "not_yet.json")
     client = StopExchange(side=side, bid=bid)
