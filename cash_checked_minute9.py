@@ -200,8 +200,8 @@ class CashCheckedClient:
                                     "required_with_fee_reserve_dollars": str(required)}
         core.event("M9_CASH_CHECK", ticker=ticker, **record["cash_preflight"])
         if quantity < 1:
-            reason = ("insufficient_market_cash" if market_cash < unit_cost
-                      else "insufficient_total_cash")
+            reason = ("insufficient_total_cash" if total < unit_cost
+                      else "insufficient_market_cash")
             finish_no_order(self.journal, record, kind="not_dispatched",
                             reason=reason, now=core.time.time())
             core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason=reason,
