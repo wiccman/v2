@@ -91,7 +91,7 @@ def test_initially_priced_out_first_advances_to_second(setup, first):
     c = QueueExchange(initial={'KXBTC15M': first})
     run(c, j, now)
     assert len(c.posted) == 1 and c.posted[0][0].startswith('KXETH15M-')
-    assert c.posted[0][2] == 19  # 15 dollars / (75c + 3c reserve)
+    assert c.posted[0][2] == 6  # $5 starting allocation / (75c + 3c reserve)
     assert any(n == 'M9_QUEUE_SKIP' and d['series'] == 'KXBTC15M' for n,d in events)
 
 
