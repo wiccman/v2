@@ -740,7 +740,21 @@ def reconcile_exit(client, journal, record, now):
         return
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
-    if purpose is None:
+    if purpose != "stop_loss" and record.get("entry_kind") == "late_basket_rank":
+        # Zone 2 is an independent near-close 98c exit, never the regular
+        # +5c target. Post a resting order as soon as inventory is verified,
+        # without waiting for the market bid to reach the 98c target.
+        target = D(str(record.get("take_profit_target", ".98")))
+        if target != D(".98"):
+            raise RuntimeError("Invalid Zone 2 take-profit target")
+        if cost >= target:
+            # Legacy Zone 2 positions may have entered at 98c or 99c.
+            # Never post a 98c sell below their confirmed purchase price.
+            event("M9_ZONE2_TP_NOT_PROFITABLE", ticker=ticker,
+                  entry_cost=str(cost), target=str(target))
+            return
+        purpose, limit = "take_profit", target
+    elif purpose is None:
         target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
         if target > D(".99"):
             return
@@ -763,7 +777,8 @@ def reconcile_exit(client, journal, record, now):
     record["sells"].append(intent)
     journal.save()  # Intent is durable before any POST
     event("M9_STOP_SUBMIT" if purpose == "stop_loss" else "M9_TP_SUBMIT",
-          ticker=ticker, quantity=str(remaining), target=str(limit),
+          ticker=ticker, entry_zone=record.get("entry_zone", ZONE1),
+          quantity=str(remaining), target=str(limit),
           entry_cost=str(cost), trigger_bid=str(bid), execution=intent["execution"])
     if purpose == "take_profit":
         response = client.place_resting_take_profit(ticker, sign * remaining, limit,
