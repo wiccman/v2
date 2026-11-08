@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import time
 import uuid
@@ -144,6 +145,15 @@ class KalshiClient:
                     code = candidate
             except (ValueError, TypeError, AttributeError):
                 pass
+            # Safe transport diagnostics distinguish submission from reconciliation failures.
+            safe_code = code if isinstance(code, str) and len(code) <= 80 and all(
+                ch.isalnum() or ch in "_-" for ch in code) else None
+            route = path
+            if "/orders/" in route:
+                route = route.split("/orders/")[0] + "/orders/{order_id}"
+            print(json.dumps({"event": "KALSHI_HTTP_ERROR", "method": method.upper(),
+                              "route": route, "http_status": response.status_code,
+                              "api_code": safe_code}), flush=True)
             raise KalshiAPIError(
                 response.status_code, f"Kalshi API {response.status_code} {method.upper()} {path}: {details}",
                 retry_after=retry_after, code=code,
