@@ -9,18 +9,36 @@ from __future__ import annotations
 
 import math
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 
-POLICY = "minute9-top2-direction-agreement-v5"
+POLICY = "minute9-top2-sol-central-overnight-v6"
 START_SECONDS = 540
 END_SECONDS = 900
 TOP_COUNT = 2
 BTC_SERIES = "KXBTC15M"
+SOL_SERIES = "KXSOL15M"
+CENTRAL_TIME = ZoneInfo("America/Chicago")
+SOL_BLACKOUT_START_HOUR = 1
+SOL_BLACKOUT_END_HOUR = 4
 BACKUP_DELAY_SECONDS = 60
 MAX_CANDIDATE_ATTEMPTS = 2
+
+
+def sol_entry_blackout(now):
+    """Do not submit SOL entries from 01:00 inclusive until 04:00 Central daily.
+
+    America/Chicago handles CST/CDT and the fall DST repeated hour.
+    Other coins' entries and ALL existing-position exits remain available.
+    """
+    if not math.isfinite(now):
+        raise ValueError("Invalid entry clock")
+    local = datetime.fromtimestamp(now, timezone.utc).astimezone(CENTRAL_TIME)
+    return SOL_BLACKOUT_START_HOUR <= local.hour < SOL_BLACKOUT_END_HOUR
 
 
 class DirectionCheckedQueue(ranked.QueueDiagnostics):
@@ -29,6 +47,12 @@ class DirectionCheckedQueue(ranked.QueueDiagnostics):
         series = ticker.split("-")[0]
         row = self.observations.get(series)
         details = {"source": "coinbase_window_open", "side": side}
+        if series == SOL_SERIES and sol_entry_blackout(self.clock()):
+            return {"source": "central_time_entry_window", "side": side,
+                    "allowed": False, "reason": "entry_time_restricted",
+                    "timezone": "America/Chicago",
+                    "blocked_start_hour": SOL_BLACKOUT_START_HOUR,
+                    "blocked_end_hour": SOL_BLACKOUT_END_HOUR}
         try:
             if (row is None or side not in {"YES", "NO"}
                     or window_start_ms != self.start * 1000):
@@ -110,15 +134,26 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         return
     if not START_SECONDS <= clock() - start < END_SECONDS:
         return
-    # Restrict overall ranks before excluding BTC; never promote rank three.
-    selected = [(position, row) for position, row in enumerate(rows[:TOP_COUNT], 1)
-                if row.series != BTC_SERIES][:TOP_COUNT]
+    # Restrict ranks BEFORE all exclusions. Never promote rank three just
+    # because rank one/two is BTC or a time-blocked SOL.
+    blackout = sol_entry_blackout(clock())
+    top_two = list(enumerate(rows[:TOP_COUNT], 1))
+    selected = [(position, row) for position, row in top_two
+                if row.series != BTC_SERIES
+                and not (row.series == SOL_SERIES and blackout)]
     selected_series = {row.series for _, row in selected}
+    if blackout and any(row.series == SOL_SERIES for _, row in top_two):
+        core.event("M8_SOL_TIME_BLOCK", policy=POLICY, window_start_ms=start * 1000,
+                   timezone="America/Chicago", blocked_start_hour=SOL_BLACKOUT_START_HOUR,
+                   blocked_end_hour=SOL_BLACKOUT_END_HOUR, no_rank_three_promotion=True)
     core.event("M8_TOP2_QUEUE", policy=POLICY, window_start_ms=start * 1000,
                ranking_scope="available_coin_data",
                excluded_series=[s for s in names if s not in {r.series for r in rows}],
                skipped_btc_rank=next((i for i, r in enumerate(rows, 1)
                                       if r.series == BTC_SERIES), None),
+               sol_time_restricted=blackout,
+               skipped_sol_rank=(next((i for i, r in enumerate(rows[:TOP_COUNT], 1)
+                                       if r.series == SOL_SERIES), None) if blackout else None),
                queue=[{"rank": position, "series": row.series,
                        "return_pct": str(row.return_pct)} for position, row in selected],
                skipped_lower_ranks=[r.series for r in rows[TOP_COUNT:]
@@ -176,6 +211,8 @@ def main(argv=None):
         core.event("M8_TOP2_POLICY_READY", policy=POLICY,
                    entry_start_seconds=START_SECONDS, entry_end_seconds=END_SECONDS,
                    performance_top_n=TOP_COUNT, excluded_entry_series=[BTC_SERIES],
+                   sol_blocked_entry_hours_central="01:00-04:00",
+                   sol_blocked_timezone="America/Chicago",
                    backup_delay_seconds=BACKUP_DELAY_SECONDS,
                    max_candidate_attempts_per_window=MAX_CANDIDATE_ATTEMPTS,
                    max_filled_or_pending_markets=1, transfers_enabled=False)
