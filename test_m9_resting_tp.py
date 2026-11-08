@@ -96,3 +96,70 @@ def test_cancel_failure_and_lag_never_allow_second_sell(tmp_path):
     c.orders['exit-1'].update(status='canceled',fill_count_fp='1')
     core.reconcile_exit(c,j,r,START+573)
     assert len(c.submissions)==1
+
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_observed_mae_survives_recovery_restart_and_emits_for_win(tmp_path, monkeypatch, side):
+    events = []
+    monkeypatch.setattr(core, "event",
+                        lambda name, **fields: events.append((name, fields)))
+    client = StopExchange(side=side, bid=".66")  # 72c fill, 6c underwater.
+    journal = core.Journal(tmp_path / f"mae-{side}.json")
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    journal.save()
+    core.reconcile_exit(client, journal, record, START + 570)
+    assert len(client.submissions) == 1
+    assert D(record["observed_mae"]["mae_cents_lower_bound"]) == D("6")
+    client.bid = D(".60")  # Winner temporarily fell 12c underwater.
+    core.reconcile_exit(client, journal, record, START + 572)
+    assert D(record["observed_mae"]["lowest_bid"]) == D(".60")
+    reopened = core.Journal(journal.path)
+    record = reopened.data["windows"][client.ticker]
+    client.bid = D(".69")  # Price recovers; do NOT reset the low water mark.
+    core.reconcile_exit(client, reopened, record, START + 574)
+    assert D(record["observed_mae"]["mae_cents_lower_bound"]) == D("12")
+    assert len(client.submissions) == 1  # No change to TP order management.
+    client.simulate_partial_fill("2", ".77")
+    core.verify_completed_trade(client, reopened, record, START + 575)
+    assert record["outcome"]["status"] == "win"
+    reported = [row for name, row in events if name == "M9_TRADE_MAE"]
+    assert len(reported) == 1
+    assert D(reported[0]["mae_cents_lower_bound"]) == D(12)
+    assert reported[0]["coverage"] == "polled_executable_bid_not_continuous"
+    core.verify_completed_trade(client, reopened, record, START + 577)
+    assert len([1 for name, _ in events if name == "M9_TRADE_MAE"]) == 1
+    assert core.Journal(journal.path).data["windows"][client.ticker]["observed_mae"] == record["observed_mae"]
+
+
+def test_mae_low_water_tracks_stop_gap_without_changing_stop_exit(tmp_path):
+    client = StopExchange(side="YES", bid=".50")
+    journal = core.Journal(tmp_path / "mae_stop_gap.json")
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    core.reconcile_exit(client, journal, record, START + 570)
+    assert record["stop_armed"]
+    assert record["sells"][0]["purpose"] == "stop_loss"
+    assert client.submissions[0]["limit"] == D(".50")
+    assert D(record["observed_mae"]["mae_cents_lower_bound"]) == D("22")
+
+
+def test_no_observed_mae_on_missing_or_invalid_quotes(tmp_path):
+    journal = core.Journal(tmp_path / "invalid_mae.json")
+    record = {"ticker": "KXETH15M-TEST", "entry_zone": core.ZONE1}
+    assert core.observe_trade_mae(journal, record, D(".72"), D("NaN"), START + 570) is False
+    assert core.observe_trade_mae(journal, record, D(".72"), D("-0.1"), START + 570) is False
+    assert core.observe_trade_mae(journal, record, D(".72"), D(".60"), float("nan")) is False
+    assert "observed_mae" not in record
+
+
+def test_zone2_mae_low_water_has_own_zone_label(tmp_path, monkeypatch):
+    events = []
+    monkeypatch.setattr(core, "event", lambda name, **fields: events.append((name, fields)))
+    journal = core.Journal(tmp_path / "zone2_mae.json")
+    record = {"ticker": "KXETH15M-TEST", "entry_zone": core.ZONE2,
+              "entry_kind": "late_basket_rank"}
+    assert core.observe_trade_mae(journal, record, ".91", ".85", START + 800)
+    assert D(record["observed_mae"]["mae_cents_lower_bound"]) == D(6)
+    assert events[-1][1]["entry_zone"] == core.ZONE2
