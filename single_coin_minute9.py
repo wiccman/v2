@@ -61,6 +61,7 @@ def stop_drop_from_cents(value):
 
 
 STOP_DROP = stop_drop_from_cents(os.getenv("M9_STOP_DROP_CENTS", "21"))
+SOL_ABSOLUTE_KILL_BID = D(".20")  # independent emergency close, both zones
 
 
 def stop_threshold_for_entry(cost):
@@ -816,6 +817,31 @@ def cancel_stale_zone1_buy(client, journal, record, now, *, order=None):
     return True
 
 
+def maybe_arm_sol_20c_kill(journal, record, bid, now):
+    """Latch a SOL-only absolute 20c executable-bid emergency exit.
+
+    This is an additional stop, NOT a replacement for the entry-relative
+    21c stop. The exchange is never guaranteed to fill at the trigger.
+    """
+    if (record.get("series") != "KXSOL15M"
+            and not str(record.get("ticker", "")).startswith("KXSOL15M-")):
+        return False
+    price = D(str(bid))
+    if not price.is_finite() or not D(0) <= price <= SOL_ABSOLUTE_KILL_BID:
+        return False
+    if not record.get("sol_20c_kill"):
+        record["sol_20c_kill"] = {
+            "at": now, "trigger_bid": str(price),
+            "threshold": str(SOL_ABSOLUTE_KILL_BID),
+            "kind": "absolute_contract_price",
+        }
+        journal.save()
+        event("M9_SOL_20C_KILL_TRIGGERED", ticker=record["ticker"],
+              entry_zone=record.get("entry_zone", ZONE1),
+              trigger_bid=str(price), threshold=str(SOL_ABSOLUTE_KILL_BID))
+    return True
+
+
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
     buy = find_order(client, ticker, record["buy"])
@@ -854,7 +880,8 @@ def reconcile_exit(client, journal, record, now):
                 market = client.market(ticker)
                 bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
                 observe_trade_mae(journal, record, cost, bid, now)
-                if bid.is_finite() and (bid <= threshold or record.get("stop_armed")):
+                sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+                if bid.is_finite() and (bid <= threshold or record.get("stop_armed") or sol_kill):
                     if not record.get("stop_armed"):
                         record["stop_armed"] = {"at": now, "trigger_bid": str(bid),
                                                 "threshold": str(threshold),
@@ -916,7 +943,9 @@ def reconcile_exit(client, journal, record, now):
         return
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     observe_trade_mae(journal, record, cost, bid, now)
-    purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
+    sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+    purpose, limit = exit_decision(
+        cost, bid, stop_armed=bool(record.get("stop_armed")) or sol_kill)
     if purpose != "stop_loss" and record.get("entry_kind") == "late_basket_rank":
         # Zone 2 is an independent near-close 98c exit, never the regular
         # +5c target. Post a resting order as soon as inventory is verified,
@@ -1262,6 +1291,7 @@ def main(argv=None):
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
               relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",
               stop_drop_cents=int(STOP_DROP * 100), stop_basis="verified_average_entry_cost",
+              sol_absolute_kill_bid_cents=int(SOL_ABSOLUTE_KILL_BID * 100),
               stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()
