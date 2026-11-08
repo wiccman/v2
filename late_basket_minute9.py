@@ -170,7 +170,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
     if not plans:
         return
 
-    for rank, row, plan in plans:
+    for plan_index, (rank, row, plan) in enumerate(plans):
         if not in_late_window(clock(), start):
             return
         ticker = plan["ticker"]
@@ -194,7 +194,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
 
         # Share half-budget between the remaining eligible coins; the last
         # coin may consume the residual amount, but never exceed half total.
-        remaining_coins = sum(1 for _, _, p in plans[plans.index((rank, row, plan)):]
+        remaining_coins = sum(1 for _, _, p in plans[plan_index:]
                               if p["ticker"] not in journal.data["windows"])
         target = available / D(max(1, remaining_coins))
         unit = D(fresh["limit"]) + core.FEE_RESERVE
@@ -264,3 +264,6 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
         except Exception as error:
             core.event("M9_LATE_CONFIRMATION_PENDING", ticker=ticker,
                        **ranked.error_fields(error))
+        # One successful or uncertain entry per poll. Subsequent polls
+        # may allocate the remaining HALF-budget to the second-ranked coin.
+        return
