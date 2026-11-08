@@ -229,10 +229,15 @@ def test_sol_pre_dispatch_blocks_entry_even_if_ranked_before_one_am():
     result = proxy.entry_direction_check("KXSOL15M-test", "YES", start * 1000)
     assert result["allowed"] is False
     assert result["reason"] == "entry_time_restricted"
-    # Other coins are unaffected by the time veto.
+    # Another eligible coin still passes with a fresh observation in its window.
+    now[0] = datetime(2026, 11, 9, 1, 9,
+                      tzinfo=ZoneInfo("America/Chicago")).timestamp()
+    fresh_start = int(now[0] // 900) * 900
+    proxy.start = fresh_start
     proxy.observations["KXETH15M"] = ranked.Observation(
-        "KXETH15M", start, D(100), D(101), now[0])
-    assert proxy.entry_direction_check("KXETH15M-test", "YES", start * 1000)["allowed"]
+        "KXETH15M", fresh_start, D(100), D(101), now[0])
+    assert proxy.entry_direction_check(
+        "KXETH15M-test", "YES", fresh_start * 1000)["allowed"]
 
 
 def test_time_blocked_entry_has_durable_no_order_proof(tmp_path):
