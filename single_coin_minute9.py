@@ -1,4 +1,4 @@
-"""Single-coin 15-minute Kalshi markets: minute-nine buy, +5c gross exit.
+"""Single-coin 15-minute Kalshi markets: minute-nine buy, resting +5c gross TP.
 
 For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
 whichever side has a quoted ask from 69c through 91c from elapsed minute 9 until the configured entry cutoff.
@@ -433,9 +433,22 @@ def reconcile_exit(client, journal, record, now):
     sold = D(0)
     for intent in record["sells"]:
         order = find_order(client, ticker, intent)
-        if order is None or order.get("status") not in TERMINAL:
+        if order is None:
             event("M9_SELL_ACK_PENDING", ticker=ticker)
-            return  # Never duplicate ambiguous or resting sells
+            return  # Never duplicate an ambiguous sell.
+        if order.get("status") not in TERMINAL:
+            if intent.get("execution") == "gtc" and order.get("status") == "resting":
+                market = client.market(ticker)
+                bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+                if bid.is_finite() and (bid <= STOP_BID or record.get("stop_armed")):
+                    if not record.get("stop_armed"):
+                        record["stop_armed"] = {"at": now, "trigger_bid": str(bid),
+                                                "threshold": str(STOP_BID)}
+                    journal.save()  # Persist stop before cancellation; never reset on recovery.
+                    client.cancel(intent["order_id"], ticker)
+                    event("M9_TP_CANCEL_FOR_STOP", ticker=ticker, order_id=intent["order_id"])
+            event("M9_SELL_ACK_PENDING", ticker=ticker)
+            return  # Re-read terminal status AND fills before selling any remainder.
         journal.save()
         count, _ = filled_quantity(all_fills, intent["order_id"])
         if count > D(intent["quantity"]):
@@ -479,7 +492,10 @@ def reconcile_exit(client, journal, record, now):
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
     if purpose is None:
-        return
+        target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
+        if target > D(".99"):
+            return
+        purpose, limit = "take_profit", target
     if purpose == "stop_loss" and not record.get("stop_armed"):
         # Latch the trigger even if the book temporarily loses its best bid.
         record["stop_armed"] = {
@@ -492,18 +508,25 @@ def reconcile_exit(client, journal, record, now):
         event("M9_STOP_NO_EXECUTABLE_BID", ticker=ticker)
         return
     intent = {"client_id": str(uuid.uuid4()), "quantity": str(remaining),
-              "target": str(limit), "purpose": purpose, "created_at": now}
+              "target": str(limit), "purpose": purpose, "created_at": now,
+              "execution": "gtc" if purpose == "take_profit" else "reduce_only_ioc"}
     record["sells"].append(intent)
     journal.save()  # Intent is durable before any POST
     event("M9_STOP_SUBMIT" if purpose == "stop_loss" else "M9_TP_SUBMIT",
           ticker=ticker, quantity=str(remaining), target=str(limit),
-          entry_cost=str(cost), trigger_bid=str(bid), execution="reduce_only_ioc")
-    response = client.place_take_profit(ticker, sign * remaining, limit,
-                                        client_order_id=intent["client_id"])
+          entry_cost=str(cost), trigger_bid=str(bid), execution=intent["execution"])
+    if purpose == "take_profit":
+        response = client.place_resting_take_profit(ticker, sign * remaining, limit,
+            expiration_time=parse_time(market["close_time"]), client_order_id=intent["client_id"])
+    else:
+        response = client.place_take_profit(ticker, sign * remaining, limit,
+                                            client_order_id=intent["client_id"])
     row = response.get("order", response)
     if row.get("order_id"):
         intent["order_id"] = row["order_id"]
         journal.save()
+        event("M9_EXIT_ACCEPTED", ticker=ticker, order_id=row["order_id"],
+              target=str(limit), execution=intent["execution"], purpose=purpose)
 
 
 def entry_slot_released(record):
@@ -700,6 +723,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             try:
                 # Do not infer a miss from a quote or a missing acknowledgement.
                 # Only an exact terminal-order read + fills can release this slot.
+                reconcile_exit(client, journal, record, time.time())
                 verify_completed_trade(client, journal, record, time.time())
             except Exception as error:
                 event("M9_ENTRY_CONFIRMATION_PENDING", ticker=ticker,
@@ -768,7 +792,7 @@ def main(argv=None):
               reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
-              relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5,
+              relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",
               stop_bid_cents=int(STOP_BID * 100), stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()

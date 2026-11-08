@@ -398,6 +398,14 @@ class StopExchange(FakeTradeClient):
                                  "status": "pending", "fill_count_fp": "0"}
         return {"order": {"order_id": order_id}}
 
+    def place_resting_take_profit(self, *args, **kwargs):
+        result = self.place_take_profit(*args, **kwargs)
+        self.orders[result["order"]["order_id"]]["status"] = "resting"
+        return result
+
+    def cancel(self, order_id, ticker):
+        self.orders[order_id]["status"] = "canceled"
+
     def simulate_partial_fill(self, quantity="1", price=".44"):
         name = "exit-1"
         self.orders[name] = {"ticker": self.ticker, "order_id": name,
@@ -480,7 +488,7 @@ def test_stop_not_sent_before_threshold_and_tp_unchanged(tmp_path, side, bid):
     record = fake_record(client, fully_sold=False)
     journal.data["windows"][client.ticker] = record
     reconcile_exit(client, journal, record, START + 570)
-    assert not client.submissions and "stop_armed" not in record
+    assert len(client.submissions) == 1 and "stop_armed" not in record
     client.bid = D(".77")
     reconcile_exit(client, journal, record, START + 571)
     assert len(client.submissions) == 1

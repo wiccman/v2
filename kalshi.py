@@ -313,6 +313,16 @@ class KalshiClient:
             )
         return {}
 
+    def place_resting_take_profit(self, ticker, signed_quantity, outcome_price,
+                                  expiration_time=None, *, client_order_id=None):
+        """GTC exit; caller verifies owned inventory and cancels before a stop."""
+        quantity, price = Decimal(signed_quantity), Decimal(outcome_price)
+        if not quantity or not Decimal(0) < price < Decimal(1):
+            raise ValueError("Invalid resting exit")
+        return self._order(ticker, "ask" if quantity > 0 else "bid", abs(quantity),
+                           price if quantity > 0 else Decimal(1) - price,
+                           expiration_time=expiration_time, client_order_id=client_order_id)
+
     def cancel(self, order_id, ticker):
         return self.request("DELETE", "/portfolio/events/orders/" + order_id,
                             params={"market_ticker": ticker, "exchange_index": -1}, auth=True)
