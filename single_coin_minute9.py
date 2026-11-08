@@ -224,7 +224,6 @@ def apply_new_outcomes(journal):
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
-              active_budget_dollars=str(trade_budget(journal.data["streak"], D("6.66"))),
               entry_floor_cents=int(entry_min_price(journal.data["streak"]) * 100))
 
 
