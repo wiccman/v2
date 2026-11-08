@@ -1,6 +1,9 @@
 """Cash/rejection safety adapter for the existing performance-ranked bot.
 
-No new signal, transfers, retries, or price chasing. Original core owns timing,
+No new signal, transfers, retries, or price chasing.
+Use aggregate account cash as preflight and let Kalshi's
+order endpoint authoritatively reject exchange-specific shortfalls.
+Shard breakdown is diagnostic only; never move funds automatically. Original core owns timing,
 ranking, sizing, exits and order IDs. Only definite pre-dispatch skips and the
 exact HTTP 400 / insufficient_balance rejection receive a terminal no-fill.
 All other submission errors keep the original uncertain-order reservation.
@@ -15,7 +18,7 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 from kalshi import KalshiAPIError
 
-POLICY = "cash-preflight-and-definite-rejection-v1"
+POLICY = "aggregate-preflight-venue-rejection-v2"
 ORIGINAL_RUN_PASS = core.run_pass
 ORIGINAL_SLOT_RELEASED = core.entry_slot_released
 
@@ -78,7 +81,7 @@ def release_proven_no_order(record):
             or proof.get("window_start_ms") != record.get("window_start_ms")):
         return False
     if proof.get("kind") == "not_dispatched":
-        return proof.get("reason") in {"insufficient_market_cash", "cash_check_unavailable", "entry_deadline_passed"}
+        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed"}
     return (proof.get("kind") == "exchange_rejected"
             and proof.get("http_status") == 400
             and proof.get("api_code") == "insufficient_balance")
@@ -151,9 +154,10 @@ class CashCheckedClient:
             if type(index) is not int or index < 0:
                 raise CashUnavailable("market_exchange_index_missing")
             total, shards = self.state.read(self.client, now)
-            if shards is None or index not in shards:
-                raise CashUnavailable("market_cash_missing")
-            available = min(total, shards[index])
+            # Shard balances are diagnostic. Kalshi's order API decides
+            # whether the aggregate cash is spendable on this market.
+            market_cash = shards.get(index) if shards is not None else None
+            available = total
             required = D(quantity) * (D(outcome_price) + core.FEE_RESERVE)
             if not required.is_finite() or required <= 0:
                 raise CashUnavailable("invalid_entry_cost")
@@ -164,15 +168,16 @@ class CashCheckedClient:
                        **ranked.error_fields(error))
             raise EntryNotSubmitted("cash_check_unavailable") from error
         record["cash_preflight"] = {"exchange_index": index, "total_cash_dollars": str(total),
-                                    "market_cash_dollars": str(available),
+                                    "market_cash_dollars": str(market_cash) if market_cash is not None else None,
+                                    "cash_check_scope": "aggregate_account_cash",
                                     "required_with_fee_reserve_dollars": str(required)}
         core.event("M9_CASH_CHECK", ticker=ticker, **record["cash_preflight"])
         if available < required:
             finish_no_order(self.journal, record, kind="not_dispatched",
-                            reason="insufficient_market_cash", now=core.time.time())
-            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_market_cash",
+                            reason="insufficient_total_cash", now=core.time.time())
+            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_total_cash",
                        **record["cash_preflight"])
-            raise EntryNotSubmitted("insufficient_market_cash")
+            raise EntryNotSubmitted("insufficient_total_cash")
         deadline = min(expiration_time, submit_before if submit_before is not None else expiration_time)
         if not math.isfinite(deadline) or core.time.time() >= deadline:
             finish_no_order(self.journal, record, kind="not_dispatched",
