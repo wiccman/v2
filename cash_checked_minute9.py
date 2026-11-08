@@ -80,7 +80,7 @@ def release_proven_no_order(record):
             or proof.get("window_start_ms") != record.get("window_start_ms")):
         return False
     if proof.get("kind") == "not_dispatched":
-        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed", "entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted"}
+        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed", "entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted", "late_zone_unavailable"}
     return (proof.get("kind") == "exchange_rejected"
             and proof.get("http_status") == 400
             and proof.get("api_code") == "insufficient_balance")
@@ -139,9 +139,20 @@ class CashCheckedClient:
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time,
                     *, submit_before=None, client_order_id=None, ioc=False):
-        record = self.journal.data["windows"].get(ticker)
-        if (not record or record.get("buy", {}).get("client_id") != client_order_id
-                or record.get("side") != prediction or D(record["quantity"]) != D(quantity)
+        # A market can have one independent order intent in each buy zone.
+        # Match the exact saved client order identity, never just the ticker;
+        # never fall back to a stale regular record for a Zone 2 entry.
+        windows = self.journal.data["windows"]
+        candidates = [
+            windows[key] for key in (core.zone_record_key(ticker, core.ZONE1),
+                                     core.zone_record_key(ticker, core.ZONE2))
+            if key in windows and windows[key].get("ticker") == ticker
+            and windows[key].get("buy", {}).get("client_id") == client_order_id
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError("Entry guard requires a unique durable order intent")
+        record = candidates[0]
+        if (record.get("side") != prediction or D(record["quantity"]) != D(quantity)
                 or D(record["buy"]["limit"]) != D(outcome_price)):
             raise RuntimeError("Entry guard requires the exact durable order intent")
         if record["buy"].get("order_id") or record.get("sells"):
@@ -198,7 +209,7 @@ class CashCheckedClient:
             core.event("M9_ENTRY_DIRECTION_CHECK", ticker=ticker, **check)
             if check["allowed"] is not True:
                 reason = check["reason"]
-                if reason not in {"entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted"}:
+                if reason not in {"entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted", "late_zone_unavailable"}:
                     raise RuntimeError("Invalid entry direction veto")
                 finish_no_order(self.journal, record, kind="not_dispatched",
                                 reason=reason, now=core.time.time())
