@@ -590,6 +590,11 @@ class StopExchange(FakeTradeClient):
         self.orders[result["order"]["order_id"]]["status"] = "resting"
         return result
 
+    def place_resting_stop(self, *args, **kwargs):
+        result = self.place_take_profit(*args, **kwargs)
+        self.orders[result["order"]["order_id"]]["status"] = "resting"
+        return result
+
     def cancel(self, order_id, ticker):
         self.orders[order_id]["status"] = "canceled"
 
@@ -634,6 +639,49 @@ def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, s
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
+def test_gtc_stop_is_triggered_then_resting_and_repriced_only_after_cancel(tmp_path, monkeypatch):
+    monkeypatch.setenv("M9_STOP_ORDER_MODE", "gtc")
+    journal = Journal(tmp_path / "gtc-stop.json")
+    client = StopExchange(bid=".44")
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    journal.save()
+    reconcile_exit(client, journal, record, START + 570)
+    assert record["sells"][0]["purpose"] == "stop_loss"
+    assert record["sells"][0]["execution"] == "reduce_only_gtc"
+    assert client.orders["exit-1"]["status"] == "resting"
+    assert client.submissions[0]["limit"] == D(".44")
+
+    # A resting stop remains the sole owned sell while the bid is unchanged.
+    reconcile_exit(client, journal, record, START + 571)
+    assert len(client.submissions) == 1
+    assert client.orders["exit-1"]["status"] == "resting"
+
+    # If the bid drops, first cancel the old order, then verify terminal
+    # status and exact zero fills before submitting a lower GTC stop.
+    client.bid = D(".40")
+    reconcile_exit(client, journal, record, START + 572)
+    assert client.orders["exit-1"]["status"] == "canceled"
+    assert len(client.submissions) == 1
+    reconcile_exit(client, journal, record, START + 573)
+    assert len(client.submissions) == 2
+    assert client.submissions[-1]["limit"] == D(".40")
+    assert record["sells"][1]["execution"] == "reduce_only_gtc"
+    assert client.orders["exit-2"]["status"] == "resting"
+
+
+def test_gtc_stop_no_order_before_threshold(tmp_path, monkeypatch):
+    monkeypatch.setenv("M9_STOP_ORDER_MODE", "gtc")
+    journal = Journal(tmp_path / "gtc-not-triggered.json")
+    client = StopExchange(bid=".65")
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    reconcile_exit(client, journal, record, START + 570)
+    assert record["sells"][0]["purpose"] == "take_profit"
+    assert record["sells"][0]["execution"] == "gtc"
+    assert "stop_armed" not in record
+
+
 def test_partial_stop_fill_retries_only_remainder_even_after_quote_recovers(tmp_path, side):
     journal = Journal(tmp_path / f"partial-{side}.json")
     client = StopExchange(side=side, bid=".44")

@@ -20,7 +20,7 @@ all outside buys as manual inventory: competing take-profits could oversell.
 A drop of M9_STOP_DROP_CENTS (default 21c) below the verified average entry
 cost in the executable bid triggers a reduce-only IOC, canceling any resting TP
 first. A fast gap or illiquid book can result in a worse realized loss;
-the IOC requires the process to be running.
+the exit runner requires the process to be running. Optional M9_STOP_ORDER_MODE=gtc\nsubmits a reduce-only GTC limit only after the stop fires, and reprices\nresting orders as the executable bid falls; GTC does not guarantee a fill.
 At startup use one third of the normal budget. A verified loss enables the full
 budget; two consecutive wins at full budget return to one third, which stays
 active until the next verified loss. A loss at full budget resets its win count.
@@ -167,6 +167,14 @@ def exit_decision(cost, bid, *, stop_armed=False, profit=None):
     if target > D(".99"):
         return None, None
     return ("take_profit", target) if bid >= target else (None, None)
+
+
+def stop_exit_order_mode():
+    """IOC is the legacy default; GTC is enabled only by explicit configuration."""
+    mode = os.getenv("M9_STOP_ORDER_MODE", "ioc").strip().lower()
+    if mode not in {"ioc", "gtc"}:
+        raise ValueError("M9_STOP_ORDER_MODE must be ioc or gtc")
+    return mode
 
 
 def starting_streak():
@@ -879,7 +887,9 @@ def reconcile_exit(client, journal, record, now):
             event("M9_SELL_ACK_PENDING", ticker=ticker)
             return  # Never duplicate an ambiguous sell.
         if order.get("status") not in TERMINAL:
-            if intent.get("execution") == "gtc" and order.get("status") == "resting":
+            if (intent.get("purpose") == "take_profit"
+                    and intent.get("execution") == "gtc"
+                    and order.get("status") == "resting"):
                 market = client.market(ticker)
                 bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
                 observe_trade_mae(journal, record, cost, bid, now)
@@ -894,6 +904,25 @@ def reconcile_exit(client, journal, record, now):
                               trigger_bid=str(bid), threshold=str(threshold))
                     client.cancel(intent["order_id"], ticker)
                     event("M9_TP_CANCEL_FOR_STOP", ticker=ticker, order_id=intent["order_id"])
+            elif (intent.get("purpose") == "stop_loss"
+                  and intent.get("execution") == "reduce_only_gtc"
+                  and order.get("status") == "resting"):
+                # A triggered GTC stop-limit is not an exchange-native stop.
+                # It can sit unfilled; follow falling executable bids, but
+                # never post a second sell until this exact ID is terminal.
+                market = client.market(ticker)
+                bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+                observe_trade_mae(journal, record, cost, bid, now)
+                last_limit = D(str(intent["target"]))
+                if bid.is_finite() and D(0) < bid < last_limit:
+                    client.cancel(intent["order_id"], ticker)
+                    event("M9_GTC_STOP_REPRICE_REQUESTED", ticker=ticker,
+                          order_id=intent["order_id"], prior_limit=str(last_limit),
+                          current_bid=str(bid))
+                else:
+                    event("M9_GTC_STOP_RESTING", ticker=ticker,
+                          order_id=intent["order_id"], limit=str(last_limit),
+                          executable_bid=str(bid))
             event("M9_SELL_ACK_PENDING", ticker=ticker)
             return  # Re-read terminal status AND fills before selling any remainder.
         journal.save()
@@ -989,7 +1018,9 @@ def reconcile_exit(client, journal, record, now):
         return
     intent = {"client_id": str(uuid.uuid4()), "quantity": str(remaining),
               "target": str(limit), "purpose": purpose, "created_at": now,
-              "execution": "gtc" if purpose == "take_profit" else "reduce_only_ioc"}
+              "execution": ("gtc" if purpose == "take_profit" else
+                            "reduce_only_gtc" if stop_exit_order_mode() == "gtc"
+                            else "reduce_only_ioc")}
     record["sells"].append(intent)
     journal.save()  # Intent is durable before any POST
     event("M9_STOP_SUBMIT" if purpose == "stop_loss" else "M9_TP_SUBMIT",
@@ -999,6 +1030,11 @@ def reconcile_exit(client, journal, record, now):
     if purpose == "take_profit":
         response = client.place_resting_take_profit(ticker, sign * remaining, limit,
             expiration_time=parse_time(market["close_time"]), client_order_id=intent["client_id"])
+    elif intent["execution"] == "reduce_only_gtc":
+        response = client.place_resting_stop(
+            ticker, sign * remaining, limit,
+            expiration_time=parse_time(market["close_time"]),
+            client_order_id=intent["client_id"])
     else:
         response = client.place_take_profit(ticker, sign * remaining, limit,
                                             client_order_id=intent["client_id"])
