@@ -139,9 +139,20 @@ class CashCheckedClient:
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time,
                     *, submit_before=None, client_order_id=None, ioc=False):
-        record = self.journal.data["windows"].get(ticker)
-        if (not record or record.get("buy", {}).get("client_id") != client_order_id
-                or record.get("side") != prediction or D(record["quantity"]) != D(quantity)
+        # A market can have one independent order intent in each buy zone.
+        # Match the exact saved client order identity, never just the ticker;
+        # never fall back to a stale regular record for a Zone 2 entry.
+        windows = self.journal.data["windows"]
+        candidates = [
+            windows[key] for key in (core.zone_record_key(ticker, core.ZONE1),
+                                     core.zone_record_key(ticker, core.ZONE2))
+            if key in windows and windows[key].get("ticker") == ticker
+            and windows[key].get("buy", {}).get("client_id") == client_order_id
+        ]
+        if len(candidates) != 1:
+            raise RuntimeError("Entry guard requires a unique durable order intent")
+        record = candidates[0]
+        if (record.get("side") != prediction or D(record["quantity"]) != D(quantity)
                 or D(record["buy"]["limit"]) != D(outcome_price)):
             raise RuntimeError("Entry guard requires the exact durable order intent")
         if record["buy"].get("order_id") or record.get("sells"):
