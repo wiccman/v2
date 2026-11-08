@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
+import late_basket_minute9 as late
 
 POLICY = "minute9-top2-sol-central-overnight-v6"
 START_SECONDS = 540
@@ -72,6 +73,7 @@ def window_attempts(journal, start):
     """Include confirmed non-submissions, but never count a different period."""
     return [r for r in journal.data["windows"].values()
             if r.get("window_start_ms") == start * 1000
+            and r.get("entry_kind") != late.LATE_KIND
             and isinstance(r.get("buy"), dict)]
 
 
@@ -94,8 +96,8 @@ def backup_not_before(records):
     return max(stamps) + BACKUP_DELAY_SECONDS
 
 
-def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
-             max_entries_per_window=1, *, provider, clock=None):
+def regular_pass(client, journal, series_list, base_budget, max_contracts, live, now,
+                 max_entries_per_window=1, *, provider, clock=None):
     clock = clock or core.time.time
     if max_entries_per_window != 1:
         raise ValueError("This backup policy requires one filled/pending market per window")
@@ -188,6 +190,19 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             return  # Next candidate can only be considered on a later poll.
 
 
+def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
+             max_entries_per_window=1, *, provider, clock=None):
+    """Maintain regular top-two policy, plus independent 12..15m basket buys."""
+    clock = clock or core.time.time
+    regular_pass(client, journal, series_list, base_budget, max_contracts, live,
+                 now, max_entries_per_window, provider=provider, clock=clock)
+    # Regular pass always reconciles all owned positions first. Late entries
+    # use separate durable records and half of the ACTIVE budget in aggregate.
+    return late.run_late_pass(client, journal, series_list, base_budget,
+                              max_contracts, live, now, provider=provider,
+                              clock=clock, sol_blocked=sol_entry_blackout)
+
+
 @contextmanager
 def installed_policy(provider=None):
     """Explicit entrypoint only; importing leaves the legacy runner untouched."""
@@ -215,7 +230,14 @@ def main(argv=None):
                    sol_blocked_timezone="America/Chicago",
                    backup_delay_seconds=BACKUP_DELAY_SECONDS,
                    max_candidate_attempts_per_window=MAX_CANDIDATE_ATTEMPTS,
-                   max_filled_or_pending_markets=1, transfers_enabled=False)
+                   max_filled_or_pending_markets=1, transfers_enabled=False,
+                   late_entry_policy="ranked-top-two-96c-plus-v1",
+                   late_entry_start_seconds=late.LATE_START_SECONDS,
+                   late_entry_end_seconds=late.LATE_END_SECONDS,
+                   late_entry_min_cents=96, late_entry_max_cents=99,
+                   late_budget_fraction="1/2-active-trade-budget",
+                   late_max_coins_per_window=late.MAX_LATE_COINS,
+                   late_win_streak_independent=True)
         return core.main(argv)
 
 
