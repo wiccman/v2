@@ -1,4 +1,4 @@
-"""Minute 8 through close; current top-two performers; delayed backup only.
+"""Minute 8 through close; top two non-BTC performers from the top three.
 
 Reuse the deployed entry, exit, cash, ownership and streak implementations.
 One filled or potentially-filled market per period remains the limit. A second
@@ -14,10 +14,11 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 
-POLICY = "minute8-top2-delayed-backup-v1"
+POLICY = "minute8-top2-skip-btc-v2"
 START_SECONDS = 480
 END_SECONDS = 900
 TOP_COUNT = 2
+BTC_SERIES = "KXBTC15M"
 BACKUP_DELAY_SECONDS = 60
 MAX_CANDIDATE_ATTEMPTS = 2
 
@@ -88,25 +89,29 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         return
     if not START_SECONDS <= clock() - start < END_SECONDS:
         return
-    # Slice BEFORE looking at contract prices. A priced-out top two never
-    # promotes the third-ranked coin merely because its contract is affordable.
-    selected = rows[:TOP_COUNT]
+    # Only a BTC slot can promote rank three. Keep original ranks in diagnostics.
+    selected = [(position, row) for position, row in enumerate(rows[:TOP_COUNT + 1], 1)
+                if row.series != BTC_SERIES][:TOP_COUNT]
+    selected_series = {row.series for _, row in selected}
     core.event("M8_TOP2_QUEUE", policy=POLICY, window_start_ms=start * 1000,
                ranking_scope="available_coin_data",
                excluded_series=[s for s in names if s not in {r.series for r in rows}],
-               queue=[{"rank": i + 1, "series": r.series,
-                       "return_pct": str(r.return_pct)} for i, r in enumerate(selected)],
-               skipped_lower_ranks=[r.series for r in rows[TOP_COUNT:]])
+               skipped_btc_rank=next((i for i, r in enumerate(rows, 1)
+                                      if r.series == BTC_SERIES), None),
+               queue=[{"rank": position, "series": row.series,
+                       "return_pct": str(row.return_pct)} for position, row in selected],
+               skipped_lower_ranks=[r.series for r in rows[TOP_COUNT:]
+                                    if r.series not in selected_series and r.series != BTC_SERIES])
     proxy = ranked.QueueDiagnostics(client, clock=clock, emit=core.event)
     proxy.start = start
-    proxy.ranks = {r.series: i + 1 for i, r in enumerate(selected)}
+    proxy.ranks = {row.series: position for position, row in selected}
     if not live:
         # Preserve preview's one signal per period and no writes/no orders.
         return cash.run_cash_checked_pass(proxy, journal,
-            tuple(r.series for r in selected), base_budget, max_contracts, False,
+            tuple(row.series for _, row in selected), base_budget, max_contracts, False,
             clock(), max_entries_per_window)
 
-    for row in selected:
+    for _, row in selected:
         if not START_SECONDS <= clock() - start < END_SECONDS:
             return
         if core.window_entry_count(journal, start * 1000) >= 1:
@@ -148,7 +153,8 @@ def main(argv=None):
     with installed_policy():
         core.event("M8_TOP2_POLICY_READY", policy=POLICY,
                    entry_start_seconds=START_SECONDS, entry_end_seconds=END_SECONDS,
-                   performance_top_n=TOP_COUNT, backup_delay_seconds=BACKUP_DELAY_SECONDS,
+                   performance_top_n=TOP_COUNT, excluded_entry_series=[BTC_SERIES],
+                   backup_delay_seconds=BACKUP_DELAY_SECONDS,
                    max_candidate_attempts_per_window=MAX_CANDIDATE_ATTEMPTS,
                    max_filled_or_pending_markets=1, transfers_enabled=False)
         return core.main(argv)
