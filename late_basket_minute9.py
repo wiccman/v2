@@ -222,7 +222,10 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
                 if row.series != "KXBTC15M"
                 and not (row.series == "KXSOL15M" and sol_blocked(clock()))
                 and row.return_pct != 0]
-    total_budget = core.trade_budget(journal.data["streak"], base_budget) / D(2)
+    active_budget = core.trade_budget(
+        journal.data["streak"], base_budget,
+        budget_cycle=journal.data.get("budget_cycle_v2"))
+    total_budget = active_budget / D(2)
     spent = half_budget_reservation(journal, start)
     core.event("M9_LATE_BASKET_RANK", entry_zone=LATE_ZONE,
                price_range_cents="89-97", take_profit_cents=98,
@@ -232,6 +235,8 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
                                  for i, row in enumerate(top_two, 1)],
                btc_excluded=True, sol_time_restricted=sol_blocked(clock()),
                total_late_budget_dollars=str(total_budget),
+               active_budget_dollars=str(active_budget),
+               sol_budget_factor=str(core.SOL_BUDGET_FACTOR),
                reserved_late_budget_dollars=str(spent))
     plans = []
     for rank, row in eligible:
@@ -279,9 +284,24 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
         remaining_coins = sum(1 for _, _, p in plans[plan_index:]
                               if not zone2_attempt_exists(journal, p["ticker"]))
         target = available / D(max(1, remaining_coins))
+        # SOL gets HALF of the Zone 2 budget ceiling as well as Zone 2
+        # already using half of the active phase. This cap is cumulative,
+        # not a second budget for each attempt or every time rank changes.
+        if row.series == "KXSOL15M":
+            sol_spent = sum(
+                D(str(item["quantity"])) *
+                (D(str(item["buy"]["limit"])) + core.FEE_RESERVE)
+                for item in journal.data["windows"].values()
+                if item.get("window_start_ms") == start * 1000
+                and item.get("entry_kind") == LATE_KIND
+                and item.get("series") == "KXSOL15M"
+                and isinstance(item.get("buy"), dict))
+            sol_remaining = max(D(0),
+                core.budget_for_series(total_budget, row.series) - sol_spent)
+            target = min(target, sol_remaining)
         unit = D(fresh["limit"]) + core.FEE_RESERVE
         quantity = min(max_contracts, int((target / unit).to_integral_value(rounding=ROUND_FLOOR)))
-        if quantity <= 0:
+        if quantity <= 0 and row.series != "KXSOL15M":
             quantity = min(max_contracts, int((available / unit).to_integral_value(rounding=ROUND_FLOOR)))
         if quantity <= 0:
             continue
@@ -301,7 +321,10 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
             "window_start_ms": start * 1000, "entry_kind": LATE_KIND,
             "basket_rank_at_entry": rank, "basket_return_pct": str(row.return_pct),
             "quantity": str(quantity), "allocated_dollars": str(quantity * unit),
-            "regular_active_budget_at_entry": str(core.trade_budget(journal.data["streak"], base_budget)),
+            "regular_active_budget_at_entry": str(active_budget),
+            "sol_budget_factor_at_entry": str(core.SOL_BUDGET_FACTOR)
+                if row.series == "KXSOL15M" else "1",
+            "budget_phase_at_entry": (journal.data.get("budget_cycle_v2") or {}).get("phase"),
             "buy": intent, "sells": [],
         }
         journal.data["windows"][core.zone_record_key(ticker, LATE_ZONE)] = record
