@@ -28,16 +28,16 @@ def test_no_coin_race_or_basket_selection():
     assert "KXCRYPTOLEAD15M" not in DEFAULT_SERIES
     assert plan_single_coin(market(series="KXBTC15M"), START + 550, "KXETH15M") is None
 
-@pytest.mark.parametrize("price", [".59", ".60", ".72", ".90", ".91"])
+@pytest.mark.parametrize("price", [".69", ".70", ".72", ".90", ".91"])
 def test_yes_boundaries_are_inclusive(price):
     p = plan_single_coin(market(yes=price, no=".01"), START + 550, "KXBTC15M")
     assert p and p["side"] == "YES" and D(p["ask"]) == D(price)
 
-@pytest.mark.parametrize("price", [".01", ".58", ".5899", ".9101", ".92", ".99"])
+@pytest.mark.parametrize("price", [".01", ".58", ".68", ".6899", ".9101", ".92", ".99"])
 def test_no_buy_outside_price_band(price):
     assert plan_single_coin(market(yes=price, no=".01"), START + 550, "KXBTC15M") is None
 
-@pytest.mark.parametrize("price", [".59", ".72", ".91"])
+@pytest.mark.parametrize("price", [".69", ".72", ".91"])
 def test_no_side_can_qualify_independently(price):
     p = plan_single_coin(market(yes=".01", no=price), START + 550, "KXBTC15M")
     assert p and p["side"] == "NO" and D(p["ask"]) == D(price)
@@ -51,7 +51,7 @@ def test_inside_minute_nine_allowed(elapsed):
     assert plan_single_coin(market(), START + elapsed, "KXBTC15M")
 
 def test_both_sides_in_range_skips_ambiguity():
-    assert plan_single_coin(market(yes=".61", no=".60"), START + 550, "KXBTC15M") is None
+    assert plan_single_coin(market(yes=".71", no=".70"), START + 550, "KXBTC15M") is None
 
 def test_closed_market_skips():
     assert plan_single_coin(market(status="closed"), START + 550, "KXBTC15M") is None
@@ -124,9 +124,9 @@ def test_budget_uses_one_third_of_base_dollars_not_contracts():
     assert normal == 26 and reduced == 8
     assert trade_budget(s, D("20")) > D("6.66")
     assert trade_budget(s, D("20")) < D("6.67")
-    assert budgeted_quantity(D(".60"), D(".59")) == 0
+    assert budgeted_quantity(D(".70"), D(".69")) == 0
     assert budgeted_quantity(D("10"), D(".91")) == 10
-    assert budgeted_quantity(D("1000"), D(".59"), cap=8) == 8
+    assert budgeted_quantity(D("1000"), D(".69"), cap=8) == 8
 
 
 def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
