@@ -28,6 +28,37 @@ def test_resting_before_target_no_duplicates_restart_cancel_race(tmp_path, side)
     assert abs(c.submissions[-1]['signed'])==1
     assert r['sells'][-1]['purpose']=='stop_loss'
 
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("entry", [".72", ".725", ".91"])
+def test_resting_tp_cancels_at_exact_21c_drop_then_exits_remainder(tmp_path, side, entry):
+    c = StopExchange(side=side, bid=str(D(entry) - D(".21") + D(".01")))
+    yes_cost = D(entry) if side == "YES" else D("1") - D(entry)
+    c.rows[0]["yes_price_dollars"] = str(yes_cost)
+    c.rows[0]["no_price_dollars"] = str(D("1") - yes_cost)
+    journal = core.Journal(tmp_path / f"entry-{side}-{entry}.json")
+    record = fake_record(c, fully_sold=False)
+    journal.data["windows"][c.ticker] = record
+    threshold = D(entry) - D(".21")
+    core.reconcile_exit(c, journal, record, START + 570)
+    assert len(c.submissions) == 1
+    assert record["sells"][0]["execution"] == "gtc"
+    core.reconcile_exit(c, journal, record, START + 571)
+    assert "stop_armed" not in record
+    assert c.orders["exit-1"]["status"] == "resting"
+    c.bid = threshold
+    core.reconcile_exit(c, journal, record, START + 572)
+    assert c.orders["exit-1"]["status"] == "canceled"
+    assert D(record["stop_armed"]["threshold"]) == threshold
+    assert len(c.submissions) == 1  # Wait for cancel and fill receipt.
+    journal = core.Journal(journal.path)
+    record = journal.data["windows"][c.ticker]
+    core.reconcile_exit(c, journal, record, START + 573)
+    assert len(c.submissions) == 2
+    assert record["sells"][-1]["purpose"] == "stop_loss"
+    assert c.submissions[-1]["limit"] == threshold
+    assert abs(c.submissions[-1]["signed"]) == 2
+
+
 @pytest.mark.parametrize('side',['YES','NO'])
 def test_lost_resting_ack_never_duplicates(tmp_path,side):
     c=StopExchange(side=side,bid='.60'); c.lost_ack=True
