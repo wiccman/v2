@@ -357,7 +357,7 @@ def test_entry_relative_21c_stop_and_durable_journal(tmp_path):
     journal.save()
     mod.reconcile_exit(client, journal, record, START + 574)
     assert D(record["stop_armed"]["threshold"]) == D(".51")
-    assert record["stop_armed"]["entry_cost"] == ".72"
+    assert D(record["stop_armed"]["entry_cost"]) == D(".72")
     assert record["sells"][0]["purpose"] == "stop_loss"
     assert client.submissions[0]["limit"] == D(".51")
     reopened = Journal(journal.path).data["windows"][client.ticker]
