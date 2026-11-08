@@ -343,7 +343,7 @@ def test_five_cent_runtime_configuration_import_and_invalid_guard():
         run = subprocess.run(
             [sys.executable, "-c", "import single_coin_minute9 as m; print(m.PROFIT)"],
             env=env, capture_output=True, text=True, check=True)
-        assert run.stdout.strip() == expected
+        assert D(run.stdout.strip()) == D(expected)
     env = dict(os.environ, M9_TP_SPREAD_CENTS="0")
     bad = subprocess.run(
         [sys.executable, "-c", "import single_coin_minute9"],
