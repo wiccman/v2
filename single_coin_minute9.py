@@ -44,7 +44,10 @@ from kalshi import KalshiClient
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = D(".69"), D(".91"), D(".05"), D(".45")
+MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = (
+    D(".69"), D(".60"), D(".91"), D(".05"), D(".45")
+)
+RELAX_FLOOR_AFTER_WINS = 10
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
@@ -66,8 +69,11 @@ def parse_time(value):
     return parsed.timestamp()
 
 
-def plan_single_coin(market, now, series):
-    """Return an eligible YES/NO ask from minute 9 until the exclusive cutoff."""
+def plan_single_coin(market, now, series, *, min_price=None):
+    """Return an eligible YES/NO ask using the active streak-dependent floor."""
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
+    if not min_price.is_finite() or not RELAXED_MIN_PRICE <= min_price <= MAX_PRICE:
+        raise ValueError("Invalid entry minimum")
     ticker = str(market.get("ticker", ""))
     if not ticker.startswith(series + "-") or market.get("status") not in {"active", "open"}:
         return None
@@ -85,7 +91,7 @@ def plan_single_coin(market, now, series):
             ask = D(str(market[side.lower() + "_ask_dollars"]))
         except (KeyError, ValueError, TypeError, ArithmeticError):
             continue
-        if not ask.is_finite() or ask < MIN_PRICE or ask > MAX_PRICE:
+        if not ask.is_finite() or ask < min_price or ask > MAX_PRICE:
             continue
         limit = (ask * 100).to_integral_value(rounding=ROUND_CEILING) / 100
         if limit <= MAX_PRICE:
@@ -124,21 +130,29 @@ def starting_streak():
 
 
 def next_streak(streak, outcome):
-    """A win must be confirmed, not a submitted order or an unrealized gain."""
+    """Track true consecutive wins while preserving the three-win budget rule."""
     wins = streak["consecutive_wins"]
-    half = streak["reduced_budget"]
-    if type(wins) is not int or wins < 0 or wins > 3 or type(half) is not bool:
+    reduced = streak["reduced_budget"]
+    if (type(wins) is not int or wins < 0 or wins > RELAX_FLOOR_AFTER_WINS
+            or type(reduced) is not bool):
         raise ValueError("Invalid persisted streak")
     if outcome == "loss":
         return starting_streak()
     if outcome == "flat":
-        return {"consecutive_wins": wins if half else 0, "reduced_budget": half}
+        # A flat is not a win, so it breaks the 10-win floor-unlock streak.
+        # Reduced-budget mode, once earned, remains until a confirmed loss.
+        return {"consecutive_wins": 0, "reduced_budget": reduced}
     if outcome != "win":
         raise ValueError("Only finalized trade results advance the streak")
-    if half:
-        return {"consecutive_wins": 3, "reduced_budget": True}
-    wins = min(3, wins + 1)
-    return {"consecutive_wins": wins, "reduced_budget": wins >= 3}
+    wins = min(RELAX_FLOOR_AFTER_WINS, wins + 1)
+    return {"consecutive_wins": wins, "reduced_budget": reduced or wins >= 3}
+
+
+def entry_min_price(streak):
+    """69c normally; unlock a 60c floor after ten consecutive confirmed wins."""
+    # Validate using the same persisted-state contract as next_streak.
+    next_streak(streak, "flat")
+    return RELAXED_MIN_PRICE if streak["consecutive_wins"] >= RELAX_FLOOR_AFTER_WINS else MIN_PRICE
 
 
 def trade_budget(streak, base_budget):
@@ -149,11 +163,14 @@ def trade_budget(streak, base_budget):
     return amount / D(3) if streak["reduced_budget"] else amount
 
 
-def budgeted_quantity(budget, ask, cap=100):
+def budgeted_quantity(budget, ask, cap=100, *, min_price=None):
     """Protect against exceeding the allocation including fee allowance."""
     amount, price = D(str(budget)), D(str(ask))
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
     if (not amount.is_finite() or not price.is_finite() or amount <= 0
-            or price < MIN_PRICE or price > MAX_PRICE or type(cap) is not int or not 1 <= cap <= 100):
+            or not min_price.is_finite() or min_price < RELAXED_MIN_PRICE
+            or min_price > MAX_PRICE or price < min_price or price > MAX_PRICE
+            or type(cap) is not int or not 1 <= cap <= 100):
         raise ValueError("Invalid budget, entry price or quantity cap")
     return min(cap, int((amount / (price + FEE_RESERVE)).to_integral_value(rounding=ROUND_FLOOR)))
 
@@ -175,7 +192,8 @@ def apply_new_outcomes(journal):
         event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
-              reduced_budget=journal.data["streak"]["reduced_budget"])
+              reduced_budget=journal.data["streak"]["reduced_budget"],
+              entry_floor_cents=int(entry_min_price(journal.data["streak"]) * 100))
 
 
 def fill_fee(row):
@@ -490,8 +508,9 @@ def window_entry_count(journal, window_start_ms):
 
 
 
-def queue_skip(client_market, now, series):
+def queue_skip(client_market, now, series, *, min_price=None):
     """Explain in-window quote skips; do not spam logs for future markets."""
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
     try:
         start = parse_time(client_market["close_time"]) - 900
         if not ENTRY_START_SECONDS <= now - start < ENTRY_END_SECONDS:
@@ -505,17 +524,21 @@ def queue_skip(client_market, now, series):
             asks[side] = str(value) if value.is_finite() else None
         except (KeyError, TypeError, ValueError, ArithmeticError):
             asks[side] = None
-    eligible = [v for v in asks.values() if v is not None and MIN_PRICE <= D(v) <= MAX_PRICE]
+    eligible = [v for v in asks.values() if v is not None and min_price <= D(v) <= MAX_PRICE]
     reason = ("market_not_active" if client_market.get("status") not in {"active", "open"}
               else "ambiguous_sides" if len(eligible) > 1
               else "missing_quote" if None in asks.values()
-              else "outside_69_91_price_band")
+              else f"outside_{int(min_price * 100)}_{int(MAX_PRICE * 100)}_price_band")
     event("M9_QUEUE_SKIP", ticker=client_market.get("ticker"), series=series,
           reason=reason, yes_ask=asks["yes"], no_ask=asks["no"])
 
 
-def candidate_queue(client, series_list, now):
+def candidate_queue(client, series_list, now, *, min_price=None):
     """Price-eligible single coins in configured order, not basket ranking."""
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
+    setter = getattr(client, "set_entry_min_price", None)
+    if callable(setter):
+        setter(min_price)
     candidates = []
     for series in series_list:
         try:
@@ -524,9 +547,9 @@ def candidate_queue(client, series_list, now):
             event("M9_MARKET_DISCOVERY_PAUSED", series=series, error_type=type(error).__name__)
             continue
         for market in markets:
-            plan = plan_single_coin(market, now, series)
+            plan = plan_single_coin(market, now, series, min_price=min_price)
             if plan is None:
-                queue_skip(market, now, series)
+                queue_skip(market, now, series, min_price=min_price)
             else:
                 candidates.append(plan)
     return candidates
@@ -548,7 +571,8 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
     # Queue order is unchanged (M9_SERIES). Refresh each candidate before use;
     # never reuse a backup's stale snapshot as an executable quote.
     preview_windows = set()
-    candidates = candidate_queue(client, series_list, now)
+    min_price = entry_min_price(journal.data["streak"])
+    candidates = candidate_queue(client, series_list, now, min_price=min_price)
     if candidates:
         event("M9_ENTRY_QUEUE", tickers=[p["ticker"] for p in candidates],
               policy=ENTRY_QUEUE_POLICY)
@@ -564,7 +588,8 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
             continue
         allocation = trade_budget(journal.data["streak"], base_budget)
-        quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts)
+        quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts,
+                                     min_price=min_price)
         if quantity < 1:
             event("M9_ENTRY_BUDGET_TOO_SMALL", ticker=ticker,
                   allocated_dollars=str(allocation), limit=plan["limit"])
@@ -575,16 +600,18 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                   allocated_dollars=str(allocation),
                   reduced_budget=journal.data["streak"]["reduced_budget"],
                   consecutive_wins=journal.data["streak"]["consecutive_wins"],
+                  entry_floor_cents=int(min_price * 100),
                   target_example=str(D(plan["limit"]) + PROFIT))
             continue
         market = client.market(ticker)
-        current = plan_single_coin(market, time.time(), series)
+        current = plan_single_coin(market, time.time(), series, min_price=min_price)
         if (current is None or current["side"] != plan["side"]
                 or current["window_start_ms"] != start_ms):
-            queue_skip(market, time.time(), series)
+            queue_skip(market, time.time(), series, min_price=min_price)
             event("M9_QUEUE_ADVANCE", ticker=ticker, reason="fresh_quote_not_eligible")
             continue
-        quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts)
+        quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts,
+                                     min_price=min_price)
         if quantity < 1:
             continue
         if entry_market_occupied(client, ticker):
@@ -600,11 +627,14 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                   "window_start_ms": start_ms,
                   "quantity": str(quantity), "allocated_dollars": str(allocation),
                   "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
+                  "entry_floor_at_entry": str(min_price),
                   "buy": intent, "sells": []}
         journal.data["windows"][ticker] = record
         journal.save()  # A pending/ambiguous POST consumes the slot durably.
         event("M9_BUY_SUBMIT", ticker=ticker, side=current["side"],
-              quantity=str(quantity), price=current["limit"])
+              quantity=str(quantity), price=current["limit"],
+              entry_floor_cents=int(min_price * 100),
+              take_profit_cents=int((D(current["limit"]) + PROFIT) * 100))
         try:
             response = client.place_entry(ticker, current["side"], quantity, D(current["limit"]),
                 parse_time(market["close_time"]), submit_before=start_ms / 1000 + ENTRY_END_SECONDS,
@@ -692,7 +722,9 @@ def main(argv=None):
               entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
-              price_range_cents=f"{int(MIN_PRICE * 100)}-{int(MAX_PRICE * 100)}", take_profit_cents=5,
+              price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
+              floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
+              relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5,
               stop_bid_cents=int(STOP_BID * 100), stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()
