@@ -1339,7 +1339,7 @@ def main(argv=None):
               relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=int(PROFIT * 100), take_profit_execution="gtc_after_confirmed_fill",
               stop_drop_cents=int(STOP_DROP * 100), stop_basis="verified_average_entry_cost",
               sol_absolute_kill_bid_cents=int(SOL_ABSOLUTE_KILL_BID * 100),
-              stop_execution="bid_limited_reduce_only_ioc")
+              stop_execution="bid_limited_reduce_only_" + stop_exit_order_mode())
         while not stop:
             started = time.monotonic()
             try:
