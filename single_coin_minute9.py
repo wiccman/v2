@@ -863,6 +863,8 @@ def main(argv=None):
               entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
+              full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
+              active_budget_dollars=str(trade_budget(journal.data["streak"], base_budget)),
               price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
               relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",
