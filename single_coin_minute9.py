@@ -644,6 +644,15 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.live and os.getenv("M9_TRADING_ENABLED", "false").lower() != "true":
         raise RuntimeError("Live mode requires M9_TRADING_ENABLED=true")
+    target_raw = os.getenv("M9_TARGET_EXCHANGE_INDEX", "").strip()
+    target_exchange_index = None
+    if target_raw:
+        try:
+            target_exchange_index = int(target_raw)
+        except ValueError as error:
+            raise ValueError("M9_TARGET_EXCHANGE_INDEX must be an integer from 0 through 100") from error
+        if not 0 <= target_exchange_index <= 100:
+            raise ValueError("M9_TARGET_EXCHANGE_INDEX must be an integer from 0 through 100")
     if "M9_QUANTITY" in os.environ:
         raise ValueError("M9_QUANTITY is retired; configure M9_TRADE_BUDGET_DOLLARS instead")
     base_budget = D(os.getenv("M9_TRADE_BUDGET_DOLLARS",
@@ -684,12 +693,18 @@ def main(argv=None):
             timeout=5, role="entry", quote_ttl=0.1, session=session)
         if not client.key_id or client.private_key is None:
             raise RuntimeError("Kalshi API credentials missing")
+        if args.live and target_exchange_index is not None:
+            client.set_target_balance_allocation(target_exchange_index)
+            event("M9_TARGET_BALANCE_ALLOCATION_SET",
+                  exchange_index=target_exchange_index, percent=100)
         event("M9_READY", live=args.live, series=series_list,
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               max_entries_per_window=max_entries_per_window,
               entry_queue_policy=ENTRY_QUEUE_POLICY,
               entry_start_seconds=ENTRY_START_SECONDS,
               entry_end_seconds=ENTRY_END_SECONDS,
+              target_exchange_index=target_exchange_index,
+              automatic_rebalancing_enabled=bool(args.live and target_exchange_index is not None),
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents="59-91", take_profit_cents=5,

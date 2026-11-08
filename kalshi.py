@@ -218,6 +218,16 @@ class KalshiClient:
         params = {} if exchange_index is None else {"exchange_index": exchange_index}
         return self.request("GET", "/portfolio/balance", params=params, auth=True)
 
+    def set_target_balance_allocation(self, exchange_index):
+        """Ask Kalshi to automatically rebalance available cash to one shard."""
+        if type(exchange_index) is not int or not 0 <= exchange_index <= 100:
+            raise ValueError("exchange_index must be an integer from 0 through 100")
+        return self.request(
+            "POST", "/portfolio/target_balance_allocation",
+            body={"allocations": [{"exchange_index": exchange_index, "percent": 100}]},
+            auth=True,
+        )
+
     def market_cash(self, ticker):
         """Read cash on the market's actual shard, never the aggregate wallet."""
         index = self.market(ticker).get("exchange_index")

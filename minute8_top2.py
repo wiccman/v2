@@ -3,11 +3,12 @@
 Reuse the deployed entry, exit, cash, ownership and streak implementations.
 One filled or potentially-filled market per period remains the limit. A second
 candidate attempt requires a proven no-fill and a full 60-second cooldown.
-No trading on import, no transfers, no sleeps in the exit-monitoring loop.
+No trading on import and no sleeps in the exit-monitoring loop.
 """
 from __future__ import annotations
 
 import math
+import os
 from contextlib import contextmanager
 
 import single_coin_minute9 as core
@@ -20,6 +21,45 @@ END_SECONDS = 900
 TOP_COUNT = 2
 BACKUP_DELAY_SECONDS = 60
 MAX_CANDIDATE_ATTEMPTS = 2
+
+
+def configured_target_exchange_index():
+    raw = os.getenv("M9_TARGET_EXCHANGE_INDEX", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError("M9_TARGET_EXCHANGE_INDEX must be an integer from 0 through 100") from error
+    if not 0 <= value <= 100:
+        raise ValueError("M9_TARGET_EXCHANGE_INDEX must be an integer from 0 through 100")
+    return value
+
+
+def target_balance_ready(client, journal, base_budget, now):
+    """Pause entries, not exits, until automatic rebalancing funds the target shard."""
+    target = configured_target_exchange_index()
+    if target is None:
+        return True
+    state = getattr(journal, "_entry_cash_state", None)
+    if state is None:
+        state = cash.CashState()
+        journal._entry_cash_state = state
+    try:
+        total, shards = state.read(client, now)
+    except Exception as error:
+        core.event("M8_TARGET_BALANCE_UNAVAILABLE", target_exchange_index=target,
+                   **ranked.error_fields(error))
+        return False
+    required = core.trade_budget(journal.data["streak"], base_budget)
+    target_cash = shards.get(target) if shards is not None else None
+    if target_cash is None or target_cash < required:
+        core.event("M8_TARGET_BALANCE_WAIT", target_exchange_index=target,
+                   total_cash_dollars=str(total),
+                   target_cash_dollars=(str(target_cash) if target_cash is not None else None),
+                   required_entry_budget_dollars=str(required))
+        return False
+    return True
 
 
 def window_attempts(journal, start):
@@ -62,6 +102,8 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         return
     start = int(checked // 900) * 900
     if not START_SECONDS <= checked - start < END_SECONDS:
+        return
+    if live and not target_balance_ready(client, journal, base_budget, checked):
         return
     if core.window_entry_count(journal, start * 1000) >= 1:
         return  # A fill, partial fill, or unknown acceptance blocks the backup.
@@ -146,11 +188,14 @@ def installed_policy(provider=None):
 
 def main(argv=None):
     with installed_policy():
+        target = configured_target_exchange_index()
         core.event("M8_TOP2_POLICY_READY", policy=POLICY,
                    entry_start_seconds=START_SECONDS, entry_end_seconds=END_SECONDS,
                    performance_top_n=TOP_COUNT, backup_delay_seconds=BACKUP_DELAY_SECONDS,
                    max_candidate_attempts_per_window=MAX_CANDIDATE_ATTEMPTS,
-                   max_filled_or_pending_markets=1, transfers_enabled=False)
+                   max_filled_or_pending_markets=1,
+                   automatic_rebalancing_enabled=bool(target),
+                   target_exchange_index=target)
         return core.main(argv)
 
 

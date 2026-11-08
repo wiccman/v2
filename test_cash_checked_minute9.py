@@ -54,22 +54,32 @@ def run(c,j,now,live=True):
     return safe.run_cash_checked_pass(c,j,c.series,D(10),100,live,now[0])
 
 
-def test_total_sixteen_but_market_zero_never_dispatches(setup):
+def test_aggregate_cash_can_dispatch_even_when_market_breakdown_is_low(setup):
     j,now,events=setup
     c=CashExchange(payload={'balance':1600,'balance_dollars':'16.00',
                            'balance_breakdown':[{'exchange_index':0,'balance':'16.00'},
                                                 {'exchange_index':2,'balance':'0.00'}]})
     run(c,j,now)
-    assert c.posted==[] and c.balance_calls==1
-    assert core.window_entry_count(j,START*1000)==0
-    r=next(iter(j.data['windows'].values()))
-    assert r['outcome']['status']=='no_fill' and r['outcome']['counted']
-    assert r['outcome']['reason']=='insufficient_market_cash'
-    assert safe.release_proven_no_order(r)
-    assert core.Journal(j.path).data==j.data
-    assert j.data['streak']==core.starting_streak()
+    assert len(c.posted)==1 and c.balance_calls==1
+    assert core.window_entry_count(j,START*1000)==1
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
-    assert check['total_cash_dollars']=='16.00' and check['market_cash_dollars']=='0.00'
+    assert check['cash_basis']=='aggregate_available_cash'
+    assert check['total_cash_dollars']=='16.00'
+    assert check['market_cash_dollars']=='0.00'
+
+
+def test_observed_twenty_five_dollars_with_one_dollar_shard_dispatches(setup):
+    j,now,events=setup
+    c=CashExchange(payload={'balance':2588,'balance_dollars':'25.8800',
+                           'balance_breakdown':[{'exchange_index':0,'balance':'24.8011'},
+                                                {'exchange_index':2,'balance':'1.0789'}]})
+    run(c,j,now)
+    assert len(c.posted)==1
+    check=next(d for n,d in events if n=='M9_CASH_CHECK')
+    assert check['cash_basis']=='aggregate_available_cash'
+    assert check['total_cash_dollars']=='25.8800'
+    assert check['market_cash_dollars']=='1.0789'
+    assert D(check['required_with_fee_reserve_dollars']) < D(check['total_cash_dollars'])
 
 
 def test_funded_shard_preserves_budget_quantity_side_and_price(setup):
@@ -122,20 +132,32 @@ def test_unknown_errors_never_release_slot(setup,error):
 
 
 @pytest.mark.parametrize('payload',[
-    {}, {'balance':1600}, {'balance':True,'balance_breakdown':[]},
+    {}, {'balance':True,'balance_breakdown':[]},
     {'balance':1600,'balance_dollars':'15.00','balance_breakdown':[]},
-    {'balance':1600,'balance_breakdown':[{'exchange_index':0,'balance':'16.00'}]},
-    {'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'NaN'}]},
-    {'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'-1'}]},
-    {'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'1'}, {'exchange_index':2,'balance':'2'}]},
 ])
-def test_unverifiable_cash_fails_closed_without_post(setup,payload):
+def test_unverifiable_total_cash_fails_closed_without_post(setup,payload):
     j,now,_=setup
     c=CashExchange(payload=payload)
     run(c,j,now)
     assert not c.posted
     assert next(iter(j.data['windows'].values()))['outcome']['reason']=='cash_check_unavailable'
     assert core.window_entry_count(j,START*1000)==0
+
+
+@pytest.mark.parametrize('payload',[
+    {'balance':1600},
+    {'balance':1600,'balance_breakdown':'malformed'},
+    {'balance':1600,'balance_breakdown':[{'exchange_index':0,'balance':'16.00'}]},
+    {'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'NaN'}]},
+    {'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'-1'}]},
+    {'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'1'}, {'exchange_index':2,'balance':'2'}]},
+])
+def test_breakdown_is_diagnostic_and_does_not_block_valid_total(setup,payload):
+    j,now,_=setup
+    c=CashExchange(payload=payload)
+    run(c,j,now)
+    assert len(c.posted)==1
+    assert core.window_entry_count(j,START*1000)==1
 
 
 def test_cash_read_error_is_not_order_acceptance_uncertainty(setup):
@@ -158,12 +180,15 @@ def test_cash_preflight_never_extends_entry_window(setup):
     assert next(iter(j.data['windows'].values()))['outcome']['reason']=='entry_deadline_passed'
 
 
-def test_no_partial_funding_or_budget_increase(setup):
+def test_insufficient_aggregate_cash_never_partial_funds_or_increases_budget(setup):
     j,now,_=setup
-    c=CashExchange(payload={'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'8.00'}]})
+    c=CashExchange(payload={'balance':800,'balance_breakdown':[{'exchange_index':2,'balance':'8.00'}]})
     run(c,j,now)
     assert not c.posted
-    assert next(iter(j.data['windows'].values()))['quantity']=='12'
+    record=next(iter(j.data['windows'].values()))
+    assert record['quantity']=='12'
+    assert record['outcome']['reason']=='insufficient_total_cash'
+    assert safe.release_proven_no_order(record)
     assert core.STOP_BID==D('.45') and core.PROFIT==D('.05')
 
 
