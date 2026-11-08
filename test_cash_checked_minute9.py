@@ -77,9 +77,9 @@ def test_funded_shard_preserves_budget_quantity_side_and_price(setup):
     run(c,j,now)
     assert len(c.posted)==1
     ticker,side,qty,limit=c.posted[0]
-    assert side=='YES' and qty==12 and limit==D('.75')
-    assert qty*(limit+core.FEE_RESERVE)<=D(10)
-    assert j.data['windows'][ticker]['allocated_dollars']=='10'
+    assert side=='YES' and qty==4 and limit==D('.75')
+    assert qty*(limit+core.FEE_RESERVE)<=D(10)/3
+    assert D(j.data['windows'][ticker]['allocated_dollars'])==D(10)/3
     assert core.window_entry_count(j,START*1000)==1
 
 
@@ -89,7 +89,7 @@ def test_explicit_insufficient_rejection_is_terminal_without_immediate_backup(se
     for _ in range(3):j.data['streak']=core.next_streak(j.data['streak'],'win')
     before=copy.deepcopy(j.data['streak'])
     run(c,j,now)
-    assert len(c.posted)==1 and c.posted[0][2]==4
+    assert len(c.posted)==1 and c.posted[0][2]==12
     r=j.data['windows'][c.posted[0][0]]
     assert r['entry_no_order_proof']['kind']=='exchange_rejected'
     assert r['outcome']['reason']=='insufficient_balance'
@@ -161,8 +161,8 @@ def test_low_shard_does_not_increase_budget_or_quantity(setup):
     j,now,_=setup
     c=CashExchange(payload={'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'8.00'}]})
     run(c,j,now)
-    assert len(c.posted)==1 and c.posted[0][2]==10
-    assert next(iter(j.data['windows'].values()))['quantity']=='10'
+    assert len(c.posted)==1 and c.posted[0][2]==4
+    assert next(iter(j.data['windows'].values()))['quantity']=='4'
     assert core.STOP_BID==D('.45') and core.PROFIT==D('.05')
 
 
