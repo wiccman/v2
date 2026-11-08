@@ -206,7 +206,7 @@ def test_stop_tp_budget_and_streak_unchanged(setup):
     assert c.posted[0][2] == 4
     r = next(iter(j.data['windows'].values()))
     assert D(r['allocated_dollars']) == D(10)/3
-    assert core.STOP_BID == D('.45') and core.PROFIT == D('.05')
+    assert core.STOP_DROP == D('.21') and core.PROFIT == D('.05')
 
 
 @pytest.mark.parametrize('value', [None, True, 'bad', float('nan'), float('inf'), -1])
