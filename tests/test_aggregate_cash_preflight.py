@@ -50,7 +50,7 @@ def test_insufficient_total_cash_stops_before_post(monkeypatch):
     journal = Journal()
     client = Mock()
     client.market.return_value = {"ticker": "TEST-1", "exchange_index": 2}
-    client.balance.return_value = {"balance_dollars": "2.00", "balance_breakdown": []}
+    client.balance.return_value = {"balance_dollars": "2.00", "balance_breakdown": [{"exchange_index": 2, "balance": "0.50"}]}
     with pytest.raises(guard.EntryNotSubmitted, match="insufficient_total_cash"):
         guard.CashCheckedClient(client, journal, guard.CashState()).place_entry(
             "TEST-1", "YES", 10, D(".70"), 1100, client_order_id="cid", ioc=True
@@ -64,7 +64,7 @@ def test_venue_insufficient_balance_is_terminal_and_does_not_retry(monkeypatch):
     journal = Journal()
     client = Mock()
     client.market.return_value = {"ticker": "TEST-1", "exchange_index": 2}
-    client.balance.return_value = {"balance_dollars": "25.88", "balance_breakdown": []}
+    client.balance.return_value = {"balance_dollars": "25.88", "balance_breakdown": [{"exchange_index": 2, "balance": "1.0789"}]}
     client.place_entry.side_effect = KalshiAPIError(400, "insufficient", code="insufficient_balance")
     with pytest.raises(guard.EntryNotSubmitted, match="exchange_rejected_insufficient_balance"):
         guard.CashCheckedClient(client, journal, guard.CashState()).place_entry(
