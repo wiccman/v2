@@ -47,9 +47,18 @@ from kalshi import KalshiClient, KalshiAPIError
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE, PROFIT = (
-    D(".69"), D(".60"), D(".89"), D(".10")
-)
+MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE = (D(".69"), D(".60"), D(".89"))
+
+
+def regular_tp_spread_from_cents(value):
+    """Configure only new Zone 1 TP spreads; keep durable entry-specific targets."""
+    if (not isinstance(value, str) or not value.isascii() or not value.isdecimal()
+            or not 1 <= int(value) <= 30):
+        raise ValueError("M9_TP_SPREAD_CENTS must be an integer from 1 to 30")
+    return D(value) / D("100")
+
+
+PROFIT = regular_tp_spread_from_cents(os.getenv("M9_TP_SPREAD_CENTS", "10"))
 
 
 def stop_drop_from_cents(value):
@@ -976,11 +985,11 @@ def reconcile_exit(client, journal, record, now):
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     observe_trade_mae(journal, record, cost, bid, now)
     sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
-    # Existing positions retain their original +5c resting target after upgrades.
-    # New regular entries store their +10c spread in the durable journal.
+    # Existing regular entries retain their durable original +5c or +10c spread;
+    # new entries use the configured spread without repricing already-owned TPs.
     # Zone 2 continues to use its separate 98c absolute take-profit target.
     tp_spread = D(str(record.get("take_profit_spread", ".05")))
-    if record.get("entry_kind") != "late_basket_rank" and tp_spread not in (D(".05"), PROFIT):
+    if record.get("entry_kind") != "late_basket_rank" and tp_spread not in (D(".05"), D(".10"), PROFIT):
         raise RuntimeError("Unknown regular take-profit spread")
     purpose, limit = exit_decision(
         cost, bid, stop_armed=bool(record.get("stop_armed")) or sol_kill,
