@@ -73,7 +73,7 @@ def test_older_preview_half_budget_state_migrates_to_reduced_mode(tmp_path):
     path.write_text('{"schema":1,"windows":{},"streak":{"consecutive_wins":3,"half_budget":true}}')
     migrated = Journal(path)
     assert migrated.data["streak"] == {"consecutive_wins": 3, "reduced_budget": True}
-    assert trade_budget(migrated.data["streak"], D("20")) == D("20") / D(3)
+    assert trade_budget(migrated.data["streak"], D("20")) == D("20")
     assert Journal(path).data == migrated.data
 
 
@@ -93,12 +93,23 @@ def test_three_wins_trigger_third_budget_and_repeat_after_loss():
     assert s == {"consecutive_wins": 3, "reduced_budget": True}
     for _ in range(6):
         s = next_streak(s, "win")
-        assert s["reduced_budget"] and trade_budget(s, D("20")) == D("20") / D(3)
+        assert s["reduced_budget"] and trade_budget(s, D("20")) == D("20")
     s = next_streak(s, "loss")
     assert s == starting_streak()
     for _ in range(3):
         s = next_streak(s, "win")
     assert s["reduced_budget"]
+
+
+def test_inverted_six_sixty_six_budget_after_three_wins_then_loss():
+    streak = starting_streak()
+    for wins in range(3):
+        assert trade_budget(streak, D("6.66")) == D("2.22")
+        streak = next_streak(streak, "win")
+    assert streak["consecutive_wins"] == 3
+    assert trade_budget(streak, D("6.66")) == D("6.66")
+    assert trade_budget(next_streak(streak, "flat"), D("6.66")) == D("6.66")
+    assert trade_budget(next_streak(streak, "loss"), D("6.66")) == D("2.22")
 
 
 def test_loss_before_streak_resets_progress():
@@ -153,16 +164,15 @@ def test_flat_interrupts_streak_but_does_not_restore_half_mode():
     assert next_streak(s, "flat")["reduced_budget"] is True
 
 
-def test_budget_uses_one_third_of_base_dollars_not_contracts():
+def test_budget_uses_one_third_before_three_wins_then_full_dollars():
     base = D("20")
     normal = budgeted_quantity(trade_budget(starting_streak(), base), D(".72"))
     s = starting_streak()
     for _ in range(3):
         s = next_streak(s, "win")
-    reduced = budgeted_quantity(trade_budget(s, base), D(".72"))
-    assert normal == 26 and reduced == 8
-    assert trade_budget(s, D("20")) > D("6.66")
-    assert trade_budget(s, D("20")) < D("6.67")
+    boosted = budgeted_quantity(trade_budget(s, base), D(".72"))
+    assert normal == 8 and boosted == 26
+    assert trade_budget(s, D("20")) == D("20")
     assert budgeted_quantity(D(".70"), D(".69")) == 0
     assert budgeted_quantity(D("10"), D(".91")) == 10
     assert budgeted_quantity(D("1000"), D(".69"), cap=8) == 8
@@ -558,7 +568,7 @@ def test_one_global_entry_in_five_single_coin_markets(tmp_path, monkeypatch):
     assert len(bot.posted) == 1
     assert window_entry_count(j, START * 1000) == 1
     assert list(j.data["windows"]) == [bot.posted[0][0]]
-    assert j.data["windows"][bot.posted[0][0]]["quantity"] == "25"
+    assert j.data["windows"][bot.posted[0][0]]["quantity"] == "8"  # one-third starting allocation
     # Even across a restart, the pending first attempt blocks other coin entries.
     from single_coin_minute9 import Journal as Reopened
     reopened = Reopened(j.path)

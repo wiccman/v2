@@ -91,7 +91,7 @@ def test_initially_priced_out_first_advances_to_second(setup, first):
     c = QueueExchange(initial={'KXBTC15M': first})
     run(c, j, now)
     assert len(c.posted) == 1 and c.posted[0][0].startswith('KXETH15M-')
-    assert c.posted[0][2] == 19  # 15 dollars / (75c + 3c reserve)
+    assert c.posted[0][2] == 6  # $5 starting allocation / (75c + 3c reserve)
     assert any(n == 'M9_QUEUE_SKIP' and d['series'] == 'KXBTC15M' for n,d in events)
 
 
@@ -186,13 +186,13 @@ def test_unverified_legacy_no_fill_does_not_free_slot(setup):
     assert mod.window_entry_count(j, START*1000) == 1
 
 
-def test_reduced_budget_and_fixed_stop_unchanged(setup):
+def test_full_budget_after_three_wins_and_fixed_stop_unchanged(setup):
     j, _, now = setup
     c = QueueExchange({'KXBTC15M': 'zero'})
     for _ in range(3):
         j.data['streak'] = mod.next_streak(j.data['streak'], 'win')
     run(c, j, now)
     assert len(c.posted) == 2
-    assert all(p[2] == 6 for p in c.posted)  # $5 with per-contract fee reserve
-    assert all(D(r['allocated_dollars']) == 5 for r in j.data['windows'].values())
+    assert all(p[2] == 19 for p in c.posted)  # $15 after three wins; 75c+3c reserve
+    assert all(D(r['allocated_dollars']) == 15 for r in j.data['windows'].values())
     assert mod.STOP_BID == D('.45') and mod.PROFIT == D('.05')

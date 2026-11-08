@@ -195,7 +195,7 @@ def test_priced_out_leader_falls_to_second_without_consuming_slot(tmp_path, monk
     assert exchange.checked[:2] == ['KXETH15M', 'KXSOL15M']
     assert len(exchange.posted) == 1
     assert exchange.posted[0][0].startswith('KXSOL15M-')
-    assert exchange.posted[0][2] == 20
+    assert exchange.posted[0][2] == 6  # starting allocation is $15 / 3
     assert core.window_entry_count(journal, START*1000) == 1
     skipped = [data for name, data in events if name == 'M9_QUEUE_SKIPPED']
     assert skipped[0]['rank'] == 1 and skipped[0]['yes_ask'] == '.96'
