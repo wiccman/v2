@@ -6,7 +6,9 @@ without promoting third place, and honor the existing SOL Central-time veto.
 
 Buy the aligned YES/NO single-coin contract only at a 96..99 cent ask, with
 a *combined* additional allocation of half the current active trade budget.
-No duplicate ticker, no outside inventory adoption, no cash transfers.
+Zone 1 and Zone 2 have independent journal keys. An explicitly verified
+Zone 1 no-fill or fully closed position does not suppress a Zone 2 opportunity.
+No duplicate exposure, no outside inventory adoption, no cash transfers.
 Existing entry/exit ownership, verified fills and 21c stop apply normally.
 At >=96c the usual +5c take-profit cannot be quoted, so these trades hold
 for settlement unless the existing stop executes. Extra late results are
@@ -29,6 +31,70 @@ LATE_MIN_PRICE = D(".96")
 LATE_MAX_PRICE = D(".99")
 MAX_LATE_COINS = 2
 LATE_KIND = "late_basket_rank"
+LATE_ZONE = core.ZONE2
+
+
+def zone2_attempt_exists(journal, ticker):
+    """Legacy and new Zone 2 records both forbid repeat buys in this zone."""
+    legacy = journal.data["windows"].get(ticker)
+    return (core.zone_record_key(ticker, LATE_ZONE) in journal.data["windows"]
+            or bool(legacy and legacy.get("entry_kind") == LATE_KIND))
+
+
+def zone2_entry_status(client, journal, ticker, *, expected_client_id=None):
+    """Allow an independently tracked zone only when earlier inventory is safe.
+
+    Unknown acceptance or incomplete Zone 1 reconciliation is always a veto.
+    Full Zone 1 exits may reenter only after verifying zero held inventory,
+    terminal orders, and fills owned by the original saved order identities.
+    """
+    windows = journal.data["windows"]
+    zone2_key = core.zone_record_key(ticker, LATE_ZONE)
+    existing = windows.get(zone2_key)
+    if existing is not None:
+        if (expected_client_id is None
+                or existing.get("buy", {}).get("client_id") != expected_client_id):
+            return False, "zone2_already_attempted"
+    regular = windows.get(core.zone_record_key(ticker, core.ZONE1))
+    owned_order_ids = set()
+    if regular is not None:
+        if regular.get("entry_kind") == LATE_KIND:
+            return False, "legacy_zone2_already_attempted"
+        if regular.get("ticker") != ticker:
+            return False, "zone1_identity_mismatch"
+        outcome = regular.get("outcome") or {}
+        status = outcome.get("status")
+        if status == "no_fill":
+            if not cash.entry_slot_released(regular):
+                return False, "zone1_zero_fill_unverified"
+        elif status in {"win", "loss", "flat"}:
+            try:
+                bought = D(str(outcome["bought"]))
+                sold = D(str(outcome["sold"]))
+                remaining = D(str(outcome["remaining_at_settlement"]))
+            except (ValueError, KeyError, TypeError, ArithmeticError):
+                return False, "zone1_exit_unverified"
+            if (not all(q.is_finite() for q in (bought, sold, remaining))
+                    or bought <= 0 or sold != bought or remaining != 0):
+                return False, "zone1_inventory_not_fully_closed"
+        else:
+            return False, "zone1_order_unresolved"
+        owned_order_ids = {
+            x["order_id"] for x in [regular.get("buy", {})] + regular.get("sells", [])
+            if x.get("order_id")
+        }
+    # A final freshness check of inventory and order history makes zone
+    # independence safe even if the previous Zone 1 order has completed.
+    if core.position_for(client, ticker) != 0:
+        return False, "market_inventory_present"
+    orders = client.all_orders(ticker)
+    if any(order.get("order_id") not in owned_order_ids
+           or order.get("status") not in core.TERMINAL for order in orders):
+        return False, "other_or_pending_market_order"
+    fills = client.all_fills(ticker)
+    if any(fill.get("order_id") not in owned_order_ids for fill in fills):
+        return False, "outside_market_fills"
+    return True, "zone2_independent_entry_allowed"
 
 
 def in_late_window(now, start):
@@ -76,12 +142,14 @@ def half_budget_reservation(journal, start):
 
 class LateCheckedClient:
     """Last-second rank/quote/time gate in CashCheckedClient's pre-dispatch path."""
-    def __init__(self, client, *, provider, clock, start, names, series, side,
+    def __init__(self, client, *, journal, provider, clock, start, names, series, side,
                  original_limit, sol_blocked):
-        self.client, self.provider, self.clock = client, provider, clock
+        self.client, self.journal = client, journal
+        self.provider, self.clock = provider, clock
         self.start, self.names = start, names
         self.series, self.side = series, side
         self.original_limit, self.sol_blocked = D(original_limit), sol_blocked
+        self.expected_client_id = None
 
     def __getattr__(self, attr):
         return getattr(self.client, attr)
@@ -95,6 +163,14 @@ class LateCheckedClient:
             return dict(base, reason="late_entry_time_invalid")
         if self.series == "KXBTC15M" or (self.series == "KXSOL15M" and self.sol_blocked(now)):
             return dict(base, reason="late_entry_time_restricted")
+        try:
+            permitted, reason = zone2_entry_status(
+                self.client, self.journal, ticker,
+                expected_client_id=self.expected_client_id)
+        except Exception:
+            return dict(base, reason="late_rank_unavailable")
+        if not permitted:
+            return dict(base, reason="late_zone_unavailable", detail=reason)
         try:
             rows = ranked.ranked_observations(
                 self.provider.snapshot(self.names, self.start),
@@ -146,7 +222,8 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
                 and row.return_pct != 0]
     total_budget = core.trade_budget(journal.data["streak"], base_budget) / D(2)
     spent = half_budget_reservation(journal, start)
-    core.event("M9_LATE_BASKET_RANK", window_start_ms=start * 1000,
+    core.event("M9_LATE_BASKET_RANK", entry_zone=LATE_ZONE,
+               window_start_ms=start * 1000,
                original_top_two=[{"rank": i, "coin": row.series,
                                   "return_pct": str(row.return_pct)}
                                  for i, row in enumerate(top_two, 1)],
@@ -164,7 +241,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
             continue
         for market in markets:
             plan = late_plan(market, start, clock(), row.series, side)
-            if plan and plan["ticker"] not in journal.data["windows"]:
+            if plan and not zone2_attempt_exists(journal, plan["ticker"]):
                 plans.append((rank, row, plan))
                 break
     if not plans:
@@ -174,14 +251,16 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
         if not in_late_window(clock(), start):
             return
         ticker = plan["ticker"]
-        if ticker in journal.data["windows"]:
+        if zone2_attempt_exists(journal, ticker):
             continue
         available = total_budget - half_budget_reservation(journal, start)
         if available < D(plan["limit"]) + core.FEE_RESERVE:
             return
         try:
-            if core.entry_market_occupied(client, ticker):
-                core.event("M9_LATE_INVENTORY_BLOCKED", ticker=ticker)
+            permitted, reason = zone2_entry_status(client, journal, ticker)
+            if not permitted:
+                core.event("M9_LATE_ZONE_BLOCKED", ticker=ticker, entry_zone=LATE_ZONE,
+                           reason=reason)
                 continue
             fresh_market = client.market(ticker)
             fresh = late_plan(fresh_market, start, clock(), row.series, plan["side"])
@@ -195,7 +274,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
         # Share half-budget between the remaining eligible coins; the last
         # coin may consume the residual amount, but never exceed half total.
         remaining_coins = sum(1 for _, _, p in plans[plan_index:]
-                              if p["ticker"] not in journal.data["windows"])
+                              if not zone2_attempt_exists(journal, p["ticker"]))
         target = available / D(max(1, remaining_coins))
         unit = D(fresh["limit"]) + core.FEE_RESERVE
         quantity = min(max_contracts, int((target / unit).to_integral_value(rounding=ROUND_FLOOR)))
@@ -215,24 +294,27 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
                   "created_at": now_submit}
         record = {
             "ticker": ticker, "series": row.series, "side": fresh["side"],
+            "entry_zone": LATE_ZONE,
             "window_start_ms": start * 1000, "entry_kind": LATE_KIND,
             "basket_rank_at_entry": rank, "basket_return_pct": str(row.return_pct),
             "quantity": str(quantity), "allocated_dollars": str(quantity * unit),
             "regular_active_budget_at_entry": str(core.trade_budget(journal.data["streak"], base_budget)),
             "buy": intent, "sells": [],
         }
-        journal.data["windows"][ticker] = record
+        journal.data["windows"][core.zone_record_key(ticker, LATE_ZONE)] = record
         journal.save()
         validator = LateCheckedClient(
-            client, provider=provider, clock=clock, start=start, names=names,
+            client, journal=journal, provider=provider, clock=clock, start=start, names=names,
             series=row.series, side=fresh["side"], original_limit=fresh["limit"],
             sol_blocked=sol_blocked)
         state = getattr(journal, "_entry_cash_state", None)
         if state is None:
             state = cash.CashState()
             journal._entry_cash_state = state
+        validator.expected_client_id = intent["client_id"]
         protected_client = cash.CashCheckedClient(validator, journal, state)
-        core.event("M9_LATE_BUY_SUBMIT", ticker=ticker, series=row.series,
+        core.event("M9_LATE_BUY_SUBMIT", ticker=ticker, entry_zone=LATE_ZONE,
+                   series=row.series,
                    rank=rank, side=fresh["side"], price=fresh["limit"],
                    quantity=quantity, total_late_budget_dollars=str(total_budget),
                    reserved_after_dollars=str(half_budget_reservation(journal, start)))
