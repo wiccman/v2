@@ -266,3 +266,46 @@ def test_sol_marker_exact_20c_boundary(tmp_path):
     assert "sol_20c_kill" not in r
     assert core.maybe_arm_sol_20c_kill(j, r, D(".20"), START + 572) is True
     assert D(r["sol_20c_kill"]["trigger_bid"]) == D(".20")
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("entry,target", [(".72", ".82"), (".725", ".83"), (".89", ".99")])
+def test_new_zone1_rests_at_plus_ten_and_keeps_stop_priority(tmp_path, side, entry, target):
+    c = StopExchange(side=side, bid=str(D(entry) - D(".01")))
+    yes_price = D(entry) if side == "YES" else D("1") - D(entry)
+    c.rows[0]["yes_price_dollars"] = str(yes_price)
+    c.rows[0]["no_price_dollars"] = str(D("1") - yes_price)
+    j = core.Journal(tmp_path / f"new-ten-{side}-{entry}.json")
+    r = fake_record(c, fully_sold=False)
+    r["take_profit_spread"] = str(core.PROFIT)
+    r["entry_zone"] = core.ZONE1
+    j.data["windows"][c.ticker] = r
+    j.save()
+    core.reconcile_exit(c, j, r, START + 570)
+    assert len(c.submissions) == 1
+    assert c.submissions[0]["limit"] == D(target)
+    assert r["sells"][0]["execution"] == "gtc"
+    reopened = core.Journal(j.path)
+    r = reopened.data["windows"][c.ticker]
+    core.reconcile_exit(c, reopened, r, START + 571)
+    assert len(c.submissions) == 1
+    c.bid = D(entry) - D(".21")
+    core.reconcile_exit(c, reopened, r, START + 572)
+    assert r["stop_armed"] and c.orders["exit-1"]["status"] == "canceled"
+    assert len(c.submissions) == 1
+    core.reconcile_exit(c, reopened, r, START + 573)
+    assert len(c.submissions) == 2
+    assert r["sells"][-1]["purpose"] == "stop_loss"
+    assert r["sells"][-1]["execution"] == "reduce_only_ioc"
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_prechange_zone1_keeps_five_cent_target_even_after_upgrade(tmp_path, side):
+    c = StopExchange(side=side, bid=".60")
+    j = core.Journal(tmp_path / f"legacy-five-{side}.json")
+    r = fake_record(c, fully_sold=False)
+    assert "take_profit_spread" not in r
+    j.data["windows"][c.ticker] = r
+    j.save()
+    core.reconcile_exit(c, j, r, START + 570)
+    assert c.submissions[0]["limit"] == D(".77")
+    assert r["sells"][0]["execution"] == "gtc"

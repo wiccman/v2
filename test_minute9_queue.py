@@ -194,4 +194,4 @@ def test_full_budget_after_small_mode_loss_and_fixed_stop_unchanged(setup):
     assert len(c.posted) == 2
     assert all(p[2] == 19 for p in c.posted)  # $15 after a small-budget loss; 75c+3c reserve
     assert all(D(r['allocated_dollars']) == 15 for r in j.data['windows'].values())
-    assert mod.STOP_DROP == D('.21') and mod.PROFIT == D('.05')
+    assert mod.STOP_DROP == D('.21') and mod.PROFIT == D('.10')

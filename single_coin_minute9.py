@@ -1,7 +1,7 @@
-"""Single-coin 15-minute Kalshi markets: minute-nine buy, resting +5c gross TP.
+"""Single-coin 15-minute Kalshi markets: minute-nine buy, resting +10c gross TP.
 
 For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
-whichever side has a quoted ask from 69c through 91c from elapsed minute 9 until the configured entry cutoff.
+whichever side has a quoted ask from 69c through 89c from elapsed minute 9 until the configured entry cutoff.
 No basket mean, leader rank, direction indicator or other coin-selection rule.
 Both sides qualifying is ambiguous, so the market is skipped. By default
 only one filled or potentially-filled market per 15-minute window is allowed.
@@ -48,7 +48,7 @@ from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
 MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE, PROFIT = (
-    D(".69"), D(".60"), D(".91"), D(".05")
+    D(".69"), D(".60"), D(".89"), D(".10")
 )
 
 
@@ -145,7 +145,7 @@ def plan_single_coin(market, now, series, *, min_price=None):
             "window_end_ms": int(close * 1000)}
 
 
-def exit_decision(cost, bid, *, stop_armed=False):
+def exit_decision(cost, bid, *, stop_armed=False, profit=None):
     """Return (exit kind, protected IOC limit) from executable bid and fill cost.
 
     Stop when executable bid is 21c below verified average entry cost.
@@ -153,6 +153,9 @@ def exit_decision(cost, bid, *, stop_armed=False):
     A latched stop keeps priority over TP through recovery and restarts.
     """
     cost, bid = D(str(cost)), D(str(bid))
+    profit = PROFIT if profit is None else D(str(profit))
+    if not profit.is_finite() or not D(0) < profit < D(1):
+        raise ValueError("Invalid take-profit spread")
     if not cost.is_finite() or not D(0) < cost < D(1):
         raise ValueError("Invalid verified entry cost")
     if not bid.is_finite() or not D(0) <= bid <= D(1):
@@ -160,7 +163,7 @@ def exit_decision(cost, bid, *, stop_armed=False):
     if stop_armed or bid <= stop_threshold_for_entry(cost):
         # No executable bid means stop stays armed and is retried next pass.
         return "stop_loss", bid if D(0) < bid < D(1) else None
-    target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
+    target = (cost + profit).quantize(D(".01"), rounding=ROUND_CEILING)
     if target > D(".99"):
         return None, None
     return ("take_profit", target) if bid >= target else (None, None)
@@ -944,11 +947,18 @@ def reconcile_exit(client, journal, record, now):
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     observe_trade_mae(journal, record, cost, bid, now)
     sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+    # Existing positions retain their original +5c resting target after upgrades.
+    # New regular entries store their +10c spread in the durable journal.
+    # Zone 2 continues to use its separate 98c absolute take-profit target.
+    tp_spread = D(str(record.get("take_profit_spread", ".05")))
+    if record.get("entry_kind") != "late_basket_rank" and tp_spread not in (D(".05"), PROFIT):
+        raise RuntimeError("Unknown regular take-profit spread")
     purpose, limit = exit_decision(
-        cost, bid, stop_armed=bool(record.get("stop_armed")) or sol_kill)
+        cost, bid, stop_armed=bool(record.get("stop_armed")) or sol_kill,
+        profit=tp_spread)
     if purpose != "stop_loss" and record.get("entry_kind") == "late_basket_rank":
         # Zone 2 is an independent near-close 98c exit, never the regular
-        # +5c target. Post a resting order as soon as inventory is verified,
+        # target. Post a resting order as soon as inventory is verified,
         # without waiting for the market bid to reach the 98c target.
         target = D(str(record.get("take_profit_target", ".98")))
         if target != D(".98"):
@@ -961,7 +971,7 @@ def reconcile_exit(client, journal, record, now):
             return
         purpose, limit = "take_profit", target
     elif purpose is None:
-        target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
+        target = (cost + tp_spread).quantize(D(".01"), rounding=ROUND_CEILING)
         if target > D(".99"):
             return
         purpose, limit = "take_profit", target
@@ -1177,6 +1187,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                   "sol_budget_factor_at_entry": str(SOL_BUDGET_FACTOR) if series == "KXSOL15M" else "1",
                   "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
                   "entry_floor_at_entry": str(min_price),
+                  "take_profit_spread": str(PROFIT),
                   "buy": intent, "sells": []}
         journal.data["windows"][ticker] = record
         journal.save()  # A pending/ambiguous POST consumes the slot durably.
@@ -1289,7 +1300,7 @@ def main(argv=None):
               sol_budget_factor=str(SOL_BUDGET_FACTOR),
               price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
-              relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",
+              relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=int(PROFIT * 100), take_profit_execution="gtc_after_confirmed_fill",
               stop_drop_cents=int(STOP_DROP * 100), stop_basis="verified_average_entry_cost",
               sol_absolute_kill_bid_cents=int(SOL_ABSOLUTE_KILL_BID * 100),
               stop_execution="bid_limited_reduce_only_ioc")

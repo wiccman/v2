@@ -116,7 +116,7 @@ def test_partial_fill_cannot_use_backup_late(tmp_path,monkeypatch):
 
 def test_stop_take_profit_and_inverted_budget_sequence():
     assert core.exit_decision('.75','.45')[0]=='stop_loss'
-    assert core.exit_decision('.75','.80')[0]=='take_profit'
+    assert core.exit_decision('.75','.85')[0]=='take_profit'
     assert core.exit_decision('.75','.55')==(None,None)
     streak=core.starting_streak()
     assert core.trade_budget(streak,D(10))==D(10)/3

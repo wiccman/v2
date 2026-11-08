@@ -28,16 +28,16 @@ def test_no_coin_race_or_basket_selection():
     assert "KXCRYPTOLEAD15M" not in DEFAULT_SERIES
     assert plan_single_coin(market(series="KXBTC15M"), START + 550, "KXETH15M") is None
 
-@pytest.mark.parametrize("price", [".69", ".70", ".72", ".90", ".91"])
+@pytest.mark.parametrize("price", [".69", ".70", ".72", ".88", ".89"])
 def test_yes_boundaries_are_inclusive(price):
     p = plan_single_coin(market(yes=price, no=".01"), START + 550, "KXBTC15M")
     assert p and p["side"] == "YES" and D(p["ask"]) == D(price)
 
-@pytest.mark.parametrize("price", [".01", ".58", ".68", ".6899", ".9101", ".92", ".99"])
+@pytest.mark.parametrize("price", [".01", ".58", ".68", ".6899", ".90", ".91", ".9101", ".92", ".99"])
 def test_no_buy_outside_price_band(price):
     assert plan_single_coin(market(yes=price, no=".01"), START + 550, "KXBTC15M") is None
 
-@pytest.mark.parametrize("price", [".69", ".72", ".91"])
+@pytest.mark.parametrize("price", [".69", ".72", ".89"])
 def test_no_side_can_qualify_independently(price):
     p = plan_single_coin(market(yes=".01", no=price), START + 550, "KXBTC15M")
     assert p and p["side"] == "NO" and D(p["ask"]) == D(price)
@@ -56,9 +56,9 @@ def test_both_sides_in_range_skips_ambiguity():
 def test_closed_market_skips():
     assert plan_single_coin(market(status="closed"), START + 550, "KXBTC15M") is None
 
-def test_price_rounding_never_exceeds_91():
-    p = plan_single_coin(market(yes=".9001", no=".01"), START + 550, "KXBTC15M")
-    assert p["limit"] == ".91" or p["limit"] == "0.91"
+def test_price_rounding_never_exceeds_89():
+    p = plan_single_coin(market(yes=".8801", no=".01"), START + 550, "KXBTC15M")
+    assert p["limit"] == ".89" or p["limit"] == "0.89"
 
 def test_journal_persists_one_order_per_coin(tmp_path):
     state = tmp_path / "minute9.json"
@@ -180,7 +180,7 @@ def test_budget_uses_one_third_until_loss_then_full_dollars():
     s = next_streak(next_streak(s, "win"), "win")
     assert trade_budget(s, D("20")) == D("20") / D(3)
     assert budgeted_quantity(D(".70"), D(".69")) == 0
-    assert budgeted_quantity(D("10"), D(".91")) == 10
+    assert budgeted_quantity(D("10"), D(".89")) == 10
     assert budgeted_quantity(D("1000"), D(".69"), cap=8) == 8
 
 def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
@@ -534,8 +534,8 @@ def test_entry_relative_21c_stop_and_durable_journal(tmp_path):
 
 
 @pytest.mark.parametrize("entry,target", [
-    (".60", ".65"), (".72", ".77"), (".725", ".78"),
-    (".80", ".85"), (".91", ".96"),
+    (".60", ".70"), (".72", ".82"), (".725", ".83"),
+    (".80", ".90"), (".89", ".99"),
 ])
 def test_stop_threshold_always_21c_below_actual_fill(entry, target):
     cost, tp = D(entry), D(target)
