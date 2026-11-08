@@ -54,11 +54,28 @@ def run(c,j,now,live=True):
     return safe.run_cash_checked_pass(c,j,c.series,D(10),100,live,now[0])
 
 
-def test_total_sixteen_but_market_zero_never_posts(setup):
+@pytest.mark.parametrize('total,market_cash', [('16.00','0.00'), ('44.6587','0.5908')])
+def test_funded_aggregate_and_low_market_cash_reach_venue(setup,total,market_cash):
     j,now,events=setup
-    c=CashExchange(payload={'balance':1600,'balance_dollars':'16.00',
-                           'balance_breakdown':[{'exchange_index':0,'balance':'16.00'},
-                                                {'exchange_index':2,'balance':'0.00'}]})
+    c=CashExchange(payload={'balance_dollars':total,
+                           'balance_breakdown':[{'exchange_index':2,'balance':market_cash}]})
+    run(c,j,now)
+    assert len(c.posted)==1 and c.balance_calls==1
+    ticker,side,qty,limit=c.posted[0]
+    assert side=='YES' and qty==4 and limit==D('.75')
+    assert qty*(limit+core.FEE_RESERVE)<=D(10)/3
+    r=j.data['windows'][ticker]
+    assert 'entry_no_order_proof' not in r
+    check=next(d for n,d in events if n=='M9_CASH_CHECK')
+    assert check['total_cash_dollars']==total and check['market_cash_dollars']==market_cash
+    assert check['cash_check_scope']=='aggregate_account_cash'
+    assert not any(n=='M9_ENTRY_CASH_RESIZED' for n,d in events)
+
+
+def test_total_cash_below_one_contract_never_posts(setup):
+    j,now,events=setup
+    c=CashExchange(payload={'balance_dollars':'0.59',
+                           'balance_breakdown':[{'exchange_index':2,'balance':'0.59'}]})
     run(c,j,now)
     assert not c.posted and c.balance_calls==1
     assert core.window_entry_count(j,START*1000)==0
@@ -67,10 +84,10 @@ def test_total_sixteen_but_market_zero_never_posts(setup):
     assert core.Journal(j.path).data==j.data
     assert j.data['streak']==core.starting_streak()
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
-    assert check['total_cash_dollars']=='16.00' and check['market_cash_dollars']=='0.00'
-    assert check['cash_check_scope']=='market_exchange_cash'
+    assert check['total_cash_dollars']=='0.59' and check['market_cash_dollars']=='0.59'
+    assert check['cash_check_scope']=='aggregate_account_cash'
     skipped=next(d for n,d in events if n=='M9_ENTRY_NOT_SENT')
-    assert skipped['reason']=='insufficient_market_cash'
+    assert skipped['reason']=='insufficient_total_cash'
     assert skipped['minimum_one_contract_with_fee_reserve_dollars']=='0.78'
 
 
@@ -221,9 +238,9 @@ def test_adapter_does_not_erase_performance_fallback_or_leak_overrides():
 
 
 
-def test_reported_hype_cash_case_caps_durable_intent(setup):
+def test_total_cash_cap_is_durable_before_dispatch(setup):
     j,now,events=setup
-    c=CashExchange(payload={'balance':5000,'balance_breakdown':[{'exchange_index':2,'balance':'5.9321'}]})
+    c=CashExchange(payload={'balance_dollars':'5.9321','balance_breakdown':[{'exchange_index':2,'balance':'0.5908'}]})
     ticker=c.series[0]+'-case'
     r={'ticker':ticker,'side':'YES','quantity':'7','window_start_ms':START*1000,
        'buy':{'client_id':'exact','limit':'0.85'},'sells':[]}

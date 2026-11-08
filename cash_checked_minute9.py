@@ -1,8 +1,9 @@
 """Cash/rejection safety adapter for the existing performance-ranked bot.
 
 No new signal, transfers, retries, or price chasing.
-Cap entry quantity by the market exchange's cash and the existing budget.
-Never move funds automatically; the order API remains authoritative. Original core owns timing,
+Cap entry quantity by aggregate account cash and the existing budget.
+The exchange breakdown is diagnostic; Kalshi's order response decides whether
+the account can fund the order. Never move funds automatically. Original core owns timing,
 ranking, sizing, exits and order IDs. Only definite pre-dispatch skips and the
 exact HTTP 400 / insufficient_balance rejection receive a terminal no-fill.
 All other submission errors keep the original uncertain-order reservation.
@@ -17,7 +18,7 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 from kalshi import KalshiAPIError
 
-POLICY = "market-cash-capped-entry-v3"
+POLICY = "aggregate-cash-capped-venue-authority-v4"
 ORIGINAL_RUN_PASS = core.run_pass
 ORIGINAL_SLOT_RELEASED = core.entry_slot_released
 
@@ -167,11 +168,13 @@ class CashCheckedClient:
             if type(index) is not int or index < 0:
                 raise CashUnavailable("market_exchange_index_missing")
             total, shards = self.state.read(self.client, now)
-            # Other exchange cash cannot fund this market without a transfer.
+            # Restore aggregate preflight from be2896c. A low exchange balance
+            # alone is not proof the account's next order will be rejected.
+            # Keep it in diagnostics and let the order endpoint decide funding.
             if shards is None or index not in shards:
                 raise CashUnavailable("market_cash_missing")
             market_cash = shards[index]
-            available = min(total, market_cash)
+            available = total
             unit_cost = D(outcome_price) + core.FEE_RESERVE
             if (not unit_cost.is_finite() or unit_cost <= 0
                     or not original_quantity.is_finite() or original_quantity <= 0
@@ -191,16 +194,16 @@ class CashCheckedClient:
             raise EntryNotSubmitted("cash_check_unavailable") from error
         record["cash_preflight"] = {"exchange_index": index, "total_cash_dollars": str(total),
                                     "market_cash_dollars": str(market_cash) if market_cash is not None else None,
-                                    "cash_check_scope": "market_exchange_cash",
+                                    "cash_check_scope": "aggregate_account_cash",
                                     "minimum_one_contract_with_fee_reserve_dollars": str(unit_cost),
                                     "required_with_fee_reserve_dollars": str(required)}
         core.event("M9_CASH_CHECK", ticker=ticker, **record["cash_preflight"])
         if quantity < 1:
             finish_no_order(self.journal, record, kind="not_dispatched",
-                            reason="insufficient_market_cash", now=core.time.time())
-            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_market_cash",
+                            reason="insufficient_total_cash", now=core.time.time())
+            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_total_cash",
                        **record["cash_preflight"])
-            raise EntryNotSubmitted("insufficient_market_cash")
+            raise EntryNotSubmitted("insufficient_total_cash")
         # Check the fresh selected coin's direction after cash/ownership reads,
         # immediately before dispatch. A veto is durable proof of no order.
         direction_check = getattr(self.client, "entry_direction_check", None)
