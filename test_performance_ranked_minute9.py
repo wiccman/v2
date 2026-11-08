@@ -210,7 +210,7 @@ def test_two_priced_out_coins_fall_to_third(tmp_path, monkeypatch):
 
 def test_eligible_first_place_wins_even_if_second_has_higher_odds(tmp_path, monkeypatch):
     exchange = Exchange()
-    exchange.prices['KXETH15M'] = ('.60', '.41')
+    exchange.prices['KXETH15M'] = ('.69', '.32')
     exchange.prices['KXSOL15M'] = ('.90', '.11')
     exchange, _, _ = run(tmp_path, monkeypatch, exchange=exchange)
     assert exchange.posted[0][0].startswith('KXETH15M-')
