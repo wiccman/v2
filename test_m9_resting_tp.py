@@ -309,3 +309,43 @@ def test_prechange_zone1_keeps_five_cent_target_even_after_upgrade(tmp_path, sid
     core.reconcile_exit(c, j, r, START + 570)
     assert c.submissions[0]["limit"] == D(".77")
     assert r["sells"][0]["execution"] == "gtc"
+
+
+@pytest.mark.parametrize("side", ["YES", "NO"])
+def test_five_cent_configuration_preserves_older_ten_cent_regular_positions(
+        tmp_path, monkeypatch, side):
+    """The new default must not change an existing position's stored target."""
+    monkeypatch.setattr(core, "PROFIT", D(".05"))
+    for spread, target in [(".05", ".77"), (".10", ".82")]:
+        client = StopExchange(side=side, bid=".60")
+        journal = core.Journal(tmp_path / f"{side}-{spread}.json")
+        record = fake_record(client, fully_sold=False)
+        record["entry_zone"] = core.ZONE1
+        record["take_profit_spread"] = spread
+        journal.data["windows"][client.ticker] = record
+        journal.save()
+        core.reconcile_exit(client, journal, record, START + 570)
+        assert len(client.submissions) == 1
+        assert client.submissions[0]["limit"] == D(target)
+        assert record["sells"][0]["execution"] == "gtc"
+        reopened = core.Journal(journal.path)
+        core.reconcile_exit(client, reopened, reopened.data["windows"][client.ticker], START + 571)
+        assert len(client.submissions) == 1
+
+
+def test_five_cent_runtime_configuration_import_and_invalid_guard():
+    import os
+    import subprocess
+    import sys
+
+    for cents, expected in [("5", "0.05"), ("10", "0.10")]:
+        env = dict(os.environ, M9_TP_SPREAD_CENTS=cents)
+        run = subprocess.run(
+            [sys.executable, "-c", "import single_coin_minute9 as m; print(m.PROFIT)"],
+            env=env, capture_output=True, text=True, check=True)
+        assert run.stdout.strip() == expected
+    env = dict(os.environ, M9_TP_SPREAD_CENTS="0")
+    bad = subprocess.run(
+        [sys.executable, "-c", "import single_coin_minute9"],
+        env=env, capture_output=True, text=True)
+    assert bad.returncode != 0 and "M9_TP_SPREAD_CENTS" in bad.stderr
