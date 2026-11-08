@@ -3,11 +3,12 @@
 Reuse the deployed entry, exit, cash, ownership and streak implementations.
 One filled or potentially-filled market per period remains the limit. A second
 candidate attempt requires a proven no-fill and a full 60-second cooldown.
-No trading on import, no transfers, no sleeps in the exit-monitoring loop.
+No trading on import and no sleeps in the exit-monitoring loop.
 """
 from __future__ import annotations
 
 import math
+import os
 from contextlib import contextmanager
 
 import single_coin_minute9 as core
@@ -146,11 +147,14 @@ def installed_policy(provider=None):
 
 def main(argv=None):
     with installed_policy():
+        target = os.getenv("M9_TARGET_EXCHANGE_INDEX", "").strip() or None
         core.event("M8_TOP2_POLICY_READY", policy=POLICY,
                    entry_start_seconds=START_SECONDS, entry_end_seconds=END_SECONDS,
                    performance_top_n=TOP_COUNT, backup_delay_seconds=BACKUP_DELAY_SECONDS,
                    max_candidate_attempts_per_window=MAX_CANDIDATE_ATTEMPTS,
-                   max_filled_or_pending_markets=1, transfers_enabled=False)
+                   max_filled_or_pending_markets=1,
+                   automatic_rebalancing_enabled=bool(target),
+                   target_exchange_index=target)
         return core.main(argv)
 
 
