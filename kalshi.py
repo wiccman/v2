@@ -180,10 +180,12 @@ class KalshiClient:
 
     def order(self, order_id, ticker=None):
         """Resolve an order with market context; a 404 is never terminal proof."""
-        params = {"market_ticker": ticker, "exchange_index": -1} if ticker else None
+        # GetOrder is an aggregate read identified by the order_id path only.
+        # Market/shard routing arguments are for V2 mutations (e.g. cancel),
+        # not this read endpoint. A 404 still requires exact-ID history lookup.
         try:
             order = self.request("GET", "/portfolio/orders/" + order_id,
-                                 params=params, auth=True)["order"]
+                                 auth=True)["order"]
         except KalshiAPIError as error:
             if error.status_code != 404 or not ticker:
                 raise
