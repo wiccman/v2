@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -82,6 +83,8 @@ class KalshiClient:
         self.quote_ttl = quote_ttl
         self.clock = clock or time.monotonic
         self._market_cache = {}
+        self._archived_tickers = set()
+        self._archive_cutoff_cache = None
         pem = b""
         if private_key_b64:
             pem = base64.b64decode(private_key_b64)
@@ -170,7 +173,14 @@ class KalshiClient:
         if cached and 0 <= now - cached[0] < self.quote_ttl:
             return dict(cached[1])
         self._market_cache.pop(ticker, None)
-        market = self.request("GET", "/markets/" + ticker)["market"]
+        try:
+            market = self.request("GET", "/markets/" + ticker)["market"]
+        except KalshiAPIError as error:
+            if error.status_code != 404:
+                raise
+            # Archived settled markets move to the historical endpoint.
+            # Never mistake a missing market for a final result.
+            market = self.request("GET", "/historical/markets/" + ticker)["market"]
         # Age from request START: slow responses cannot extend quote freshness.
         self._market_cache[ticker] = (now, dict(market))
         return market
@@ -222,6 +232,67 @@ class KalshiClient:
             cursors.add(cursor)
             params["cursor"] = cursor
 
+    def _orders_archive_cutoff(self):
+        """Cached archive handoff boundary; a missing cutoff is never proof."""
+        now = self.clock()
+        saved = self._archive_cutoff_cache
+        if saved and 0 <= now - saved[0] < 300:
+            return saved[1]
+        payload = self.request("GET", "/historical/cutoff")
+        try:
+            stamp = datetime.fromisoformat(payload["orders_updated_ts"].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                raise ValueError("Naive historical cutoff")
+            cutoff = stamp.timestamp()
+        except (KeyError, TypeError, AttributeError, ValueError) as error:
+            raise RuntimeError("Invalid Kalshi historical cutoff") from error
+        self._archive_cutoff_cache = (now, cutoff)
+        return cutoff
+
+    def _historical_rows(self, kind, ticker):
+        """Read only this market and primary subaccount, across all pages."""
+        if kind not in {"orders", "fills"} or not ticker:
+            raise ValueError("Invalid historical query")
+        params = {"ticker": ticker, "limit": 1000, "subaccount": 0}
+        found, cursors = [], set()
+        while True:
+            result = self.request("GET", "/historical/" + kind,
+                                  params=params, auth=True)
+            found.extend(result[kind])
+            cursor = result.get("cursor")
+            if not cursor:
+                return found
+            if cursor in cursors:
+                raise RuntimeError("Historical pagination cursor repeated")
+            cursors.add(cursor)
+            params["cursor"] = cursor
+
+    def archived_order(self, ticker, created_at, *, order_id=None, client_id=None):
+        """Recover only an exact owned order past Kalshi's archive cutoff.
+
+        This is a read-only fallback. No match NEVER authorizes an order
+        retry, a cancellation claim or an assumption of zero fills.
+        """
+        if ((order_id is None) == (client_id is None)):
+            raise ValueError("Exactly one order identity is required")
+        if (isinstance(created_at, bool) or not isinstance(created_at, (int, float))
+                or not 0 <= created_at < float("inf")):
+            return None
+        if created_at > self._orders_archive_cutoff():
+            return None
+        key, expected = ("order_id", order_id) if order_id is not None else (
+            "client_order_id", client_id)
+        matches = [row for row in self._historical_rows("orders", ticker)
+                   if row.get("ticker") == ticker and row.get(key) == expected]
+        if len(matches) > 1:
+            raise RuntimeError("Multiple archived orders matched one identity")
+        if not matches:
+            return None
+        if matches[0].get("subaccount_number", 0) not in (0, None):
+            raise RuntimeError("Historical order subaccount mismatch")
+        self._archived_tickers.add(ticker)
+        return matches[0]
+
     def btc_reference_price(self):
         response = self.request("GET", "/cfbenchmarks/values", params={"id": "BRTI"}, auth=True)
         return _latest_index_value(response)
@@ -251,7 +322,7 @@ class KalshiClient:
         return self.request("GET", "/portfolio/fills", params=params, auth=True).get("fills", [])
 
     def all_fills(self, ticker):
-        """Complete primary-account history for paired inventory reconciliation."""
+        """Read owned fills without losing trades moved to historical storage."""
         params = {"ticker": ticker, "limit": 1000, "subaccount": 0}
         found, cursors = [], set()
         while True:
@@ -259,11 +330,28 @@ class KalshiClient:
             found.extend(result["fills"])
             cursor = result.get("cursor")
             if not cursor:
-                return found
+                break
             if cursor in cursors:
                 raise RuntimeError("Fill pagination cursor repeated")
             cursors.add(cursor)
             params["cursor"] = cursor
+        if ticker in self._archived_tickers:
+            # Historical fills are needed to reconcile an archived order.
+            # Deduplicate overlap during Kalshi's archive handoff by fill_id.
+            indexed = {row.get("fill_id"): row for row in found if row.get("fill_id")}
+            for row in self._historical_rows("fills", ticker):
+                if row.get("ticker", row.get("market_ticker")) != ticker:
+                    raise RuntimeError("Historical fill identity mismatch")
+                fill_id = row.get("fill_id")
+                if not fill_id:
+                    raise RuntimeError("Historical fill missing identity")
+                if fill_id in indexed:
+                    if indexed[fill_id].get("order_id") != row.get("order_id"):
+                        raise RuntimeError("Historical fill identity mismatch")
+                    continue
+                found.append(row)
+                indexed[fill_id] = row
+        return found
 
     def orders(self, ticker=None, status="resting"):
         return self.all_orders(ticker, status)
