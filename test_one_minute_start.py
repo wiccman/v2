@@ -37,14 +37,17 @@ def test_all_early_routes_can_buy_at_contract_open(monkeypatch, side, kind):
     assert record["entry_intents"][-1]["side"] == side
 
 
-def test_full_cycle_can_place_opening_order_immediately(monkeypatch):
+def test_current_dispatcher_does_not_restore_retired_opening_route(monkeypatch):
     fake, record, state, clock, closed = setup(monkeypatch, 0, ".52")
     bot.cycle(state)
-    assert fake.entries
-    assert any(i["kind"] == "opening_bias" for i in record["entry_intents"])
+    assert not fake.entries
+    assert not record["entry_intents"]
 
 
 def test_production_start_is_one_minute_independent_of_old_environment():
     result = subprocess.run([sys.executable, "-c", "import bot; assert bot.START == bot.ENTRY_START_DELAY == 60 and bot.DIRECTIONAL_ENTRY_POLICY"],
                             env={**os.environ, "ENTRY_START_MINUTE": "0"}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

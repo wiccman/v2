@@ -117,14 +117,14 @@ def test_legacy_saved_signal_does_not_veto_new_bias(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,180)
     record['signal'].pop('build')
     before=dict(record['signal'])
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert fake.entries and record['signal']==before
 
 
 def test_saved_skip_does_not_veto_new_bias(monkeypatch):
     fake,record,state,clock,closed=cycle_setup(monkeypatch,180)
     record['signal'].update(prediction='SKIP',reason='previous_current_bias_conflict')
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert fake.entries and all(i['side'] == 'YES' for i in record['entry_intents'])
 
 
@@ -133,7 +133,7 @@ def test_missing_lookbacks_block_early_bias_entries(monkeypatch):
     record['signal']=None
     monkeypatch.setattr(fake,'markets',lambda **kw: [],raising=False)
     monkeypatch.setattr(bot,'build_signal',lambda *args: (_ for _ in ()).throw(RuntimeError('DATA UNAVAILABLE')))
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert record['signal'] is None and not fake.entries
     assert 'entry_bias' not in record
 
@@ -155,7 +155,10 @@ def test_low_confidence_tie_reaches_regular_order_gateway(monkeypatch):
     for row in history:
         row['expiration_value'] = '100000'
     monkeypatch.setattr(fake, 'markets', lambda **kw: history)
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert record['entry_bias']['base_confidence'] == 'LOW'
     assert any(i['kind'] == 'regular' for i in record['entry_intents'])
     assert bot.entry_price_allowed('LOW', D('0.45'))
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

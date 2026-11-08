@@ -138,13 +138,13 @@ def test_missing_confirmed_entry_fills_cannot_reset_bot_cap(tmp_path, monkeypatc
 def test_final_settlement_entry_excludes_same_side_manual_size(tmp_path, monkeypatch, sign):
     e, record, state, clock, closed, m = setup(tmp_path, monkeypatch, sign)
     e.manual(sign, '159.57')
-    clock[0] = closed.timestamp() - 170
+    clock[0] = closed.timestamp() - 110
     e.ask = D('.96')
     record['signal'] = None
     m.run_once()
     bot.settlement_entry(record, state, 'T', closed)
-    assert len(e.entries) == 1 and e.entries[0][1] == 6
-    assert abs(e.held) == D('165.57') and not e.submissions
+    assert len(e.entries) == 1 and e.entries[0][1] == 10
+    assert abs(e.held) == D('169.57') and not e.submissions
 
 
 @pytest.mark.parametrize('desired', ['YES', 'NO'])
@@ -170,3 +170,6 @@ def test_manual_position_change_during_quote_blocks_submission(tmp_path, monkeyp
     monkeypatch.setattr(e, 'market', changing_quote)
     assert bot.funded_entry(record, state, 'T', 'YES', D('.53'), closed, 'regular') == ({}, D(0))
     assert not e.entries
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

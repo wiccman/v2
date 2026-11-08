@@ -20,6 +20,7 @@ class CycleClient(KalshiClient):
 
     def market(self, ticker):
         return {"ticker": ticker, "floor_strike": "100000",
+                "close_time": datetime.fromtimestamp(1000000900, timezone.utc).isoformat(),
                 "yes_ask_dollars": "0.46", "yes_bid_dollars": "0.39",
                 "no_ask_dollars": "0.66", "no_bid_dollars": "0.65"}
 
@@ -70,7 +71,7 @@ def cycle_setup(monkeypatch, elapsed):
     # Keep the default YES inventory compatible with the active opening rule.
     if 0 <= elapsed < 120:
         monkeypatch.setattr(fake, "btc_reference_price", lambda: D("99990"))
-    record = {"entry_intents": [], "entry_budget_legacy": False, "entry_cancel_at": 1000000360, "buys": 0, "last_buy": 0, "orders": [],
+    record = {"close_timestamp": closed.timestamp(), "entry_intents": [], "entry_budget_legacy": False, "entry_cancel_at": 1000000360, "buys": 0, "last_buy": 0, "orders": [],
               "signal": {"build": bot.SIGNAL_BUILD, "prediction": "YES", "base_confidence": "HIGH"},
               "predictions": [{"ask": "0.70"}] * 3,
               "historical_strikes": ["100000"],
@@ -105,7 +106,7 @@ def test_all_new_buys_stop_at_five_minutes_and_exit_worker_is_sole_owner(monkeyp
 
 def test_last_second_entries_expire_at_absolute_six_minute_cutoff(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 299)
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular"))
     assert len(fake.entries) == 1  # Pending inventory occupies the initial slot.
     assert all(1 <= q <= 5 for _, q, _, _ in fake.entries)
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("15")
@@ -131,7 +132,7 @@ def test_slow_request_cannot_submit_an_entry_after_cutoff(monkeypatch):
         clock[0] = 1000000301
         return original(**kwargs)
     monkeypatch.setattr(fake, "markets", slow_history)
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, "TEST", "YES", closed, "regular", submit_before=1000000300))
     assert not fake.entries  # The legacy five-minute route deadline passed during the call.
     assert not any(i["kind"] == "historical" for i in record["entry_intents"])
 
@@ -169,3 +170,6 @@ def test_old_rejection_backoff_does_not_block_fixed_exit(monkeypatch):
                   take_profit_rejected_target="0.29", take_profit_retry_after=clock[0] + 60)
     bot.cycle(state)
     assert fake.exits == []  # Retired backoff cannot trigger overlapping exits.
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

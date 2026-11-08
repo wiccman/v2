@@ -41,10 +41,10 @@ def test_every_opening_route_uses_same_strike_gate(monkeypatch, side, spot, kind
 
 
 @pytest.mark.parametrize("side,spot,allowed", [
-    ("YES", "100024.99", False), ("YES", "100025", True),
-    ("NO", "99975.01", False), ("NO", "99975", True),
+    ("YES", "100024.99", True), ("YES", "100025", True),
+    ("NO", "99975.01", True), ("NO", "99975", True),
 ])
-def test_settlement_route_uses_same_distance(monkeypatch, side, spot, allowed):
+def test_settlement_route_uses_quotes_independently_of_strike_distance(monkeypatch, side, spot, allowed):
     enable(monkeypatch)
     fake, record, state, clock, closed = settlement_setup(monkeypatch, side=side)
     monkeypatch.setattr(fake, "btc_reference_price", lambda: D(spot))
@@ -52,7 +52,7 @@ def test_settlement_route_uses_same_distance(monkeypatch, side, spot, allowed):
     assert bool(fake.entries) == allowed
 
 
-def test_resting_settlement_buy_is_canceled_when_btc_reenters_band(monkeypatch):
+def test_resting_settlement_buy_survives_btc_reentering_retired_band(monkeypatch):
     enable(monkeypatch)
     fake, record, state, clock, closed = settlement_setup(monkeypatch, side="YES")
     fake.market("TEST")["yes_ask_dollars"] = "0.98"  # 96c limit rests.
@@ -63,4 +63,10 @@ def test_resting_settlement_buy_is_canceled_when_btc_reenters_band(monkeypatch):
     order_id = record["entry_intents"][-1]["order_id"]
     spot[0] = D("100024")
     bot.reconcile_entries(state)
-    assert order_id in fake.cancelled
+    assert order_id not in fake.cancelled
+    clock[0] = closed.timestamp()
+    bot.reconcile_entries(state)
+    assert fake.cancelled == [order_id]
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

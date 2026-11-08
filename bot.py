@@ -58,7 +58,7 @@ LATE_ENTRY_END = seconds_from_minutes(os.getenv("LATE_ENTRY_END_MINUTE", "13"))
 if not 0 <= LATE_ENTRY_START < LATE_ENTRY_END <= 900:
     raise SystemExit("Late entry window must satisfy 0 <= start < end <= 15 minutes")
 # Preserve exits and reconciliation for inventory opened under retired tiers.
-LEGACY_EXIT_PAIRS = parse_pairs("35:42,38:43,39:46")
+LEGACY_EXIT_PAIRS = parse_pairs("35:42,38:43,39:46,64:69")
 NEW_ENTRY_EXIT_PAIRS = dict(sorted({**ENTRY_EXIT_PAIRS, **OPENING_BIAS_PAIR, **LATE_ENTRY_PAIRS, **OPENING_EXTRA_PAIR}.items()))
 NEW_ENTRY_EXIT_PAIRS.pop(Decimal("0.35"), None)
 ALL_ENTRY_EXIT_PAIRS = dict(sorted({**LEGACY_EXIT_PAIRS, **NEW_ENTRY_EXIT_PAIRS}.items()))
@@ -836,6 +836,13 @@ def reconcile_entries(state, now_timestamp=None):
         if not pending and not legacy_pending and not audit:
             continue
         try:
+            if pending and "close_timestamp" not in record:
+                # A saved cancellation deadline is not a market close. Older
+                # builds used different entry windows, so adding today's
+                # SETTLEMENT_WINDOW can reopen an already blocked buy window.
+                market_close = parse_time(client.market(ticker)["close_time"])
+                record["close_timestamp"] = market_close.timestamp()
+                save_state(state)
             if "entry_cancel_at" not in record:
                 record["entry_cancel_at"] = cancellation_deadline(parse_time(client.market(ticker)["close_time"]))
                 save_state(state)
@@ -914,7 +921,7 @@ def reconcile_entries(state, now_timestamp=None):
                 i.get("entry_execution_version") != ENTRY_EXECUTION_VERSION
                 or not tracked_entry_price_allowed(i)
                 or blocked_buy_window(i.get("price", "0"),
-                    record.get("close_timestamp", record["entry_cancel_at"] + SETTLEMENT_WINDOW),
+                    record["close_timestamp"],
                     max(now_timestamp, time.time()))
                 or now_timestamp >= i.get("cancel_at", record["entry_cancel_at"])
                 or record.get("entry_budget_legacy")

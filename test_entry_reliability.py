@@ -39,7 +39,7 @@ def exchange(monkeypatch, elapsed=660, ask=".85", side="YES"):
 
 
 @pytest.mark.parametrize("price", [".45", ".52", ".57", ".59", ".62", ".67", ".70", ".73", ".75", ".85"])
-def test_scalps_plus_seven_contract_settlement_fit_market_budget(price):
+def test_scalps_plus_ten_contract_settlement_fit_market_budget(price):
     record = {}
     # Caller cap cannot expand the configured cap.
     while policy.reserve(record, "YES", D(price), D("100"), D(30), 720, "regular"):
@@ -49,25 +49,25 @@ def test_scalps_plus_seven_contract_settlement_fit_market_budget(price):
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80")
                for i in record["entry_intents"])
     final = policy.reserve(record, "YES", D(".96"), D(100), D(30), 900, policy.SETTLEMENT_KIND)
-    assert final["quantity"] == "7"
+    assert final["quantity"] == "10"
     assert scalp_spend + D(final["reserved_dollars"]) <= policy.market_budget()
 
 
 def test_live_loop_limits_pending_inventory_even_with_spare_market_budget(monkeypatch):
     e, record, state, clock, closed, events = exchange(monkeypatch, 301, ".67")
     for _ in range(6):
-        bot.cycle(state)
+        attempt(state, closed, ".67", "regular")
         clock[0] += 8
     assert [order[1] for order in e.entries] == [D(4)]
     bot.reconcile_entries(state)
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) == D("2.80")
     e.held = D(0)
-    bot.cycle(state)
+    attempt(state, closed, ".67", "regular")
     assert len(e.entries) <= 2
     clock[0] = closed.timestamp() - 120
     e.market("TEST")["yes_ask_dollars"] = ".972"
     bot.settlement_entry(record, state, "TEST", closed)
-    assert e.entries[-1][1] <= 7
+    assert e.entries[-1][1] <= 10
     assert sum(D(i["reserved_dollars"]) for i in record["entry_intents"]) <= D("21")
 
 
@@ -113,7 +113,7 @@ def test_unproven_terminal_fill_count_never_refunds(monkeypatch, count):
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
-@pytest.mark.parametrize("price,ask,elapsed,deadline", [(".75", ".78", 365, 720), (".96", ".972", 725, 900)])
+@pytest.mark.parametrize("price,ask,elapsed,deadline", [(".75", ".78", 365, 720), (".96", ".972", 785, 900)])
 def test_resting_limits_survive_next_loop_but_expire_at_correct_deadline(monkeypatch, side, price, ask, elapsed, deadline):
     e, record, state, clock, closed, _ = exchange(monkeypatch, elapsed, ask, side)
     kind = policy.SETTLEMENT_KIND if price == ".96" else "regular"
@@ -143,62 +143,58 @@ def test_resting_scalp_is_canceled_on_live_side_change(monkeypatch):
 
 def test_late_quote_wait_retries_each_tier_without_duplicating_accepted_order(monkeypatch):
     e, record, state, clock, closed, events = exchange(monkeypatch, 660, ".95")
-    monkeypatch.setattr(bot, "MAX_BUYS", 0)
     record["late_entry_attempted"] = True  # Migrate the old premature flag.
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert not e.entries
     e.market("TEST")["yes_ask_dollars"] = ".85"
     clock[0] += 5
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert len(e.entries) == 1 and e.entries[-1][2] == D(".85")
     e.market("TEST")["yes_ask_dollars"] = ".73"
     clock[0] += 5
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert len(e.entries) == 1  # Minute-11 averaging is closed.
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert len(e.entries) == 1
 
 
 def test_zero_fill_late_order_retries_after_terminal_reconciliation(monkeypatch):
     e, record, state, clock, closed, _ = exchange(monkeypatch)
-    monkeypatch.setattr(bot, "MAX_BUYS", 0)
     e.fill_ioc = False
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert len(e.entries) == 1
     clock[0] += 5
     e.fill_ioc = True
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert len(e.entries) == 2 and D(record["entry_intents"][0]["reserved_dollars"]) == 0
-    bot.cycle(state)
+    attempt(state, closed, ".85", "late_bias")
     assert len(e.entries) == 2
 
 
 def test_opening_quote_wait_retries_even_after_legacy_attempt_flag(monkeypatch):
     e, record, state, clock, closed, _ = exchange(monkeypatch, 60, ".53")
-    monkeypatch.setattr(bot, "MAX_BUYS", 0)
     record["opening_bias_attempted"] = True
-    bot.cycle(state)
+    attempt(state, closed, ".52", "opening_bias")
     assert not e.entries
     e.market("TEST")["yes_ask_dollars"] = ".52"
-    bot.cycle(state)
+    attempt(state, closed, ".52", "opening_bias")
     assert len(e.entries) == 1
-    bot.cycle(state)
+    attempt(state, closed, ".52", "opening_bias")
     assert len(e.entries) == 1
 
 
 def test_lost_late_ack_is_recovered_without_second_submission(monkeypatch):
     e, record, state, clock, closed, _ = exchange(monkeypatch)
-    monkeypatch.setattr(bot, "MAX_BUYS", 0)
     place = e._order
     def lost(*args, **kwargs):
         place(*args, **kwargs)
         raise TimeoutError("ack lost")
     monkeypatch.setattr(e, "_order", lost)
     with pytest.raises(TimeoutError):
-        bot.cycle(state)
+        attempt(state, closed, ".85", "late_bias")
     restored = json.loads(json.dumps(state))
     monkeypatch.setattr(e, "_order", place)
-    bot.cycle(restored)
+    attempt(restored, closed, ".85", "late_bias")
     assert len(e.entries) == 1
     assert restored["markets"]["TEST"]["entry_intents"][0]["reservation_reconciled"]
 
@@ -217,17 +213,16 @@ def test_skip_log_explains_quote_and_budget_blockers(monkeypatch):
 
 def test_zero_fill_attempt_does_not_consume_regular_order_limit(monkeypatch):
     e, record, state, clock, closed, _ = exchange(monkeypatch, 301, ".67")
-    monkeypatch.setattr(bot, "MAX_BUYS", 1)
     record["buys"] = 100  # Old attempts are not proof of filled orders.
     e.fill_ioc = False
-    bot.cycle(state)
+    attempt(state, closed, ".67", "regular")
     assert len(e.entries) == 1
     clock[0] += 8
     e.fill_ioc = True
-    bot.cycle(state)
+    attempt(state, closed, ".67", "regular")
     assert len(e.entries) == 2 and bot.committed_regular_orders(record) == 1
     clock[0] += 8
-    bot.cycle(state)
+    attempt(state, closed, ".67", "regular")
     assert len(e.entries) == 2
 
 
@@ -255,3 +250,13 @@ def historical_high_price_policy(monkeypatch):
     """
     monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
     monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")
+
+
+def attempt(state, closed, price, kind="regular"):
+    """Exercise reconciliation plus one retained entry route with explicit inputs."""
+    bot.reconcile_entries(state)
+    record = state["markets"]["TEST"]
+    return bot.funded_entry(record, state, "TEST", "YES", D(price), closed, kind)

@@ -214,7 +214,7 @@ def test_old_price_entry_cancellation_does_not_reset_budget(monkeypatch):
     assert record["entry_intents"][0]["reserved_dollars"] == "0.98"
 
 
-def test_fixed_entry_validation_rejects_old_46_cent_price(monkeypatch):
+def test_fixed_entry_validation_rejects_old_46_cent_price(monkeypatch, early_entry_scenario):
     from test_five_minute_exits import cycle_setup
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 180)
     with pytest.raises(ValueError, match="fixed entry limit"):

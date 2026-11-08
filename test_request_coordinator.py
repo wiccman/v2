@@ -319,3 +319,6 @@ def test_exit_local_deferral_removes_only_unsent_intent_and_retries_later(tmp_pa
     clock[0] += 1
     svc.run_once()
     assert len(exchange.submissions) == 1
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

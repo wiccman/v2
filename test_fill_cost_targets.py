@@ -6,6 +6,7 @@ from decimal import Decimal as D
 import pytest
 
 import bot
+from entry_policy import SETTLEMENT_KIND
 from price_pairs import fill_cost_inventory
 from take_profit import TakeProfitMonitor
 from test_price_pairs import PairExchange
@@ -16,6 +17,8 @@ def buy(exchange, limit, cost, quantity="5", sign=1, target=None):
     oid = exchange.buy("0.39", quantity, sign, actual_price=str(yes_price))
     exchange.intents[-1].update(price=limit,
         exit_target=target or str(bot.ALL_ENTRY_EXIT_PAIRS[D(limit)]))
+    if D(limit) >= D('.96'):
+        exchange.intents[-1]['kind'] = SETTLEMENT_KIND
     return oid
 
 

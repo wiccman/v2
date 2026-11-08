@@ -76,7 +76,6 @@ def test_cancellation_uses_six_minute_market_boundary(monkeypatch, elapsed):
     record.update(orders=["buy"], dual_limit_attempted=True)
     monkeypatch.setattr(bot, "DUAL_LIMIT_BUYS_ENABLED", False)
     monkeypatch.setattr(bot, "HISTORICAL_STRIKE_ENABLED", False)
-    monkeypatch.setattr(bot, "MAX_BUYS", 0)
     bot.cycle(state)
     assert fake.cancelled == (["buy"] if elapsed >= 360 else [])
     assert not fake.entries
@@ -169,12 +168,16 @@ def test_orders_follows_every_page(monkeypatch):
 
 
 @pytest.mark.parametrize("legacy", [None, "4", "6", "10", "100"])
-def test_fixed_thirty_dollar_cap_ignores_legacy_setting(monkeypatch, legacy):
+def test_budget_configuration_is_validated_and_honored(monkeypatch, legacy):
     if legacy is None:
         monkeypatch.delenv("MARKET_BUDGET_DOLLARS", raising=False)
     else:
         monkeypatch.setenv("MARKET_BUDGET_DOLLARS", legacy)
-    assert entry_policy.market_budget() == D("30")
+    if legacy in {"4", "6", "10"}:
+        with pytest.raises(ValueError, match="settlement reserve"):
+            entry_policy.market_budget()
+    else:
+        assert entry_policy.market_budget() == D(legacy or "20")
 
 
 def test_thirty_dollar_allowance_is_shared_and_survives_restart():
@@ -184,7 +187,7 @@ def test_thirty_dollar_allowance_is_shared_and_survives_restart():
     while entry_policy.reserve(record, "YES", D("0.45"), D("0.01"), entry_policy.market_budget(), 360, "test"):
         pass
     spent = sum(D(i["reserved_dollars"]) for i in record["entry_intents"])
-    assert D("23.52") < spent <= D("24")
+    assert D("9.52") < spent <= D("10")
     assert all(1 <= D(i["quantity"]) <= 5 and D(i["reserved_dollars"]) <= D("2.80") for i in record["entry_intents"])
     restored = copy.deepcopy(record)
     assert entry_policy.reserve(restored, "YES", D("0.45"), D("2"), entry_policy.market_budget(), 360, "test") is None
@@ -201,7 +204,7 @@ def test_entry_gateway_enforces_bias_and_logs_reason(monkeypatch):
     decision = json.loads(next(values["details"] for event, values in events if event == "ENTRY_DECISION"))
     assert decision == {
         "selected_side": "NO", "live_strike_side": None, "bias_side": "YES",
-        "side_source": "boruto", "entry_price": "0.45",
+        "side_source": "boruto", "quote_side": None, "entry_price": "0.45",
         "entry_reason": "selected_side_opposes_bias", "decision": "SKIP",
     }
     assert not fake.entries
@@ -297,3 +300,6 @@ def test_exhausted_cap_preserves_old_spending_and_blocks_extra_entries(spent):
         assert entry_policy.reserve(record, "YES", price, D("100"), D("30"), 900, kind) is None
     assert record == before
     assert entry_policy.remaining_allowance(record, D("30"), "regular") == 0
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

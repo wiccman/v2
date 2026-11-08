@@ -64,3 +64,6 @@ def test_lower_configured_limit_blocked(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 60)
     assert bot.funded_entry(record, state, 'TEST', 'YES', D('.39'), closed, 'regular') == ({}, 0)
     assert not fake.entries
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

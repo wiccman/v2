@@ -57,9 +57,9 @@ class SwitchExchange(PairExchange):
 
 
 def setup_switch(tmp_path, monkeypatch, desired='YES', liquidity='100', manual=False):
-    _, record, state, clock, closed = cycle_setup(monkeypatch, 720)
-    monkeypatch.setattr(bot, 'END', 720)
-    monkeypatch.setattr(bot, 'CANCEL_AFTER', 720)
+    _, record, state, clock, closed = cycle_setup(monkeypatch, 780)
+    monkeypatch.setattr(bot, 'END', 780)
+    monkeypatch.setattr(bot, 'CANCEL_AFTER', 780)
     exchange = SwitchExchange(desired, liquidity)
     old_sign = -1 if desired == 'YES' else 1
     if manual:
@@ -71,7 +71,7 @@ def setup_switch(tmp_path, monkeypatch, desired='YES', liquidity='100', manual=F
     record.update(entry_intents=exchange.intents, orders=[], historical_strike_orders=[],
                   trade_side='NO' if desired == 'YES' else 'YES', close_timestamp=closed.timestamp(),
                   signal={'prediction': 'NO' if desired == 'YES' else 'YES', 'build': bot.SIGNAL_BUILD},
-                  entry_cancel_at=closed.timestamp() - 180)
+                  entry_cancel_at=closed.timestamp() - 120)
     state['markets'] = {'T': record}
     events = []
     monitor = TakeProfitMonitor(exchange, lambda: copy.deepcopy(state), tmp_path / 'switch.json',
@@ -107,14 +107,16 @@ def test_loss_close_is_confirmed_before_fixed_96_cent_buy(tmp_path, monkeypatch,
     monitor.run_once()
     assert monitor.settlement_ready('T', desired)
     bot.settlement_entry(record, state, 'T', closed)
-    assert len(e.buys) == 1 and D(e.buys[0]['count']) == 6
+    assert len(e.buys) == 1 and D(e.buys[0]['count']) == 10
     assert e.buys[0]['price'] == ('0.9600' if desired == 'YES' else '0.0400')
     assert record['trade_side'] == desired
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == reserved + D('5.94')
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == reserved + D('9.90')
     assert any(event == 'SETTLEMENT_CLOSE_FILL' for event, _ in events)
     monitor.run_once()
-    assert monitor.healthy and abs(e.held) == 6
-    assert len(e.submissions) == 1  # Settlement inventory is never scalped.
+    assert monitor.healthy and abs(e.held) == 10
+    assert len(e.submissions) == 2  # The new lot has its own 98c TP.
+    assert e.submissions[-1]['count'] == '10'
+    assert e.submissions[-1]['price'] == ('0.9800' if desired == 'YES' else '0.0200')
     bot.settlement_entry(record, state, 'T', closed)
     assert len(e.buys) == 1
 
@@ -240,7 +242,7 @@ def test_market_close_prevents_both_transition_orders(tmp_path, monkeypatch):
 
 def test_exhausted_allowance_does_not_liquidate_for_unfundable_entry(tmp_path, monkeypatch):
     e, record, state, clock, closed, monitor, events = setup_switch(tmp_path, monkeypatch)
-    record['entry_intents'][0]['reserved_dollars'] = str(bot.MARKET_BUDGET - bot.SETTLEMENT_BUDGET + 1)
+    record['entry_intents'][0]['reserved_dollars'] = str(bot.MARKET_BUDGET - D('9.90') + D('.01'))
     bot.settlement_entry(record, state, 'T', closed)
     assert 'settlement_switch' not in record and not e.buys and not e.submissions
 
@@ -295,7 +297,7 @@ def test_completed_switch_does_not_authorize_new_loss_closes_after_manual_trade(
     monitor.run_once()
     monitor.run_once()
     bot.settlement_entry(record, state, 'T', closed)
-    e.manual(-1, D(8))  # Later manual trade reverses the new six-contract holding.
+    e.manual(-1, D(12))  # Later manual trade reverses the new ten-contract holding.
     monitor.run_once()
     assert len(e.submissions) == 1 and len(e.buys) == 1
     assert not monitor.settlement_ready('T', 'YES')

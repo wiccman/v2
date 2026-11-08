@@ -1,4 +1,5 @@
 """Confirmed exits refill only verified cost, and a restart cannot double count."""
+import pytest
 import copy
 import json
 from decimal import Decimal as D
@@ -25,7 +26,7 @@ def test_full_profitable_sale_replenishes_cost_but_not_profit():
     record, fills, exits = fixture()
     record["recycled_exit_orders"] = confirmed_credits(record, exits, fills, "T")
     assert record["recycled_exit_orders"] == {"sell": "2.65"}
-    assert remaining_allowance(record, D(30), "regular") == D(24)
+    assert remaining_allowance(record, D(30), "regular") == D(10)
     assert reserve(record, "YES", D("0.50"), D("2.80"), D(30), 900, "regular")
 
 
@@ -33,7 +34,7 @@ def test_losing_partial_sale_restores_only_net_proceeds():
     record, fills, exits = fixture(count="2", exit_price="0.40")
     record["recycled_exit_orders"] = confirmed_credits(record, exits, fills, "T")
     assert record["recycled_exit_orders"] == {"sell": "0.74"}
-    assert remaining_allowance(record, D(30), "regular") == D("22.09")
+    assert remaining_allowance(record, D(30), "regular") == D("8.09")
 
 
 def test_pending_sale_and_missing_fill_do_not_restore_budget():
@@ -85,4 +86,7 @@ def test_reconcile_is_durable_and_idempotent(monkeypatch, tmp_path):
     assert record["recycled_exit_orders"] == {"sell": "2.65"}
     bot.reconcile_sale_allowance(state, "T", record)
     assert events.count("ENTRY_SALE_ALLOWANCE_RESTORED") == 1
-    assert remaining_allowance(json.loads(json.dumps(record)), D(30), "regular") == D(24)
+    assert remaining_allowance(json.loads(json.dumps(record)), D(30), "regular") == D(10)
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

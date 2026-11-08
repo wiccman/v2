@@ -122,14 +122,14 @@ def test_slow_cash_lookup_cannot_buy_after_cutoff(monkeypatch):
 def test_cash_wait_does_not_consume_settlement_one_attempt(monkeypatch):
     from test_settlement_entry import setup
     fake, record, state, clock, closed = setup(monkeypatch)
-    cash = ['5.93']
+    cash = ['9.89']
     monkeypatch.setattr(fake, 'market_cash', lambda ticker: {'exchange_index': 2, 'cash_dollars': cash[0]})
     bot.settlement_entry(record, state, 'TEST', closed)
     assert not fake.entries and not record['entry_intents']
-    cash[0] = '5.94'
+    cash[0] = '9.90'
     clock[0] += 30
     bot.settlement_entry(record, state, 'TEST', closed)
-    assert len(fake.entries) == 1 and fake.entries[0][1] == 6
+    assert len(fake.entries) == 1 and fake.entries[0][1] == 10
 
 
 @pytest.mark.parametrize('status', ['executed', 'canceled', 'expired'])
@@ -169,3 +169,6 @@ def test_failed_status_read_does_not_prevent_cancel(monkeypatch):
     monkeypatch.setattr(fake, 'order', offline)
     assert bot.cancel_confirmed('resting', 'TEST')
     assert fake.cancelled == ['resting']
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

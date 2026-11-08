@@ -121,3 +121,6 @@ def test_early_entry_ceiling_does_not_block_existing_70_cent_exits(tmp_path, sig
     assert exchange.submissions[0]['reduce_only'] is True
     assert exchange.submissions[0]['price'] == ('0.8000' if sign == 1 else '0.2000')
 
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

@@ -349,3 +349,6 @@ def test_retired_entry_is_rejected_before_submission(monkeypatch):
     e, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     assert bot.funded_entry(record, state, 'TEST', 'YES', D('0.32'), closed, 'regular') == ({}, 0)
     assert not e.entries and not record['entry_intents']
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

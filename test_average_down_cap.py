@@ -1,4 +1,5 @@
 """Filled-position and pending-order limits for 15-minute scalp entries."""
+import pytest
 from decimal import Decimal as D
 
 import bot
@@ -33,7 +34,7 @@ def test_pending_orders_count_against_initial_and_open_contract_limit(monkeypatc
     # Unknown acknowledgement may still fill all five contracts.
     assert bot.funded_entry(record, state, "TEST", "YES", D("0.53"), closed, "regular") == ({}, D(0))
     record["entry_intents"][-1]["entry_closed"] = True
-    fake.held = D(7)
+    fake.held = D(9)
     assert bot.funded_entry(record, state, "TEST", "YES", D("0.53"), closed, "regular")[1] == 1
 
 
@@ -49,10 +50,13 @@ def test_averaging_closes_at_minute_three_and_legacy_position_waits_until_flat(m
     assert bot.funded_entry(record, state, "TEST", "YES", D("0.53"), closed, "regular") == ({}, D(0))
 
 
-def test_settlement_order_respects_eight_contract_position_cap():
+def test_settlement_order_respects_remaining_position_capacity():
     record = {"entry_intents": [], "entry_budget_legacy": False}
     assert entry_policy.entry_quantity(D("0.96"), entry_policy.SETTLEMENT_KIND,
                                        record, max_quantity=D(3)) == 3
     intent = entry_policy.reserve(record, "YES", D("0.96"), D(6), D(21), 900,
                                   entry_policy.SETTLEMENT_KIND, max_quantity=D(3))
     assert intent["quantity"] == "3"
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

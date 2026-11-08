@@ -202,3 +202,6 @@ def historical_high_price_policy(monkeypatch):
     """
     monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
     monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

@@ -27,8 +27,8 @@ def test_exact_boundaries(price, elapsed, blocked):
 def test_restart_cancels_blocked_pending_buy_but_preserves_settlement(monkeypatch, include_close):
     fake, record, state, clock, closed = setup(monkeypatch, 720, '.96')
     record['entry_cancel_at'] = closed.timestamp()-180
-    if include_close:
-        record['close_timestamp'] = closed.timestamp()
+    if not include_close:
+        record.pop('close_timestamp')
     record['entry_intents'] = [dict(order_id=oid, price=price, side='YES', kind=kind,
         entry_execution_version=bot.ENTRY_EXECUTION_VERSION, cancel_at=closed.timestamp(),
         quantity='3', reserved_dollars='3', resting_entry=True,
@@ -61,3 +61,6 @@ def test_slow_call_cannot_cross_block_start(monkeypatch):
     monkeypatch.setattr(fake, 'market_cash', slow_cash)
     assert bot.funded_entry(record, state, 'TEST', 'YES', D('.75'), closed, 'regular') == ({}, 0)
     assert not fake.entries and not record['entry_intents']
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")
