@@ -40,7 +40,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from kalshi import KalshiClient
+from kalshi import KalshiClient, KalshiAPIError
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
@@ -359,7 +359,16 @@ def find_order(client, ticker, intent):
     if not isinstance(expected_client_id, str) or not expected_client_id:
         raise RuntimeError("Missing saved order ownership identity")
     if intent.get("order_id"):
-        order = client.order(intent["order_id"], ticker)
+        try:
+            order = client.order(intent["order_id"], ticker)
+        except KalshiAPIError as error:
+            if error.status_code != 404:
+                raise
+            # The direct read and exact-ID history fallback have not caught up.
+            # Retain the durable intent and wait; never infer a zero fill.
+            event("M9_ORDER_VISIBILITY_PENDING", ticker=ticker,
+                  http_status=404, order_id=intent["order_id"])
+            return None
         if (order.get("ticker") != ticker
                 or order.get("order_id") != intent["order_id"]
                 or order.get("client_order_id") != expected_client_id):
