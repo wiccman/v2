@@ -568,7 +568,7 @@ def test_one_global_entry_in_five_single_coin_markets(tmp_path, monkeypatch):
     assert len(bot.posted) == 1
     assert window_entry_count(j, START * 1000) == 1
     assert list(j.data["windows"]) == [bot.posted[0][0]]
-    assert j.data["windows"][bot.posted[0][0]]["quantity"] == "25"
+    assert j.data["windows"][bot.posted[0][0]]["quantity"] == "8"  # one-third starting allocation
     # Even across a restart, the pending first attempt blocks other coin entries.
     from single_coin_minute9 import Journal as Reopened
     reopened = Reopened(j.path)
