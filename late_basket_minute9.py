@@ -4,14 +4,15 @@ At minutes 12..15, use the same fresh Coinbase 15m ranking as the ordinary
 minute-nine policy. Consider only the original top two ranks; exclude BTC
 without promoting third place, and honor the existing SOL Central-time veto.
 
-Buy the aligned YES/NO single-coin contract only at a 96..99 cent ask, with
+Buy the aligned YES/NO single-coin contract with an 89..97 cent limit, with
 a *combined* additional allocation of half the current active trade budget.
 Zone 1 and Zone 2 have independent journal keys. An explicitly verified
 Zone 1 no-fill or fully closed position does not suppress a Zone 2 opportunity.
 No duplicate exposure, no outside inventory adoption, no cash transfers.
 Existing entry/exit ownership, verified fills and 21c stop apply normally.
-At >=96c the usual +5c take-profit cannot be quoted, so these trades hold
-for settlement unless the existing stop executes. Extra late results are
+Place a resting 98c take-profit after the exchange confirms an entry fill,
+while preserving the existing 21c-below-entry stop. Never buy at or above
+the 98c exit target: that would guarantee no gross profit on the sale. Extra late results are
 included in realized P&L but do not change the *regular* sizing win streak.
 """
 from __future__ import annotations
@@ -27,8 +28,9 @@ import cash_checked_minute9 as cash
 
 LATE_START_SECONDS = 720
 LATE_END_SECONDS = 900
-LATE_MIN_PRICE = D(".96")
-LATE_MAX_PRICE = D(".99")
+LATE_MIN_PRICE = D(".89")
+LATE_MAX_PRICE = D(".97")
+LATE_TAKE_PROFIT = D(".98")
 MAX_LATE_COINS = 2
 LATE_KIND = "late_basket_rank"
 LATE_ZONE = core.ZONE2
@@ -223,6 +225,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
     total_budget = core.trade_budget(journal.data["streak"], base_budget) / D(2)
     spent = half_budget_reservation(journal, start)
     core.event("M9_LATE_BASKET_RANK", entry_zone=LATE_ZONE,
+               price_range_cents="89-97", take_profit_cents=98,
                window_start_ms=start * 1000,
                original_top_two=[{"rank": i, "coin": row.series,
                                   "return_pct": str(row.return_pct)}
@@ -294,7 +297,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
                   "created_at": now_submit}
         record = {
             "ticker": ticker, "series": row.series, "side": fresh["side"],
-            "entry_zone": LATE_ZONE,
+            "entry_zone": LATE_ZONE, "take_profit_target": str(LATE_TAKE_PROFIT),
             "window_start_ms": start * 1000, "entry_kind": LATE_KIND,
             "basket_rank_at_entry": rank, "basket_return_pct": str(row.return_pct),
             "quantity": str(quantity), "allocated_dollars": str(quantity * unit),
@@ -314,7 +317,7 @@ def run_late_pass(client, journal, series_list, base_budget, max_contracts,
         validator.expected_client_id = intent["client_id"]
         protected_client = cash.CashCheckedClient(validator, journal, state)
         core.event("M9_LATE_BUY_SUBMIT", ticker=ticker, entry_zone=LATE_ZONE,
-                   series=row.series,
+                   take_profit_cents=98, series=row.series,
                    rank=rank, side=fresh["side"], price=fresh["limit"],
                    quantity=quantity, total_late_budget_dollars=str(total_budget),
                    reserved_after_dollars=str(half_budget_reservation(journal, start)))
