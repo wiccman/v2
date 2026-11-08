@@ -21,7 +21,7 @@ An absolute executable bid at M9_STOP_BID_CENTS (default 45c) triggers a price-p
 regardless of entry price. The actual exit fill can be below 45c on a gap;
 IOC exits require the process to run.
 After three confirmed profitable trades, the per-entry budget drops to
-one third of the normal allocation until the next confirmed losing trade; then the consecutive-win count resets.
+the full normal allocation after three confirmed wins until a losing trade; before three wins, the budget is one third of normal.
 """
 from __future__ import annotations
 
@@ -167,11 +167,12 @@ def entry_min_price(streak):
 
 
 def trade_budget(streak, base_budget):
-    """One third of base dollars, not one third of contracts; no compounding."""
+    """One third of normal until three verified wins, then full; no compounding."""
     amount = D(str(base_budget))
     if not amount.is_finite() or amount <= 0:
         raise ValueError("Trade budget must be positive")
-    return amount / D(3) if streak["reduced_budget"] else amount
+    # Keep the persisted legacy milestone flag; invert only dollar allocation.
+    return amount if streak["reduced_budget"] else amount / D(3)
 
 
 def budgeted_quantity(budget, ask, cap=100, *, min_price=None):
