@@ -1,4 +1,4 @@
-"""Minute 8 through close; top two non-BTC performers from the top three.
+"""Minute 9 through close; top two non-BTC performers from the top three.
 
 Reuse the deployed entry, exit, cash, ownership and streak implementations.
 One filled or potentially-filled market per period remains the limit. A second
@@ -14,8 +14,8 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 
-POLICY = "minute8-top2-skip-btc-v2"
-START_SECONDS = 480
+POLICY = "minute9-top2-skip-btc-v3"
+START_SECONDS = 540
 END_SECONDS = 900
 TOP_COUNT = 2
 BTC_SERIES = "KXBTC15M"

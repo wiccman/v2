@@ -314,11 +314,6 @@ def test_missing_fee_does_not_count_unverified_result(tmp_path):
     assert "outcome" not in r
 
 
-@pytest.mark.parametrize("entry,target", [
-    (".59", ".64"), (".72", ".77"), (".725", ".78"),
-    (".80", ".85"), (".91", ".96"),
-])
-
 @pytest.mark.parametrize("raw,expected", [
     ("30", D(".30")), ("1", D(".01")), ("99", D(".99")), ("45", D(".45")),
 ])
@@ -346,12 +341,16 @@ def test_configurable_absolute_thirty_cent_stop_and_journal(tmp_path, monkeypatc
     journal.data["windows"][client.ticker] = record
     journal.save()
     mod.reconcile_exit(client, journal, record, START + 574)
-    assert record["stop_armed"]["threshold"] == "0.30"
+    assert D(record["stop_armed"]["threshold"]) == D("0.30")
     assert record["sells"][0]["purpose"] == "stop_loss"
     assert client.submissions[0]["limit"] == D(".30")
-    assert Journal(journal.path).data["windows"][client.ticker]["stop_armed"]["threshold"] == "0.30"
+    assert D(Journal(journal.path).data["windows"][client.ticker]["stop_armed"]["threshold"]) == D("0.30")
 
 
+@pytest.mark.parametrize("entry,target", [
+    (".59", ".64"), (".72", ".77"), (".725", ".78"),
+    (".80", ".85"), (".91", ".96"),
+])
 def test_fixed_forty_five_cent_stop_is_independent_of_actual_fill(entry, target):
     cost, trigger, tp = D(entry), D(".45"), D(target)
     assert exit_decision(cost, trigger + D(".0001")) == (None, None)

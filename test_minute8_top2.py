@@ -39,7 +39,7 @@ def run(c, j, now, feed, live=True):
 
 
 @pytest.mark.parametrize('elapsed,expected', [
-    (479.999, 0), (480, 1), (539.999, 1), (540, 1), (600, 1),
+    (479.999, 0), (480, 0), (539.999, 0), (540, 1), (600, 1),
     (660, 1), (720, 1), (780, 1), (840, 1), (899.999, 1), (900, 0)])
 def test_entry_boundaries(setup, elapsed, expected):
     j, now, _, feed = setup
