@@ -17,7 +17,7 @@ the unset default of 600 preserves the archived minute-nine-only mode.
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
-A fixed 45c executable bid triggers a price-protected reduce-only IOC,
+An absolute executable bid at M9_STOP_BID_CENTS (default 45c) triggers a price-protected reduce-only IOC,
 regardless of entry price. The actual exit fill can be below 45c on a gap;
 IOC exits require the process to run.
 After three confirmed profitable trades, the per-entry budget drops to
@@ -44,9 +44,20 @@ from kalshi import KalshiClient
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = (
-    D(".69"), D(".60"), D(".91"), D(".05"), D(".45")
+MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE, PROFIT = (
+    D(".69"), D(".60"), D(".91"), D(".05")
 )
+
+
+def stop_bid_from_cents(value):
+    """Strict integer-cent stop threshold, independent of entry price."""
+    if (not isinstance(value, str) or not value.isascii() or not value.isdecimal()
+            or not 1 <= int(value) <= 99):
+        raise ValueError("M9_STOP_BID_CENTS must be an integer from 1 to 99")
+    return D(value) / D("100")
+
+
+STOP_BID = stop_bid_from_cents(os.getenv("M9_STOP_BID_CENTS", "45"))
 RELAX_FLOOR_AFTER_WINS = 10
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
@@ -107,7 +118,7 @@ def plan_single_coin(market, now, series, *, min_price=None):
 def exit_decision(cost, bid, *, stop_armed=False):
     """Return (exit kind, protected IOC limit) from executable bid and fill cost.
 
-    The fixed 45-cent bid is the trigger, independent of the actual entry cost:
+    The configured absolute stop bid is the trigger, independent of entry cost:
     on a gap the exit limit is the currently quoted bid, not the stop threshold.
     A latched stop keeps priority over TP through later price recovery/restarts.
     """
