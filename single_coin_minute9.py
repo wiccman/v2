@@ -412,9 +412,6 @@ def entry_market_occupied(client, ticker):
 
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
-    market = client.market(ticker)
-    if parse_time(market["close_time"]) <= now or market.get("status") not in {"active", "open"}:
-        return
     buy = find_order(client, ticker, record["buy"])
     if buy is None:
         event("M9_BUY_ACK_UNRESOLVED", ticker=ticker)
@@ -471,6 +468,11 @@ def reconcile_exit(client, journal, record, now):
                  {item.get("order_id") for item in record["sells"]}]
     if competing:
         event("M9_EXIT_OTHER_ORDER_WAIT", ticker=ticker)
+        return
+    # Price the exit only after the potentially slow ownership/history reads.
+    # Repeated zero-fill exits grow that history; an earlier quote can be stale.
+    market = client.market(ticker)
+    if parse_time(market["close_time"]) <= now or market.get("status") not in {"active", "open"}:
         return
     cost = sum((D(str(f.get("count_fp", f.get("count")))) * _outcome_cost(f, sign)
                 for f in buy_rows), D(0)) / bought
