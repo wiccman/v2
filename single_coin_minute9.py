@@ -405,6 +405,24 @@ def find_order(client, ticker, intent):
     return None
 
 
+def reconciliation_error_code(error):
+    # Only static known messages are exposed; never log arbitrary API bodies.
+    known = {
+        "Unsupported or invalid fill quantity": "invalid_fill_quantity",
+        "Order ownership mismatch": "order_ownership_mismatch",
+        "Order lookup identity mismatch": "order_lookup_identity_mismatch",
+        "Buy quantity exceeds saved authorization": "buy_above_authorization",
+        "Bought more contracts than authorized": "buy_above_authorization",
+        "Exit quantity exceeds verified purchases": "sell_above_purchases",
+        "Exit fill exceeds requested quantity": "sell_above_authorization",
+        "Ambiguous primary-account positions": "ambiguous_positions",
+        "Multiple orders matched one client id": "ambiguous_client_id",
+        "Order pagination cursor repeated": "order_cursor_repeated",
+        "Fill pagination cursor repeated": "fill_cursor_repeated",
+    }
+    return known.get(str(error), "unclassified") if type(error) is RuntimeError else "unclassified"
+
+
 def filled_quantity(fills, order_id):
     rows = [f for f in fills if f.get("order_id") == order_id]
     qty = sum((D(str(row.get("count_fp", row.get("count", "0")))) for row in rows), D(0))
@@ -662,6 +680,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             except Exception as error:
                 event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=ticker,
                       error_type=type(error).__name__,
+                      error_code=reconciliation_error_code(error),
                       http_status=getattr(error, "status_code", None))
         apply_new_outcomes(journal)
     # Queue order is unchanged (M9_SERIES). Refresh each candidate before use;
@@ -842,3 +861,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
