@@ -80,7 +80,7 @@ def release_proven_no_order(record):
             or proof.get("window_start_ms") != record.get("window_start_ms")):
         return False
     if proof.get("kind") == "not_dispatched":
-        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed"}
+        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed", "entry_direction_conflict", "entry_direction_unavailable"}
     return (proof.get("kind") == "exchange_rejected"
             and proof.get("http_status") == 400
             and proof.get("api_code") == "insufficient_balance")
@@ -189,6 +189,21 @@ class CashCheckedClient:
             core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_total_cash",
                        **record["cash_preflight"])
             raise EntryNotSubmitted("insufficient_market_cash")
+        # Check the fresh selected coin's direction after cash/ownership reads,
+        # immediately before dispatch. A veto is durable proof of no order.
+        direction_check = getattr(self.client, "entry_direction_check", None)
+        if callable(direction_check):
+            check = direction_check(ticker, prediction, record["window_start_ms"])
+            record["entry_direction_check"] = check
+            core.event("M9_ENTRY_DIRECTION_CHECK", ticker=ticker, **check)
+            if check["allowed"] is not True:
+                reason = check["reason"]
+                if reason not in {"entry_direction_conflict", "entry_direction_unavailable"}:
+                    raise RuntimeError("Invalid entry direction veto")
+                finish_no_order(self.journal, record, kind="not_dispatched",
+                                reason=reason, now=core.time.time())
+                core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason=reason)
+                raise EntryNotSubmitted(reason)
         deadline = min(expiration_time, submit_before if submit_before is not None else expiration_time)
         if not math.isfinite(deadline) or core.time.time() >= deadline:
             finish_no_order(self.journal, record, kind="not_dispatched",
@@ -263,3 +278,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

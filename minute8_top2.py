@@ -14,13 +14,34 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 
-POLICY = "minute9-top2-strict-skip-btc-v4"
+POLICY = "minute9-top2-direction-agreement-v5"
 START_SECONDS = 540
 END_SECONDS = 900
 TOP_COUNT = 2
 BTC_SERIES = "KXBTC15M"
 BACKUP_DELAY_SECONDS = 60
 MAX_CANDIDATE_ATTEMPTS = 2
+
+
+class DirectionCheckedQueue(ranked.QueueDiagnostics):
+    """Veto opposing entry signals; never reinterpret a venue strike or flip sides."""
+    def entry_direction_check(self, ticker, side, window_start_ms):
+        series = ticker.split("-")[0]
+        row = self.observations.get(series)
+        details = {"source": "coinbase_window_open", "side": side}
+        try:
+            if (row is None or side not in {"YES", "NO"}
+                    or window_start_ms != self.start * 1000):
+                raise ranked.PerformanceUnavailable("entry_observation_missing")
+            ranked.ranked_observations([row], (series,), self.start, self.clock())
+        except ranked.PerformanceUnavailable:
+            return dict(details, allowed=False, reason="entry_direction_unavailable")
+        move = row.return_pct
+        conflict = (side == "NO" and move > 0) or (side == "YES" and move < 0)
+        return dict(details, allowed=not conflict,
+                    reason="entry_direction_conflict" if conflict else "no_direction_conflict",
+                    return_pct=str(move), observed_at=row.observed_at,
+                    window_open=str(row.opening), observed_price=str(row.price))
 
 
 def window_attempts(journal, start):
@@ -102,8 +123,9 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                        "return_pct": str(row.return_pct)} for position, row in selected],
                skipped_lower_ranks=[r.series for r in rows[TOP_COUNT:]
                                     if r.series not in selected_series and r.series != BTC_SERIES])
-    proxy = ranked.QueueDiagnostics(client, clock=clock, emit=core.event)
+    proxy = DirectionCheckedQueue(client, clock=clock, emit=core.event)
     proxy.start = start
+    proxy.observations = {row.series: row for _, row in selected}
     proxy.ranks = {row.series: position for position, row in selected}
     if not live:
         # Preserve preview's one signal per period and no writes/no orders.
@@ -162,3 +184,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
