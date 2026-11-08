@@ -1,8 +1,9 @@
 """Cash/rejection safety adapter for the existing performance-ranked bot.
 
 No new signal, transfers, retries, or price chasing. Original core owns timing,
-ranking, sizing, exits and order IDs. Only definite pre-dispatch skips and the
-exact HTTP 400 / insufficient_balance rejection receive a terminal no-fill.
+ranking, sizing, exits and order IDs. Aggregate available cash from Kalshi's
+unscoped balance endpoint is authoritative for preflight; per-exchange breakdown
+is diagnostic only. Exact HTTP 400 / insufficient_balance remains terminal.
 All other submission errors keep the original uncertain-order reservation.
 """
 from __future__ import annotations
@@ -15,7 +16,7 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 from kalshi import KalshiAPIError
 
-POLICY = "cash-preflight-and-definite-rejection-v1"
+POLICY = "aggregate-cash-preflight-and-definite-rejection-v2"
 ORIGINAL_RUN_PASS = core.run_pass
 ORIGINAL_SLOT_RELEASED = core.entry_slot_released
 
@@ -41,7 +42,7 @@ def number(value):
 
 
 def cash_snapshot(payload):
-    """Get Balance: totals may be cents; per-exchange balances are dollars."""
+    """Return aggregate available cash plus an optional diagnostic breakdown."""
     if not isinstance(payload, dict):
         raise CashUnavailable("invalid_balance_response")
     cents, dollars = payload.get("balance"), payload.get("balance_dollars")
@@ -50,21 +51,26 @@ def cash_snapshot(payload):
     total = number(dollars) if dollars is not None else number(cents) / 100
     if dollars is not None and cents is not None and abs(total-number(cents)/100) >= D(".01"):
         raise CashUnavailable("conflicting_total_cash")
+
+    # Kalshi documents the unscoped balance as available cash across all
+    # exchange indexes. The breakdown is useful telemetry, but it must not
+    # falsely veto an order when aggregate available cash is sufficient.
     raw = payload.get("balance_breakdown")
     if raw is None:
-        # Restricted-subaccount keys can omit the breakdown. No assumption that
-        # their aggregate cash belongs to the market's exchange is permissible.
         return total, None
     if not isinstance(raw, list):
-        raise CashUnavailable("invalid_cash_breakdown")
+        return total, None
     shards = {}
-    for row in raw:
-        if not isinstance(row, dict):
-            raise CashUnavailable("invalid_cash_breakdown")
-        index = row.get("exchange_index")
-        if type(index) is not int or index < 0 or index in shards:
-            raise CashUnavailable("ambiguous_cash_breakdown")
-        shards[index] = number(row.get("balance"))
+    try:
+        for row in raw:
+            if not isinstance(row, dict):
+                return total, None
+            index = row.get("exchange_index")
+            if type(index) is not int or index < 0 or index in shards:
+                return total, None
+            shards[index] = number(row.get("balance"))
+    except CashUnavailable:
+        return total, None
     return total, shards
 
 
@@ -78,7 +84,7 @@ def release_proven_no_order(record):
             or proof.get("window_start_ms") != record.get("window_start_ms")):
         return False
     if proof.get("kind") == "not_dispatched":
-        return proof.get("reason") in {"insufficient_market_cash", "cash_check_unavailable", "entry_deadline_passed"}
+        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed"}
     return (proof.get("kind") == "exchange_rejected"
             and proof.get("http_status") == 400
             and proof.get("api_code") == "insufficient_balance")
@@ -102,7 +108,7 @@ def finish_no_order(journal, record, *, kind, reason, now, http_status=None, api
 
 
 class CashState:
-    """Read-only cash cache; never increase sizing or move money between shards."""
+    """Read-only aggregate-cash cache; never increase sizing or move money."""
     def __init__(self):
         self.last_attempt = float("-inf")
         self.last_success = float("-inf")
@@ -148,12 +154,9 @@ class CashCheckedClient:
             if market.get("ticker") != ticker:
                 raise CashUnavailable("cash_market_mismatch")
             index = market.get("exchange_index")
-            if type(index) is not int or index < 0:
-                raise CashUnavailable("market_exchange_index_missing")
+            index = index if type(index) is int and index >= 0 else None
             total, shards = self.state.read(self.client, now)
-            if shards is None or index not in shards:
-                raise CashUnavailable("market_cash_missing")
-            available = min(total, shards[index])
+            diagnostic_market_cash = shards.get(index) if shards is not None and index in shards else None
             required = D(quantity) * (D(outcome_price) + core.FEE_RESERVE)
             if not required.is_finite() or required <= 0:
                 raise CashUnavailable("invalid_entry_cost")
@@ -163,16 +166,21 @@ class CashCheckedClient:
             core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="cash_check_unavailable",
                        **ranked.error_fields(error))
             raise EntryNotSubmitted("cash_check_unavailable") from error
-        record["cash_preflight"] = {"exchange_index": index, "total_cash_dollars": str(total),
-                                    "market_cash_dollars": str(available),
-                                    "required_with_fee_reserve_dollars": str(required)}
+        record["cash_preflight"] = {
+            "exchange_index": index,
+            "cash_basis": "aggregate_available_cash",
+            "total_cash_dollars": str(total),
+            "market_cash_dollars": (str(diagnostic_market_cash)
+                                    if diagnostic_market_cash is not None else None),
+            "required_with_fee_reserve_dollars": str(required),
+        }
         core.event("M9_CASH_CHECK", ticker=ticker, **record["cash_preflight"])
-        if available < required:
+        if total < required:
             finish_no_order(self.journal, record, kind="not_dispatched",
-                            reason="insufficient_market_cash", now=core.time.time())
-            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_market_cash",
+                            reason="insufficient_total_cash", now=core.time.time())
+            core.event("M9_ENTRY_NOT_SENT", ticker=ticker, reason="insufficient_total_cash",
                        **record["cash_preflight"])
-            raise EntryNotSubmitted("insufficient_market_cash")
+            raise EntryNotSubmitted("insufficient_total_cash")
         deadline = min(expiration_time, submit_before if submit_before is not None else expiration_time)
         if not math.isfinite(deadline) or core.time.time() >= deadline:
             finish_no_order(self.journal, record, kind="not_dispatched",
