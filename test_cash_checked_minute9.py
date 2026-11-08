@@ -55,20 +55,20 @@ def run(c,j,now,live=True):
 
 
 @pytest.mark.parametrize('total,market_cash', [('16.00','0.00'), ('44.6587','0.5908')])
-def test_funded_aggregate_and_low_market_cash_reach_venue(setup,total,market_cash):
+def test_aggregate_cash_cannot_override_market_shard_shortfall(setup,total,market_cash):
     j,now,events=setup
     c=CashExchange(payload={'balance_dollars':total,
                            'balance_breakdown':[{'exchange_index':2,'balance':market_cash}]})
     run(c,j,now)
-    assert len(c.posted)==1 and c.balance_calls==1
-    ticker,side,qty,limit=c.posted[0]
-    assert side=='YES' and qty==4 and limit==D('.75')
-    assert qty*(limit+core.FEE_RESERVE)<=D(10)/3
-    r=j.data['windows'][ticker]
-    assert 'entry_no_order_proof' not in r
+    assert c.posted==[] and c.balance_calls==1
+    r=next(iter(j.data['windows'].values()))
+    assert r['outcome']['reason']=='insufficient_market_cash'
+    assert safe.release_proven_no_order(r)
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
     assert check['total_cash_dollars']==total and check['market_cash_dollars']==market_cash
-    assert check['cash_check_scope']=='aggregate_account_cash'
+    assert check['cash_check_scope']=='market_exchange_cash'
+    funding=next(d for n,d in events if n=='M9_EXCHANGE_FUNDING_REQUIRED')
+    assert funding['available_dollars']==market_cash and funding['transfers_enabled'] is False
     assert not any(n=='M9_ENTRY_CASH_RESIZED' for n,d in events)
 
 
@@ -85,7 +85,7 @@ def test_total_cash_below_one_contract_never_posts(setup):
     assert j.data['streak']==core.starting_streak()
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
     assert check['total_cash_dollars']=='0.59' and check['market_cash_dollars']=='0.59'
-    assert check['cash_check_scope']=='aggregate_account_cash'
+    assert check['cash_check_scope']=='market_exchange_cash'
     skipped=next(d for n,d in events if n=='M9_ENTRY_NOT_SENT')
     assert skipped['reason']=='insufficient_total_cash'
     assert skipped['minimum_one_contract_with_fee_reserve_dollars']=='0.78'
@@ -238,9 +238,9 @@ def test_adapter_does_not_erase_performance_fallback_or_leak_overrides():
 
 
 
-def test_total_cash_cap_is_durable_before_dispatch(setup):
+def test_market_shard_cap_is_durable_before_dispatch(setup):
     j,now,events=setup
-    c=CashExchange(payload={'balance_dollars':'5.9321','balance_breakdown':[{'exchange_index':2,'balance':'0.5908'}]})
+    c=CashExchange(payload={'balance_dollars':'5.9321','balance_breakdown':[{'exchange_index':2,'balance':'5.9321'}]})
     ticker=c.series[0]+'-case'
     r={'ticker':ticker,'side':'YES','quantity':'7','window_start_ms':START*1000,
        'buy':{'client_id':'exact','limit':'0.85'},'sells':[]}
@@ -255,3 +255,17 @@ def test_total_cash_cap_is_durable_before_dispatch(setup):
     safe.CashCheckedClient(c,j,safe.CashState()).place_entry(ticker,'YES',7,D('.85'),START+900,client_order_id='exact',ioc=True)
     assert captured[0][2]==6
     assert r['cash_preflight']['required_with_fee_reserve_dollars']=='5.28'
+
+
+def test_shard_cash_reduces_existing_budget_quantity_never_increases_it(setup):
+    j,now,events=setup
+    c=CashExchange(payload={'balance_dollars':'44.6587',
+                           'balance_breakdown':[{'exchange_index':0,'balance':'43.5787'},
+                                                {'exchange_index':2,'balance':'1.0800'}]})
+    run(c,j,now)
+    assert len(c.posted)==1
+    assert c.posted[0][2]==1
+    r=next(iter(j.data['windows'].values()))
+    assert r['quantity']=='1'
+    assert D(r['cash_preflight']['market_cash_dollars'])==D('1.08')
+    assert any(name=='M9_ENTRY_CASH_RESIZED' for name,_ in events)
