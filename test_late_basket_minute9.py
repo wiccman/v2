@@ -122,8 +122,10 @@ def test_pre_dispatch_solar_blackout_not_bypassed(scenario):
 
 
 @pytest.mark.parametrize("price,allowed", [
-    (".95", False), (".9599", False), (".96", True),
-    (".975", True), (".99", True), (".999", False), ("1.00", False),
+    (".88", False), (".8899", False), (".89", True),
+    (".895", True), (".96", True), (".97", True),
+    (".9701", False), (".975", False), (".98", False),
+    (".99", False), (".999", False), ("1.00", False),
 ])
 def test_late_price_band(price, allowed):
     from test_single_coin_minute9 import market
@@ -131,7 +133,7 @@ def test_late_price_band(price, allowed):
     result = late.late_plan(m, START, START + 740, "KXETH15M", "YES")
     assert bool(result) == allowed
     if allowed:
-        assert D(result["limit"]) >= D(".96") and D(result["limit"]) <= D(".99")
+        assert D(".89") <= D(result["limit"]) <= D(".97") < late.LATE_TAKE_PROFIT
 
 
 def test_late_cash_deadline_crossing_never_dispatches(scenario):
@@ -175,29 +177,68 @@ def test_no_rank_three_promotion_even_if_96c_eligible(scenario):
     now, _, journal, client = scenario
     feed = Feed(now, ["KXBTC15M", "KXSOL15M", "KXETH15M",
                       "KXHYPE15M", "KXXRP15M"])
-    # BTC is excluded and second-ranked SOL has no qualifying 96c quote.
-    client.initial["KXSOL15M"] = ".93"
-    client.fresh["KXSOL15M"] = ".93"
+    # BTC is excluded and second-ranked SOL has no qualifying 89c quote.
+    client.initial["KXSOL15M"] = ".88"
+    client.fresh["KXSOL15M"] = ".88"
     run(journal, client, now, feed)
     assert client.posted == []  # Rank-three ETH must not be promoted.
 
 
-def test_high_price_fill_has_no_impossible_5cent_tp_but_keeps_stop(scenario):
-    now, _, journal, _ = scenario
-    class FilledLate(CashExchange):
-        def market(self, ticker):
-            data = super().market(ticker)
-            data["yes_bid_dollars"] = ".96"
-            return data
-    client = FilledLate(outcomes={"KXETH15M": "partial"})
-    client.initial = {x: ".97" for x in core.DEFAULT_SERIES}
-    client.fresh = dict(client.initial)
-    run(journal, client, now, Feed(now))
-    record = next(iter(journal.data["windows"].values()))
-    assert record["entry_kind"] == late.LATE_KIND
-    assert not record["sells"]  # A 102c take-profit is impossible.
-    assert core.exit_decision(D(".97"), D(".76")) == ("stop_loss", D(".76"))
-    assert core.exit_decision(D(".97"), D(".96")) == (None, None)
+@pytest.mark.parametrize("side", ["YES", "NO"])
+@pytest.mark.parametrize("entry", [".89", ".90", ".95", ".97"])
+def test_zone2_confirmed_fill_places_resting_98c_tp_and_preserves_stop(
+        tmp_path, side, entry):
+    from test_single_coin_minute9 import StopExchange, fake_record
+    client = StopExchange(side=side, bid=str(D(entry) - D(".01")))
+    yes_price = D(entry) if side == "YES" else D(1) - D(entry)
+    client.rows[0]["yes_price_dollars"] = str(yes_price)
+    client.rows[0]["no_price_dollars"] = str(D(1) - yes_price)
+    journal = core.Journal(tmp_path / f"zone2-{side}-{entry}.json")
+    record = fake_record(client, fully_sold=False)
+    record["entry_kind"] = late.LATE_KIND
+    record["entry_zone"] = core.ZONE2
+    record["take_profit_target"] = ".98"
+    journal.data["windows"][core.zone_record_key(client.ticker, core.ZONE2)] = record
+    journal.save()
+    core.reconcile_exit(client, journal, record, START + 725)
+    assert len(client.submissions) == 1
+    assert client.submissions[0]["limit"] == D(".98")
+    assert client.submissions[0]["signed"] == (D(2) if side == "YES" else D(-2))
+    assert record["sells"][0]["purpose"] == "take_profit"
+    assert record["sells"][0]["execution"] == "gtc"
+    assert client.orders["exit-1"]["status"] == "resting"
+    # A restart must not create another resting sell for the same exposure.
+    reloaded = core.Journal(journal.path)
+    record = reloaded.data["windows"][core.zone_record_key(client.ticker, core.ZONE2)]
+    core.reconcile_exit(client, reloaded, record, START + 727)
+    assert len(client.submissions) == 1
+    # The 21c stop still overrides and cancels the resting 98c order.
+    client.bid = D(entry) - D(".21")
+    core.reconcile_exit(client, reloaded, record, START + 729)
+    assert record["stop_armed"]
+    assert client.orders["exit-1"]["status"] == "canceled"
+    assert len(client.submissions) == 1
+    core.reconcile_exit(client, reloaded, record, START + 731)
+    assert len(client.submissions) == 2
+    assert record["sells"][-1]["purpose"] == "stop_loss"
+    assert client.submissions[-1]["limit"] == D(entry) - D(".21")
+
+
+def test_legacy_zone2_entry_at_98c_does_not_sell_below_cost(tmp_path):
+    from test_single_coin_minute9 import StopExchange, fake_record
+    client = StopExchange(bid=".90")
+    client.rows[0]["yes_price_dollars"] = ".98"
+    client.rows[0]["no_price_dollars"] = ".02"
+    journal = core.Journal(tmp_path / "legacy-98.json")
+    record = fake_record(client, fully_sold=False)
+    record["entry_kind"] = late.LATE_KIND
+    record["entry_zone"] = core.ZONE2
+    journal.data["windows"][core.zone_record_key(client.ticker, core.ZONE2)] = record
+    core.reconcile_exit(client, journal, record, START + 725)
+    assert record["sells"] == []  # Do not sell 98c entry at an unprofitable 98c.
+    client.bid = D(".77")
+    core.reconcile_exit(client, journal, record, START + 727)
+    assert record["sells"][-1]["purpose"] == "stop_loss"
 
 
 def confirmed_zone1_zero_fill(ticker):
