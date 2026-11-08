@@ -691,11 +691,19 @@ def find_order(client, ticker, intent):
         except KalshiAPIError as error:
             if error.status_code != 404:
                 raise
-            # The direct read and exact-ID history fallback have not caught up.
-            # Retain the durable intent and wait; never infer a zero fill.
-            event("M9_ORDER_VISIBILITY_PENDING", ticker=ticker,
-                  http_status=404, order_id=intent["order_id"])
-            return None
+            # Live GetOrder/GetOrders can lose terminal orders at Kalshi's
+            # archive handoff. Recover only an exact historic ID; never assume
+            # a missing live order was canceled or had zero fills.
+            recover = getattr(client, "archived_order", None)
+            order = (recover(ticker, intent.get("created_at"),
+                             order_id=intent["order_id"])
+                     if callable(recover) else None)
+            if order is None:
+                event("M9_ORDER_VISIBILITY_PENDING", ticker=ticker,
+                      http_status=404, order_id=intent["order_id"])
+                return None
+            event("M9_ARCHIVED_ORDER_RECOVERED", ticker=ticker,
+                  order_id=intent["order_id"], lookup="order_id")
         if (order.get("ticker") != ticker
                 or order.get("order_id") != intent["order_id"]
                 or order.get("client_order_id") != expected_client_id):
@@ -704,6 +712,15 @@ def find_order(client, ticker, intent):
     # Lost acknowledgement: reconcile by durable client_order_id. Never repeat POST.
     matching = [row for row in client.all_orders(ticker)
                 if row.get("client_order_id") == intent["client_id"]]
+    if not matching:
+        recover = getattr(client, "archived_order", None)
+        archived = (recover(ticker, intent.get("created_at"),
+                            client_id=intent["client_id"])
+                    if callable(recover) else None)
+        if archived is not None:
+            matching = [archived]
+            event("M9_ARCHIVED_ORDER_RECOVERED", ticker=ticker,
+                  order_id=archived.get("order_id"), lookup="client_order_id")
     if len(matching) > 1:
         raise RuntimeError("Multiple orders matched one client id")
     if matching:
@@ -728,6 +745,12 @@ def reconciliation_error_code(error):
         "Multiple orders matched one client id": "ambiguous_client_id",
         "Order pagination cursor repeated": "order_cursor_repeated",
         "Fill pagination cursor repeated": "fill_cursor_repeated",
+        "Historical pagination cursor repeated": "archive_cursor_repeated",
+        "Multiple archived orders matched one identity": "archive_identity_ambiguous",
+        "Historical order subaccount mismatch": "archive_subaccount_mismatch",
+        "Historical fill identity mismatch": "archive_fill_identity_mismatch",
+        "Historical fill missing identity": "archive_fill_missing_identity",
+        "Invalid Kalshi historical cutoff": "archive_cutoff_invalid",
     }
     return known.get(str(error), "unclassified") if type(error) is RuntimeError else "unclassified"
 
