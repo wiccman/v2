@@ -189,7 +189,7 @@ def test_exit_recovery_uses_valid_history_query_after_restart(tmp_path, monkeypa
         if method == 'POST':
             return post(method, path, params, body, auth)
         assert method == 'GET'
-        reads.append((path, dict(params)))
+        reads.append((path, dict(params or {})))
         if path.startswith('/portfolio/orders/'):
             raise KalshiAPIError(404, 'Read model has not exposed single order yet')
         assert path == '/portfolio/orders'
