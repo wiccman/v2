@@ -86,7 +86,7 @@ def test_funded_shard_preserves_budget_quantity_side_and_price(setup):
 def test_explicit_insufficient_rejection_is_terminal_without_immediate_backup(setup):
     j,now,events=setup
     c=CashExchange({'KXBTC15M':'api_error'})
-    for _ in range(3):j.data['streak']=core.next_streak(j.data['streak'],'win')
+    j.data['streak']=core.next_streak(j.data['streak'],'loss')
     before=copy.deepcopy(j.data['streak'])
     run(c,j,now)
     assert len(c.posted)==1 and c.posted[0][2]==12
