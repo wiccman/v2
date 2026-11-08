@@ -84,39 +84,43 @@ def test_corrupt_journal_refused(tmp_path):
         Journal(state)
 
 
-def test_three_wins_trigger_third_budget_and_repeat_after_loss():
+def test_two_full_budget_wins_then_small_until_first_loss():
     s = starting_streak()
-    for wins in (1, 2):
+    assert trade_budget(s, D("6.66")) == D("2.22")
+    # Small mode does not grow after any number of wins.
+    for _ in range(12):
         s = next_streak(s, "win")
-        assert s == {"consecutive_wins": wins, "reduced_budget": False}
-    s = next_streak(s, "win")
-    assert s == {"consecutive_wins": 3, "reduced_budget": True}
-    for _ in range(6):
-        s = next_streak(s, "win")
-        assert s["reduced_budget"] and trade_budget(s, D("20")) == D("20")
+        assert trade_budget(s, D("6.66")) == D("2.22")
+    # First small-budget loss moves to full allocation.
     s = next_streak(s, "loss")
-    assert s == starting_streak()
-    for _ in range(3):
+    assert s == {"consecutive_wins": 0, "reduced_budget": True,
+                 "full_budget_wins": 0}
+    assert trade_budget(s, D("6.66")) == D("6.66")
+    s = next_streak(s, "win")
+    assert s["full_budget_wins"] == 1 and trade_budget(s, D("6.66")) == D("6.66")
+    s = next_streak(s, "win")
+    assert s == {"consecutive_wins": 2, "reduced_budget": False}
+    assert trade_budget(s, D("6.66")) == D("2.22")
+    for _ in range(20):
         s = next_streak(s, "win")
-    assert s["reduced_budget"]
+        assert trade_budget(s, D("6.66")) == D("2.22")
+    assert trade_budget(next_streak(s, "loss"), D("6.66")) == D("6.66")
 
 
-def test_inverted_six_sixty_six_budget_after_three_wins_then_loss():
-    streak = starting_streak()
-    for wins in range(3):
-        assert trade_budget(streak, D("6.66")) == D("2.22")
-        streak = next_streak(streak, "win")
-    assert streak["consecutive_wins"] == 3
-    assert trade_budget(streak, D("6.66")) == D("6.66")
-    assert trade_budget(next_streak(streak, "flat"), D("6.66")) == D("6.66")
-    assert trade_budget(next_streak(streak, "loss"), D("6.66")) == D("2.22")
+def test_two_win_full_phase_requires_consecutive_wins():
+    full = next_streak(starting_streak(), "loss")
+    one_win = next_streak(full, "win")
+    assert next_streak(one_win, "flat") == full
+    assert next_streak(one_win, "loss") == full
+    assert next_streak(one_win, "win")["reduced_budget"] is False
+    assert next_streak(full, "win")["full_budget_wins"] == 1
+    assert next_streak(starting_streak(), "flat") == starting_streak()
 
-
-def test_loss_before_streak_resets_progress():
+def test_loss_resets_global_wins_and_restarts_full_budget_phase():
     s = next_streak(next_streak(starting_streak(), "win"), "win")
-    assert next_streak(s, "loss") == starting_streak()
+    assert next_streak(s, "loss") == {
+        "consecutive_wins": 0, "reduced_budget": True, "full_budget_wins": 0}
     assert next_streak(starting_streak(), "win")["consecutive_wins"] == 1
-
 
 def test_ten_consecutive_wins_unlock_60c_floor_and_loss_restores_69c():
     s = starting_streak()
@@ -127,7 +131,7 @@ def test_ten_consecutive_wins_unlock_60c_floor_and_loss_restores_69c():
         assert entry_min_price(s) == D(".69")
     s = next_streak(s, "win")
     assert s["consecutive_wins"] == 10
-    assert s["reduced_budget"] is True
+    assert s["reduced_budget"] is False  # small phase stays until a loss
     assert entry_min_price(s) == D(".60")
     # Additional wins keep the unlocked floor without overflowing persisted state.
     s = next_streak(s, "win")
@@ -136,14 +140,14 @@ def test_ten_consecutive_wins_unlock_60c_floor_and_loss_restores_69c():
     assert entry_min_price(next_streak(s, "loss")) == D(".69")
 
 
-def test_flat_breaks_ten_win_streak_but_keeps_reduced_budget_mode():
+def test_flat_breaks_ten_win_streak_without_changing_small_budget():
     s = starting_streak()
     for _ in range(10):
         s = next_streak(s, "win")
+    assert entry_min_price(s) == D(".60")
     flat = next_streak(s, "flat")
-    assert flat == {"consecutive_wins": 0, "reduced_budget": True}
+    assert flat == starting_streak()
     assert entry_min_price(flat) == D(".69")
-
 
 def test_relaxed_floor_allows_60c_but_never_below_it():
     s = starting_streak()
@@ -157,26 +161,27 @@ def test_relaxed_floor_allows_60c_but_never_below_it():
     assert budgeted_quantity(D("10"), D(".60"), min_price=floor) > 0
 
 
-def test_flat_interrupts_streak_but_does_not_restore_half_mode():
-    s = next_streak(starting_streak(), "win")
-    assert next_streak(s, "flat") == starting_streak()
-    s = next_streak(next_streak(next_streak(starting_streak(), "win"), "win"), "win")
-    assert next_streak(s, "flat")["reduced_budget"] is True
+def test_flat_resets_full_budget_win_counter_without_budget_change():
+    s = next_streak(starting_streak(), "loss")
+    s = next_streak(s, "win")
+    assert s["full_budget_wins"] == 1
+    flat = next_streak(s, "flat")
+    assert flat == next_streak(starting_streak(), "loss")
+    assert trade_budget(flat, D("6.66")) == D("6.66")
 
 
-def test_budget_uses_one_third_before_three_wins_then_full_dollars():
+def test_budget_uses_one_third_until_loss_then_full_dollars():
     base = D("20")
-    normal = budgeted_quantity(trade_budget(starting_streak(), base), D(".72"))
-    s = starting_streak()
-    for _ in range(3):
-        s = next_streak(s, "win")
-    boosted = budgeted_quantity(trade_budget(s, base), D(".72"))
-    assert normal == 8 and boosted == 26
+    small = budgeted_quantity(trade_budget(starting_streak(), base), D(".72"))
+    s = next_streak(starting_streak(), "loss")
+    full = budgeted_quantity(trade_budget(s, base), D(".72"))
+    assert small == 8 and full == 26
     assert trade_budget(s, D("20")) == D("20")
+    s = next_streak(next_streak(s, "win"), "win")
+    assert trade_budget(s, D("20")) == D("20") / D(3)
     assert budgeted_quantity(D(".70"), D(".69")) == 0
     assert budgeted_quantity(D("10"), D(".91")) == 10
     assert budgeted_quantity(D("1000"), D(".69"), cap=8) == 8
-
 
 def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
     state = tmp_path / "journal.json"
@@ -190,7 +195,7 @@ def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
         }
     j.save()
     apply_new_outcomes(j)
-    assert j.data["streak"]["reduced_budget"] is True
+    assert j.data["streak"]["reduced_budget"] is False
     apply_new_outcomes(Journal(state))  # No double-counting after restart
     assert Journal(state).data["streak"] == j.data["streak"]
     j = Journal(state)
@@ -200,7 +205,7 @@ def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
         "outcome": {"status": "loss", "completed_at": 108, "counted": False}}
     j.save()
     apply_new_outcomes(j)
-    assert Journal(state).data["streak"] == starting_streak()
+    assert Journal(state).data["streak"] == next_streak(starting_streak(), "loss")
 
 
 def test_no_fill_does_not_break_three_win_streak(tmp_path):
@@ -282,7 +287,7 @@ def test_full_verified_take_profit_counts_net_win(tmp_path):
     assert j.data["streak"]["consecutive_wins"] == 1
 
 
-def test_market_settlement_loss_resets_reduced_budget(tmp_path):
+def test_market_settlement_loss_returns_to_full_budget(tmp_path):
     j = Journal(tmp_path / "settlement.json")
     client = FakeTradeClient(result="no", fully_sold=False, side="YES")
     r = fake_record(client, fully_sold=False)
@@ -292,7 +297,7 @@ def test_market_settlement_loss_resets_reduced_budget(tmp_path):
     verify_completed_trade(client, j, r, CLOSE + 15)
     assert r["outcome"]["status"] == "loss"
     apply_new_outcomes(j)
-    assert j.data["streak"] == starting_streak()
+    assert j.data["streak"] == next_streak(starting_streak(), "loss")
 
 
 def test_market_settlement_win_qualifies_as_win(tmp_path):
@@ -521,7 +526,7 @@ def test_stop_execution_realized_loss_resets_win_streak(tmp_path):
     verify_completed_trade(client, journal, record, START + 585)
     assert record["outcome"]["status"] == "loss"
     apply_new_outcomes(journal)
-    assert journal.data["streak"] == starting_streak()
+    assert journal.data["streak"] == next_streak(starting_streak(), "loss")
 
 
 class PreviewCoinClient:
