@@ -251,6 +251,7 @@ def run_cash_checked_pass(client, journal, series_list, base_budget, max_contrac
             state.diagnostic_done = True
             try:
                 state.read(client, core.time.time())
+                state.log_target_allocation(client, None)
             except Exception as error:
                 core.event("M9_CASH_DIAGNOSTIC_UNAVAILABLE", **ranked.error_fields(error))
 
