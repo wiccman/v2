@@ -163,7 +163,7 @@ def test_low_shard_does_not_increase_budget_or_quantity(setup):
     run(c,j,now)
     assert len(c.posted)==1 and c.posted[0][2]==4
     assert next(iter(j.data['windows'].values()))['quantity']=='4'
-    assert core.STOP_BID==D('.45') and core.PROFIT==D('.05')
+    assert core.STOP_DROP==D('.21') and core.PROFIT==D('.05')
 
 
 def test_rejection_proof_cannot_release_existing_or_mismatched_order(setup):
