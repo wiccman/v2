@@ -80,7 +80,7 @@ def release_proven_no_order(record):
             or proof.get("window_start_ms") != record.get("window_start_ms")):
         return False
     if proof.get("kind") == "not_dispatched":
-        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed", "entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted"}
+        return proof.get("reason") in {"insufficient_market_cash", "insufficient_total_cash", "cash_check_unavailable", "entry_deadline_passed", "entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted", "late_zone_unavailable"}
     return (proof.get("kind") == "exchange_rejected"
             and proof.get("http_status") == 400
             and proof.get("api_code") == "insufficient_balance")
@@ -209,7 +209,7 @@ class CashCheckedClient:
             core.event("M9_ENTRY_DIRECTION_CHECK", ticker=ticker, **check)
             if check["allowed"] is not True:
                 reason = check["reason"]
-                if reason not in {"entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted"}:
+                if reason not in {"entry_direction_conflict", "entry_direction_unavailable", "entry_time_restricted", "late_rank_unavailable", "late_rank_changed", "late_quote_changed", "late_entry_time_invalid", "late_entry_time_restricted", "late_zone_unavailable"}:
                     raise RuntimeError("Invalid entry direction veto")
                 finish_no_order(self.journal, record, kind="not_dispatched",
                                 reason=reason, now=core.time.time())
