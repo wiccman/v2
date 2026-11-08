@@ -218,6 +218,10 @@ class KalshiClient:
         params = {} if exchange_index is None else {"exchange_index": exchange_index}
         return self.request("GET", "/portfolio/balance", params=params, auth=True)
 
+    def target_balance_allocation(self):
+        """Read the account's configured automatic allocation across exchange indexes."""
+        return self.request("GET", "/portfolio/target_balance_allocation", auth=True)
+
     def market_cash(self, ticker):
         """Read cash on the market's actual shard, never the aggregate wallet."""
         index = self.market(ticker).get("exchange_index")
