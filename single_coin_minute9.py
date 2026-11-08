@@ -452,11 +452,28 @@ def reconciliation_error_code(error):
     return known.get(str(error), "unclassified") if type(error) is RuntimeError else "unclassified"
 
 
+def fill_contract_quantity(row):
+    """Parse Kalshi fixed-point contract counts without rounding inventory.
+
+    Kalshi may report fractional fills in hundredths of a contract. Never
+    truncate a 0.25 fill to zero or silently accept missing/invalid counts.
+    """
+    value = row.get("count_fp", row.get("count"))
+    if isinstance(value, bool) or value is None:
+        raise RuntimeError("Unsupported or invalid fill quantity")
+    try:
+        amount = D(str(value))
+    except (ValueError, TypeError, ArithmeticError) as error:
+        raise RuntimeError("Unsupported or invalid fill quantity") from error
+    if (not amount.is_finite() or amount < 0
+            or amount != amount.quantize(D("0.01"))):
+        raise RuntimeError("Unsupported or invalid fill quantity")
+    return amount
+
+
 def filled_quantity(fills, order_id):
     rows = [f for f in fills if f.get("order_id") == order_id]
-    qty = sum((D(str(row.get("count_fp", row.get("count", "0")))) for row in rows), D(0))
-    if qty < 0 or qty != qty.to_integral_value():
-        raise RuntimeError("Unsupported or invalid fill quantity")
+    qty = sum((fill_contract_quantity(row) for row in rows), D(0))
     return qty, rows
 
 
