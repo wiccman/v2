@@ -509,7 +509,7 @@ def queue_skip(client_market, now, series):
     reason = ("market_not_active" if client_market.get("status") not in {"active", "open"}
               else "ambiguous_sides" if len(eligible) > 1
               else "missing_quote" if None in asks.values()
-              else "outside_59_91_price_band")
+              else "outside_69_91_price_band")
     event("M9_QUEUE_SKIP", ticker=client_market.get("ticker"), series=series,
           reason=reason, yes_ask=asks["yes"], no_ask=asks["no"])
 
