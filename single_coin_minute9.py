@@ -20,8 +20,8 @@ all outside buys as manual inventory: competing take-profits could oversell.
 An absolute executable bid at M9_STOP_BID_CENTS (default 45c) triggers a price-protected reduce-only IOC,
 regardless of entry price. The actual exit fill can be below 45c on a gap;
 IOC exits require the process to run.
-After three confirmed profitable trades, the per-entry budget drops to
-the full normal allocation after three confirmed wins until a losing trade; before three wins, the budget is one third of normal.
+Before three confirmed consecutive wins, the per-entry budget is one third of normal.
+From the third confirmed win until the next confirmed loss, it uses the full normal allocation.
 """
 from __future__ import annotations
 
