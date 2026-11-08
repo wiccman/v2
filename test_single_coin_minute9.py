@@ -208,6 +208,83 @@ def test_advance_outcomes_once_and_persist_after_restart(tmp_path):
     assert Journal(state).data["streak"] == next_streak(starting_streak(), "loss")
 
 
+def test_late_fractional_sol_win_cannot_undo_newer_xrp_loss(tmp_path):
+    """Regression for SOL 06:45 arriving after the later XRP loss."""
+    state = tmp_path / "chronological.json"
+    j = Journal(state)
+    j.data["windows"] = {
+        "old-eth": {"ticker": "old-eth", "outcome": {
+            "status": "win", "completed_at": 100, "counted": True}},
+        "new-xrp": {"ticker": "new-xrp", "outcome": {
+            "status": "loss", "completed_at": 300, "counted": True}},
+    }
+    j.data["streak"] = next_streak(starting_streak(), "loss")
+    j.save()
+    j.data["windows"]["late-sol"] = {"ticker": "late-sol", "outcome": {
+        "status": "win", "completed_at": 200, "counted": False}}
+    apply_new_outcomes(j)
+    assert j.data["streak"] == next_streak(starting_streak(), "loss")
+    assert trade_budget(j.data["streak"], D("6.66")) == D("6.66")
+    assert j.data["windows"]["late-sol"]["outcome"]["counted"] is True
+    assert Journal(state).data["streak"] == j.data["streak"]
+
+
+def test_late_loss_recomputes_later_winning_run(tmp_path):
+    j = Journal(tmp_path / "late_loss.json")
+    j.data["windows"] = {
+        f"win-{i}": {"ticker": f"win-{i}", "outcome": {
+            "status": "win", "completed_at": n, "counted": True}}
+        for i, n in enumerate((100, 200, 300))
+    }
+    j.data["streak"] = next_streak(next_streak(next_streak(
+        starting_streak(), "win"), "win"), "win")
+    j.data["windows"]["late-loss"] = {"ticker": "late-loss", "outcome": {
+        "status": "loss", "completed_at": 250, "counted": False}}
+    apply_new_outcomes(j)
+    assert j.data["streak"]["consecutive_wins"] == 1
+    assert j.data["streak"]["reduced_budget"] is True
+    assert j.data["streak"]["full_budget_wins"] == 1
+
+
+def test_restart_repairs_poisoned_historical_streak_without_recounting(tmp_path):
+    path = tmp_path / "poisoned.json"
+    j = Journal(path)
+    j.data["windows"] = {
+        "old-sol": {"ticker": "old-sol", "outcome": {
+            "status": "win", "completed_at": 100, "counted": True}},
+        "new-xrp": {"ticker": "new-xrp", "outcome": {
+            "status": "loss", "completed_at": 200, "counted": True}},
+    }
+    j.data["streak"] = {"consecutive_wins": 1, "reduced_budget": True,
+                         "full_budget_wins": 1}
+    j.save()
+    reopened = Journal(path)
+    assert reopened.data["streak"] == next_streak(starting_streak(), "loss")
+    assert all(v["outcome"]["counted"] for v in reopened.data["windows"].values())
+    assert Journal(path).data == reopened.data
+
+
+def test_no_fill_only_keeps_legacy_seeded_streak(tmp_path):
+    j = Journal(tmp_path / "seeded.json")
+    j.data["streak"] = next_streak(starting_streak(), "loss")
+    j.data["windows"]["miss"] = {"ticker": "miss", "outcome": {
+        "status": "no_fill", "completed_at": 200, "counted": False}}
+    apply_new_outcomes(j)
+    assert j.data["streak"] == next_streak(starting_streak(), "loss")
+
+
+@pytest.mark.parametrize("invalid", [None, True, -1, float("nan"), float("inf"), "200"])
+def test_invalid_historical_completion_time_fails_closed(tmp_path, invalid):
+    j = Journal(tmp_path / "bad-history.json")
+    j.data["windows"]["bad"] = {"ticker": "bad", "outcome": {
+        "status": "win", "completed_at": invalid, "counted": False}}
+    before = j.data["streak"].copy()
+    with pytest.raises(RuntimeError, match="completion time"):
+        apply_new_outcomes(j)
+    assert j.data["streak"] == before
+    assert j.data["windows"]["bad"]["outcome"]["counted"] is False
+
+
 def test_no_fill_does_not_break_three_win_streak(tmp_path):
     j = Journal(tmp_path / "no_fill.json")
     j.data["streak"] = next_streak(next_streak(starting_streak(), "win"), "win")

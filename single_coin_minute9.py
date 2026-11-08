@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import signal
 import tempfile
@@ -214,22 +215,72 @@ def budgeted_quantity(budget, ask, cap=100, *, min_price=None):
     return min(cap, int((amount / (price + FEE_RESERVE)).to_integral_value(rounding=ROUND_FLOOR)))
 
 
-def apply_new_outcomes(journal):
-    """Count each completed trade once, in verified completion-time order."""
-    pending = sorted(
-        (r for r in journal.data["windows"].values()
-         if isinstance(r.get("outcome"), dict) and not r["outcome"].get("counted")),
-        key=lambda r: (r["outcome"]["completed_at"], r["ticker"]))
-    for record in pending:
-        status = record["outcome"]["status"]
-        if status not in {"win", "loss", "flat", "no_fill"}:
+def completed_outcomes_in_order(windows):
+    """Return recorded trade results in real completion-time order.
+
+    Include already-counted results: a late-discovered fill or settlement can
+    predate the most recently counted trade. No-fills have no streak effect.
+    """
+    results = []
+    for record in windows.values():
+        outcome = record.get("outcome")
+        if not outcome:
+            continue
+        status = outcome.get("status")
+        if status == "no_fill":
+            continue
+        if status not in {"win", "loss", "flat"}:
             raise RuntimeError("Invalid trade outcome; streak not advanced")
-        if status != "no_fill":
-            journal.data["streak"] = next_streak(journal.data["streak"], status)
+        completed_at = outcome.get("completed_at")
+        if (isinstance(completed_at, bool)
+                or not isinstance(completed_at, (int, float))
+                or not math.isfinite(completed_at) or completed_at < 0):
+            raise RuntimeError("Invalid trade completion time; streak not advanced")
+        ticker = record.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            raise RuntimeError("Invalid trade identity; streak not advanced")
+        results.append((completed_at, ticker, status))
+    return sorted(results)
+
+
+def chronological_streak(windows):
+    """Rebuild from verified trade results; return None for unseeded journals."""
+    completed = completed_outcomes_in_order(windows)
+    if not completed:
+        return None  # Preserve legacy seeded state if there is no trade ledger.
+    streak = starting_streak()
+    for _, _, status in completed:
+        streak = next_streak(streak, status)
+    return streak
+
+
+def apply_new_outcomes(journal):
+    """Count results once while keeping live budget chronology correct."""
+    pending = [
+        record for record in journal.data["windows"].values()
+        if isinstance(record.get("outcome"), dict)
+        and not record["outcome"].get("counted")
+    ]
+    if not pending:
+        return
+    # Recompute using ALL historical results, not merely new arrivals.
+    # Without this, an old SOL win reconciled after a newer XRP loss would
+    # incorrectly reopen the win streak and change the next cash allocation.
+    resolved = chronological_streak(journal.data["windows"])
+    if resolved is not None:
+        journal.data["streak"] = resolved
+    for record in pending:
+        if record["outcome"].get("status") not in {"win", "loss", "flat", "no_fill"}:
+            raise RuntimeError("Invalid trade outcome; streak not advanced")
         record["outcome"]["counted"] = True
-        journal.save()  # atomic outcome + streak update (restart-safe)
+    journal.save()  # Atomic journal/streak update; no historical order edits.
+    for record in sorted(pending, key=lambda r: (r["outcome"].get("completed_at", 0),
+                                                 r.get("ticker", ""))):
+        status = record["outcome"]["status"]
         event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
+              result_completed_at=record["outcome"].get("completed_at"),
+              streak_replayed_in_completion_order=True,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
@@ -377,6 +428,16 @@ class Journal:
                             record["reduced_budget_at_entry"] = record.pop("half_budget_at_entry")
                     self.save()
                 next_streak(saved_streak, "flat")  # validate before trading
+            # Repair a streak poisoned by an older result arriving after
+            # a newer loss. Only use already-verified historical outcomes.
+            repaired = chronological_streak(self.data["windows"])
+            if repaired is not None and repaired != self.data["streak"]:
+                self.data["streak"] = repaired
+                self.save()
+                event("M9_STREAK_CHRONOLOGY_REPAIRED",
+                      consecutive_wins=repaired["consecutive_wins"],
+                      reduced_budget=repaired["reduced_budget"],
+                      full_budget_wins=repaired.get("full_budget_wins", 0))
         else:
             self.data = {"schema": 1, "windows": {}, "streak": starting_streak()}
             self.save()
