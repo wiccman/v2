@@ -275,6 +275,98 @@ def fake_record(client, *, fully_sold=True):
                         "quantity": "2"}] if fully_sold else [])}
 
 
+@pytest.mark.parametrize("count", ["0", "0.01", "0.25", "0.75", "1.25", "3.00"])
+def test_fractional_contract_quantities_are_exact(count):
+    from single_coin_minute9 import filled_quantity
+    rows = [{"order_id": "owned", "count_fp": count}]
+    qty, matched = filled_quantity(rows, "owned")
+    assert qty == D(count) and matched == rows
+    # Never adopt another order's fill as bot inventory.
+    assert filled_quantity(rows, "outside") == (D(0), [])
+
+
+@pytest.mark.parametrize("value", [None, True, False, "NaN", "Infinity", "-0.01", "0.005",
+                                  "1.001", "bad", "", {}, []])
+def test_invalid_or_unverifiable_fill_quantity_fails_closed(value):
+    from single_coin_minute9 import filled_quantity
+    with pytest.raises(RuntimeError, match="Unsupported or invalid fill quantity"):
+        filled_quantity([{"order_id": "entry", "count_fp": value}], "entry")
+
+
+def test_missing_fill_count_cannot_be_silently_zero():
+    from single_coin_minute9 import filled_quantity
+    with pytest.raises(RuntimeError, match="Unsupported or invalid fill quantity"):
+        filled_quantity([{"order_id": "entry"}], "entry")
+    assert filled_quantity([], "entry") == (D(0), [])
+
+
+def test_partial_fractional_fills_sum_exactly():
+    from single_coin_minute9 import filled_quantity
+    rows = [{"order_id": "entry", "count_fp": ".25"},
+            {"order_id": "entry", "count_fp": ".50"},
+            {"order_id": "outside", "count_fp": "2"}]
+    assert filled_quantity(rows, "entry") == (D(".75"), rows[:2])
+
+
+def test_fractional_full_exit_reconciles_pnl_and_restart(tmp_path):
+    state = tmp_path / "fractional_full.json"
+    journal = Journal(state)
+    client = FakeTradeClient(fully_sold=True)
+    client.rows[0]["count_fp"] = "1.25"
+    client.rows[1]["count_fp"] = "1.25"
+    client.orders["entry"]["fill_count_fp"] = "1.25"
+    client.orders["exit"]["fill_count_fp"] = "1.25"
+    record = fake_record(client)
+    journal.data["windows"][client.ticker] = record
+    journal.save()
+    journal = Journal(state)
+    record = journal.data["windows"][client.ticker]
+    verify_completed_trade(client, journal, record, START + 575)
+    assert record["outcome"]["status"] == "win"
+    assert D(record["outcome"]["bought"]) == D("1.25")
+    assert D(record["outcome"]["sold"]) == D("1.25")
+    assert D(record["outcome"]["net_pnl_dollars"]) == D(".0425")
+    apply_new_outcomes(journal)
+    assert Journal(state).data["streak"]["consecutive_wins"] == 1
+
+
+def test_fractional_remainder_settlement_is_not_lost(tmp_path):
+    journal = Journal(tmp_path / "fractional_settlement.json")
+    client = FakeTradeClient(result="yes", fully_sold=True)
+    client.market_status = "settled"
+    client.rows[0]["count_fp"] = "1.25"
+    client.rows[1]["count_fp"] = ".25"
+    client.orders["entry"]["fill_count_fp"] = "1.25"
+    client.orders["exit"]["fill_count_fp"] = ".25"
+    record = fake_record(client)
+    journal.data["windows"][client.ticker] = record
+    verify_completed_trade(client, journal, record, CLOSE + 5)
+    assert record["outcome"]["status"] == "win"
+    assert D(record["outcome"]["remaining_at_settlement"]) == D("1.00")
+    assert D(record["outcome"]["net_pnl_dollars"]) == D(".2725")
+
+
+def test_fractional_partial_stop_retries_only_remaining_after_receipt(tmp_path):
+    journal = Journal(tmp_path / "fractional_stop.json")
+    client = StopExchange(side="YES", bid=".51")
+    client.rows[0]["count_fp"] = ".75"
+    client.orders["entry"]["fill_count_fp"] = ".75"
+    client.held = D(".75")
+    record = fake_record(client, fully_sold=False)
+    journal.data["windows"][client.ticker] = record
+    reconcile_exit(client, journal, record, START + 570)
+    assert len(client.submissions) == 1
+    assert abs(client.submissions[0]["signed"]) == D(".75")
+    client.simulate_partial_fill(".25", ".51")
+    client.bid = D(".75")
+    saved = Journal(journal.path)
+    record = saved.data["windows"][client.ticker]
+    reconcile_exit(client, saved, record, START + 571)
+    assert len(client.submissions) == 2
+    assert abs(client.submissions[-1]["signed"]) == D(".50")
+    assert record["sells"][-1]["purpose"] == "stop_loss"
+
+
 def test_full_verified_take_profit_counts_net_win(tmp_path):
     j = Journal(tmp_path / "wins.json")
     client = FakeTradeClient(fully_sold=True, fees=".01")
