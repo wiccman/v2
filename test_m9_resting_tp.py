@@ -262,8 +262,7 @@ def test_sol_marker_exact_20c_boundary(tmp_path):
     r = fake_record(c, fully_sold=False)
     r["series"] = "KXSOL15M"
     j.data["windows"][c.ticker] = r
-    core.reconcile_exit(c, j, r, START + 570)
-    assert "sol_20c_kill" not in r  # Entry-relative 21c stop can still activate.
-    c.bid = D(".20")
-    core.reconcile_exit(c, j, r, START + 572)
+    assert core.maybe_arm_sol_20c_kill(j, r, D(".201"), START + 570) is False
+    assert "sol_20c_kill" not in r
+    assert core.maybe_arm_sol_20c_kill(j, r, D(".20"), START + 572) is True
     assert r["sol_20c_kill"]["trigger_bid"] == ".20"
