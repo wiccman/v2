@@ -113,12 +113,15 @@ def test_explicit_rejection_also_waits_one_minute(setup):
 
 def test_cash_not_sent_also_waits_and_no_money_moved(setup):
     j, now, _, feed = setup
-    c = CashExchange(payload={'balance':2500,
-        'balance_breakdown':[{'exchange_index':0,'balance':'24'},
+    # This exercises a genuine aggregate shortfall. A small shard alone
+    # must reach the venue when total account cash covers the approved order.
+    c = CashExchange(payload={'balance':50,
+        'balance_breakdown':[{'exchange_index':0,'balance':'0'},
                              {'exchange_index':2,'balance':'0.50'}]})
     original = copy.deepcopy(c.payload)
     run(c, j, now, feed)
     assert len(j.data['windows']) == 1 and c.posted == []
+    assert next(iter(j.data['windows'].values()))['outcome']['reason'] == 'insufficient_total_cash'
     now[0] += 59
     run(c, core.Journal(j.path), now, feed)
     assert len(core.Journal(j.path).data['windows']) == 1
@@ -127,6 +130,22 @@ def test_cash_not_sent_also_waits_and_no_money_moved(setup):
     run(c, reopened, now, feed)
     assert len(reopened.data['windows']) == 2
     assert c.posted == [] and c.payload == original
+
+
+def test_top_two_uses_aggregate_cash_without_moving_money(setup):
+    j, now, _, feed = setup
+    c = CashExchange(payload={'balance':2500,
+        'balance_breakdown':[{'exchange_index':0,'balance':'24.50'},
+                             {'exchange_index':2,'balance':'0.50'}]})
+    original = copy.deepcopy(c.payload)
+    run(c, j, now, feed)
+    assert len(c.posted) == 1
+    ticker, side, quantity, price = c.posted[0]
+    assert ticker.startswith('KXETH15M-') and side == 'YES'
+    assert quantity == 4 and price == D('.75')
+    assert quantity * (price + core.FEE_RESERVE) <= D(10) / 3
+    assert j.data['windows'][ticker]['cash_preflight']['cash_check_scope'] == 'aggregate_account_cash'
+    assert c.payload == original
 
 
 def test_never_promotes_third_when_top_two_priced_out(setup):
