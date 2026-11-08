@@ -638,7 +638,6 @@ def test_stop_submits_one_reduce_only_ioc_and_latches_across_restart(tmp_path, s
     assert len(client.submissions) == 1
 
 
-@pytest.mark.parametrize("side", ["YES", "NO"])
 def test_gtc_stop_is_triggered_then_resting_and_repriced_only_after_cancel(tmp_path, monkeypatch):
     monkeypatch.setenv("M9_STOP_ORDER_MODE", "gtc")
     journal = Journal(tmp_path / "gtc-stop.json")
@@ -682,6 +681,7 @@ def test_gtc_stop_no_order_before_threshold(tmp_path, monkeypatch):
     assert "stop_armed" not in record
 
 
+@pytest.mark.parametrize("side", ["YES", "NO"])
 def test_partial_stop_fill_retries_only_remainder_even_after_quote_recovers(tmp_path, side):
     journal = Journal(tmp_path / f"partial-{side}.json")
     client = StopExchange(side=side, bid=".44")
