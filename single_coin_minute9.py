@@ -73,6 +73,8 @@ RELAX_FLOOR_AFTER_WINS = 10
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
+ZONE1_BUY_TIMEOUT_SECONDS = 120
+ZONE1_CANCEL_RETRY_SECONDS = 15
 ZONE1 = "zone1_regular"
 ZONE2 = "zone2_late"
 
@@ -574,6 +576,71 @@ def entry_market_occupied(client, ticker):
                 or client.all_fills(ticker))
 
 
+def cancel_stale_zone1_buy(client, journal, record, now, *, order=None):
+    """Cancel only the bot-owned UNFILLED remainder after 120s.
+
+    Regular entries remain immediate-or-cancel. This is a watchdog for an
+    unexpectedly pending/resting or unknown-status order, NOT permission to
+    adopt another order or place a replacement. Partial fills remain owned
+    and are reconciled for normal stop / take-profit after the buy terminates.
+    """
+    if (record.get("entry_zone", ZONE1) != ZONE1
+            or record.get("entry_kind") == "late_basket_rank"
+            or record.get("outcome")):
+        return False
+    intent = record.get("buy")
+    if not isinstance(intent, dict):
+        return False
+    stamp = intent.get("created_at")
+    if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+            or not math.isfinite(stamp) or stamp < 0
+            or not math.isfinite(now)):
+        event("M9_ZONE1_BUY_TIMEOUT_INVALID_TIMESTAMP", ticker=record["ticker"])
+        return False
+    if now < stamp + ZONE1_BUY_TIMEOUT_SECONDS:
+        return False
+    ticker = record["ticker"]
+    if order is None:
+        order = find_order(client, ticker, intent)
+    if order is None:
+        event("M9_ZONE1_BUY_TIMEOUT_ACK_UNRESOLVED", ticker=ticker,
+              age_seconds=round(now - stamp, 1))
+        return False
+    if order.get("status") in TERMINAL:
+        return False
+    # A fully filled order may have a delayed terminal status. Do not cancel
+    # a known fully filled order; continue reconciling its terminal receipt.
+    filled = order.get("fill_count_fp", order.get("fill_count"))
+    if filled is not None:
+        count = D(str(filled))
+        if not count.is_finite() or count < 0 or count > D(str(record["quantity"])):
+            raise RuntimeError("Invalid entry fill receipt")
+        if count == D(str(record["quantity"])):
+            event("M9_ZONE1_BUY_TIMEOUT_FULL_FILL_WAIT", ticker=ticker,
+                  order_id=intent["order_id"])
+            return False
+    previous = record.get("zone1_cancel") or {}
+    last = previous.get("attempted_at")
+    if last is not None:
+        if (isinstance(last, bool) or not isinstance(last, (int, float))
+                or not math.isfinite(last) or last < 0):
+            raise RuntimeError("Invalid saved Zone 1 cancellation time")
+        if 0 <= now - last < ZONE1_CANCEL_RETRY_SECONDS:
+            return False
+    record["zone1_cancel"] = {
+        "attempted_at": now, "order_id": intent["order_id"],
+        "client_id": intent["client_id"], "reason": "unfilled_remainder_after_120s",
+    }
+    journal.save()  # Retry-safe intent saved BEFORE cancellation request.
+    event("M9_ZONE1_BUY_CANCEL_SUBMIT", ticker=ticker,
+          order_id=intent["order_id"], age_seconds=round(now - stamp, 1),
+          entry_zone=ZONE1, reason="unfilled_remainder_after_120s")
+    client.cancel(intent["order_id"], ticker)
+    event("M9_ZONE1_BUY_CANCEL_ACCEPTED", ticker=ticker,
+          order_id=intent["order_id"], entry_zone=ZONE1)
+    return True
+
+
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
     buy = find_order(client, ticker, record["buy"])
@@ -582,7 +649,8 @@ def reconcile_exit(client, journal, record, now):
         return
     journal.save()
     if buy.get("status") not in TERMINAL:
-        return  # IOC must terminate before attempting exits
+        cancel_stale_zone1_buy(client, journal, record, now, order=buy)
+        return  # Never sell or assume zero-fill before terminal order proof.
     all_fills = client.all_fills(ticker)
     bought, buy_rows = filled_quantity(all_fills, record["buy"]["order_id"])
     if bought == 0:
@@ -810,7 +878,11 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                     continue
                 closed_checked[ticker] = now
             try:
-                if not is_closed:
+                if is_closed:
+                    # Rare delayed pending orders still need cancellation even
+                    # after the market window has ended.
+                    cancel_stale_zone1_buy(client, journal, record, now)
+                else:
                     reconcile_exit(client, journal, record, now)
                 verify_completed_trade(client, journal, record, now)
             except Exception as error:
@@ -975,6 +1047,7 @@ def main(argv=None):
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               max_entries_per_window=max_entries_per_window,
               entry_queue_policy=ENTRY_QUEUE_POLICY,
+              zone1_unfilled_buy_timeout_seconds=ZONE1_BUY_TIMEOUT_SECONDS,
               entry_start_seconds=ENTRY_START_SECONDS,
               entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
