@@ -109,6 +109,7 @@ class CashState:
         self.snapshot = None
         self.diagnostic_done = False
         self.allocation_diagnostic_done = False
+        self.resting_order_diagnostic_done = False
 
     def log_target_allocation(self, client, exchange_index):
         """One best-effort GET for actionable diagnostics; never changes allocation."""
@@ -139,6 +140,36 @@ class CashState:
         except Exception as error:
             core.event("M9_TARGET_BALANCE_ALLOCATION_UNAVAILABLE",
                        market_exchange_index=exchange_index,
+                       **ranked.error_fields(error))
+
+    def log_resting_orders(self, client):
+        """One GET-only summary of resting orders; never cancels or changes them."""
+        if self.resting_order_diagnostic_done:
+            return
+        self.resting_order_diagnostic_done = True
+        try:
+            rows = client.all_orders(None, "resting")
+            if not isinstance(rows, list):
+                raise CashUnavailable("invalid_resting_orders")
+            safe = []
+            for row in rows[:50]:
+                if not isinstance(row, dict):
+                    continue
+                safe.append({
+                    "ticker": row.get("ticker"),
+                    "side": row.get("side"),
+                    "status": row.get("status"),
+                    "exchange_index": row.get("exchange_index"),
+                    "remaining_count": row.get("remaining_count_fp", row.get("remaining_count")),
+                    "yes_price": row.get("yes_price_dollars", row.get("yes_price")),
+                    "no_price": row.get("no_price_dollars", row.get("no_price")),
+                })
+            core.event("M9_RESTING_ORDERS_DIAGNOSTIC",
+                       resting_order_count=len(rows),
+                       orders=safe,
+                       truncated=len(rows) > len(safe))
+        except Exception as error:
+            core.event("M9_RESTING_ORDERS_DIAGNOSTIC_UNAVAILABLE",
                        **ranked.error_fields(error))
 
     def read(self, client, now):
@@ -252,6 +283,7 @@ def run_cash_checked_pass(client, journal, series_list, base_budget, max_contrac
             try:
                 state.read(client, core.time.time())
                 state.log_target_allocation(client, None)
+                state.log_resting_orders(client)
             except Exception as error:
                 core.event("M9_CASH_DIAGNOSTIC_UNAVAILABLE", **ranked.error_fields(error))
 
