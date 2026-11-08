@@ -1,7 +1,7 @@
 """Single-coin 15-minute Kalshi markets: minute-nine buy, +5c gross exit.
 
 For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
-whichever side has a quoted ask from 59c through 91c from elapsed minute 9 until the configured entry cutoff.
+whichever side has a quoted ask from 69c through 91c from elapsed minute 9 until the configured entry cutoff.
 No basket mean, leader rank, direction indicator or other coin-selection rule.
 Both sides qualifying is ambiguous, so the market is skipped. By default
 only one filled or potentially-filled market per 15-minute window is allowed.
@@ -44,7 +44,7 @@ from kalshi import KalshiClient
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = D(".59"), D(".91"), D(".05"), D(".45")
+MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = D(".69"), D(".91"), D(".05"), D(".45")
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
