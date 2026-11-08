@@ -17,9 +17,10 @@ the unset default of 600 preserves the archived minute-nine-only mode.
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
-An absolute executable bid at M9_STOP_BID_CENTS (default 45c) triggers a price-protected reduce-only IOC,
-regardless of entry price. The actual exit fill can be below 45c on a gap;
-IOC exits require the process to run.
+A drop of M9_STOP_DROP_CENTS (default 21c) below the verified average entry
+cost in the executable bid triggers a reduce-only IOC, canceling any resting TP
+first. A fast gap or illiquid book can result in a worse realized loss;
+the IOC requires the process to be running.
 At startup use one third of the normal budget. A verified loss enables the full
 budget; two consecutive wins at full budget return to one third, which stays
 active until the next verified loss. A loss at full budget resets its win count.
@@ -50,15 +51,23 @@ MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE, PROFIT = (
 )
 
 
-def stop_bid_from_cents(value):
-    """Strict integer-cent stop threshold, independent of entry price."""
+def stop_drop_from_cents(value):
+    """Validate the absolute cent drop from verified average entry cost."""
     if (not isinstance(value, str) or not value.isascii() or not value.isdecimal()
             or not 1 <= int(value) <= 99):
-        raise ValueError("M9_STOP_BID_CENTS must be an integer from 1 to 99")
+        raise ValueError("M9_STOP_DROP_CENTS must be an integer from 1 to 99")
     return D(value) / D("100")
 
 
-STOP_BID = stop_bid_from_cents(os.getenv("M9_STOP_BID_CENTS", "45"))
+STOP_DROP = stop_drop_from_cents(os.getenv("M9_STOP_DROP_CENTS", "21"))
+
+
+def stop_threshold_for_entry(cost):
+    """Executable-bid trigger at verified average entry cost minus 21 cents."""
+    cost = D(str(cost))
+    if not cost.is_finite() or not D(0) < cost < D(1):
+        raise ValueError("Invalid verified entry cost")
+    return cost - STOP_DROP
 RELAX_FLOOR_AFTER_WINS = 10
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
@@ -119,16 +128,16 @@ def plan_single_coin(market, now, series, *, min_price=None):
 def exit_decision(cost, bid, *, stop_armed=False):
     """Return (exit kind, protected IOC limit) from executable bid and fill cost.
 
-    The configured absolute stop bid is the trigger, independent of entry cost:
-    on a gap the exit limit is the currently quoted bid, not the stop threshold.
-    A latched stop keeps priority over TP through later price recovery/restarts.
+    Stop when executable bid is 21c below verified average entry cost.
+    On a gap the IOC limit is the currently quoted bid, not the threshold.
+    A latched stop keeps priority over TP through recovery and restarts.
     """
     cost, bid = D(str(cost)), D(str(bid))
     if not cost.is_finite() or not D(0) < cost < D(1):
         raise ValueError("Invalid verified entry cost")
     if not bid.is_finite() or not D(0) <= bid <= D(1):
         raise ValueError("Invalid executable bid")
-    if stop_armed or bid <= STOP_BID:
+    if stop_armed or bid <= stop_threshold_for_entry(cost):
         # No executable bid means stop stays armed and is retried next pass.
         return "stop_loss", bid if D(0) < bid < D(1) else None
     target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
@@ -486,6 +495,12 @@ def reconcile_exit(client, journal, record, now):
     if receipt is None or D(str(receipt)) != bought:
         event("M9_BUY_FILL_RECONCILING", ticker=ticker)
         return
+    # Use exactly the same verified weighted-average entry cost for both
+    # the resting TP cancellation path and the normal stop-order path.
+    sign = 1 if record["side"] == "YES" else -1
+    cost = sum((D(str(f.get("count_fp", f.get("count")))) * _outcome_cost(f, sign)
+                for f in buy_rows), D(0)) / bought
+    threshold = stop_threshold_for_entry(cost)
     sold = D(0)
     for intent in record["sells"]:
         order = find_order(client, ticker, intent)
@@ -496,11 +511,14 @@ def reconcile_exit(client, journal, record, now):
             if intent.get("execution") == "gtc" and order.get("status") == "resting":
                 market = client.market(ticker)
                 bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
-                if bid.is_finite() and (bid <= STOP_BID or record.get("stop_armed")):
+                if bid.is_finite() and (bid <= threshold or record.get("stop_armed")):
                     if not record.get("stop_armed"):
                         record["stop_armed"] = {"at": now, "trigger_bid": str(bid),
-                                                "threshold": str(STOP_BID)}
-                    journal.save()  # Persist stop before cancellation; never reset on recovery.
+                                                "threshold": str(threshold),
+                                                "entry_cost": str(cost)}
+                        journal.save()  # Latch before cancel; do not re-arm after restart.
+                        event("M9_STOP_TRIGGERED", ticker=ticker, entry_cost=str(cost),
+                              trigger_bid=str(bid), threshold=str(threshold))
                     client.cancel(intent["order_id"], ticker)
                     event("M9_TP_CANCEL_FOR_STOP", ticker=ticker, order_id=intent["order_id"])
             event("M9_SELL_ACK_PENDING", ticker=ticker)
@@ -538,7 +556,6 @@ def reconcile_exit(client, journal, record, now):
     if remaining <= 0:
         return
     held = position_for(client, ticker)
-    sign = 1 if record["side"] == "YES" else -1
     if held != sign * remaining:  # No netting/over-selling any manual inventory
         event("M9_EXIT_OWNERSHIP_WAIT", ticker=ticker, bought=str(bought),
               sold=str(sold), held=str(held))
@@ -554,8 +571,6 @@ def reconcile_exit(client, journal, record, now):
     market = client.market(ticker)
     if parse_time(market["close_time"]) <= now or market.get("status") not in {"active", "open"}:
         return
-    cost = sum((D(str(f.get("count_fp", f.get("count")))) * _outcome_cost(f, sign)
-                for f in buy_rows), D(0)) / bought
     bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
     purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
     if purpose is None:
@@ -566,11 +581,12 @@ def reconcile_exit(client, journal, record, now):
     if purpose == "stop_loss" and not record.get("stop_armed"):
         # Latch the trigger even if the book temporarily loses its best bid.
         record["stop_armed"] = {
-            "at": now, "trigger_bid": str(bid), "threshold": str(STOP_BID)
+            "at": now, "trigger_bid": str(bid), "threshold": str(threshold),
+            "entry_cost": str(cost)
         }
         journal.save()
         event("M9_STOP_TRIGGERED", ticker=ticker, entry_cost=str(cost),
-              trigger_bid=str(bid), threshold=str(STOP_BID))
+              trigger_bid=str(bid), threshold=str(threshold))
     if limit is None:
         event("M9_STOP_NO_EXECUTABLE_BID", ticker=ticker)
         return
@@ -868,7 +884,8 @@ def main(argv=None):
               price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
               floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
               relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=5, take_profit_execution="gtc_after_confirmed_fill",
-              stop_bid_cents=int(STOP_BID * 100), stop_execution="bid_limited_reduce_only_ioc")
+              stop_drop_cents=int(STOP_DROP * 100), stop_basis="verified_average_entry_cost",
+              stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()
             try:
