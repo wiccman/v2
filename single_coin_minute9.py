@@ -222,6 +222,23 @@ def fill_timestamp(row):
     raise ValueError("Cannot establish completion time from fill")
 
 
+def emit_exit_summary(record, *, source):
+    """Log only saved reconciliation facts; no API reads or order actions."""
+    outcome = record.get("outcome") or {}
+    sells = record.get("sells") or []
+    if not outcome or not sells:
+        return
+    event("M9_EXIT_SUMMARY", ticker=record.get("ticker"), source=source,
+          result=outcome.get("status"), net_pnl_dollars=outcome.get("net_pnl_dollars"),
+          bought=outcome.get("bought"), sold=outcome.get("sold"),
+          remaining_at_settlement=outcome.get("remaining_at_settlement"),
+          completed_at=outcome.get("completed_at"), exit_attempts=len(sells),
+          attempts=[{"created_at": x.get("created_at"), "quantity": x.get("quantity"),
+                     "target": x.get("target"), "purpose": x.get("purpose"),
+                     "execution": x.get("execution"),
+                     "acknowledged": bool(x.get("order_id"))} for x in sells])
+
+
 def verify_completed_trade(client, journal, record, now):
     """Only fully reconciled exits or finalized market payouts affect streak."""
     if record.get("outcome") or not record.get("buy"):
@@ -307,6 +324,7 @@ def verify_completed_trade(client, journal, record, now):
                           "bought": str(bought), "sold": str(sold),
                           "remaining_at_settlement": str(remaining)}
     journal.save()
+    emit_exit_summary(record, source="live_reconciliation")
 
 
 class Journal:
@@ -458,6 +476,17 @@ def reconcile_exit(client, journal, record, now):
         if expected is None or D(str(expected)) != count:
             event("M9_SELL_FILL_RECONCILING", ticker=ticker)
             return
+        audited = getattr(journal, "_exit_receipts_logged", None)
+        if audited is None:
+            audited = set()
+            journal._exit_receipts_logged = audited
+        receipt_key = (ticker, intent["order_id"])
+        if receipt_key not in audited:
+            event("M9_EXIT_TERMINAL", ticker=ticker, order_id=intent["order_id"],
+                  status=order.get("status"), quantity=intent["quantity"],
+                  filled=str(count), target=intent.get("target"),
+                  purpose=intent.get("purpose"), execution=intent.get("execution"))
+            audited.add(receipt_key)
         sold += count
     owned_ids = {record["buy"]["order_id"]} | {
         intent["order_id"] for intent in record["sells"]
@@ -777,6 +806,11 @@ def main(argv=None):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         session.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
         journal = Journal(state)
+        # Bounded read-only replay lets diagnostics inspect prior exit incidents.
+        completed = [r for r in journal.data["windows"].values()
+                     if r.get("outcome") and r.get("sells")]
+        for record in completed[-24:]:
+            emit_exit_summary(record, source="startup_journal")
         client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""),
             timeout=5, role="entry", quote_ttl=0.1, session=session)
