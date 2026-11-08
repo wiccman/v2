@@ -156,7 +156,9 @@ class CashCheckedClient:
             total, shards = self.state.read(self.client, now)
             # Shard balances are diagnostic. Kalshi's order API decides
             # whether the aggregate cash is spendable on this market.
-            market_cash = shards.get(index) if shards is not None else None
+            if shards is None or index not in shards:
+                raise CashUnavailable("market_cash_missing")
+            market_cash = shards[index]
             available = total
             required = D(quantity) * (D(outcome_price) + core.FEE_RESERVE)
             if not required.is_finite() or required <= 0:
