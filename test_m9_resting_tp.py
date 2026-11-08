@@ -190,7 +190,7 @@ def test_sol_absolute_20c_emergency_trigger_executes_both_zones(
     record["entry_zone"] = zone
     journal.data["windows"][core.zone_record_key(client.ticker, zone)] = record
     core.reconcile_exit(client, journal, record, START + 570)
-    assert record["sol_20c_kill"]["threshold"] == ".20"
+    assert D(record["sol_20c_kill"]["threshold"]) == D(".20")
     assert record["stop_armed"]
     assert record["sells"][0]["purpose"] == "stop_loss"
     assert record["sells"][0]["execution"] == "reduce_only_ioc"
@@ -265,4 +265,4 @@ def test_sol_marker_exact_20c_boundary(tmp_path):
     assert core.maybe_arm_sol_20c_kill(j, r, D(".201"), START + 570) is False
     assert "sol_20c_kill" not in r
     assert core.maybe_arm_sol_20c_kill(j, r, D(".20"), START + 572) is True
-    assert r["sol_20c_kill"]["trigger_bid"] == ".20"
+    assert D(r["sol_20c_kill"]["trigger_bid"]) == D(".20")
