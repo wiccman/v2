@@ -4,7 +4,7 @@ from decimal import Decimal as D
 
 import pytest
 from single_coin_minute9 import (Journal, DEFAULT_SERIES, plan_single_coin,
-    starting_streak, next_streak, trade_budget, budgeted_quantity,
+    starting_streak, next_streak, entry_min_price, trade_budget, budgeted_quantity,
     apply_new_outcomes, verify_completed_trade, exit_decision, reconcile_exit,
     window_entry_count, run_pass)
 
@@ -105,6 +105,45 @@ def test_loss_before_streak_resets_progress():
     s = next_streak(next_streak(starting_streak(), "win"), "win")
     assert next_streak(s, "loss") == starting_streak()
     assert next_streak(starting_streak(), "win")["consecutive_wins"] == 1
+
+
+def test_ten_consecutive_wins_unlock_60c_floor_and_loss_restores_69c():
+    s = starting_streak()
+    assert entry_min_price(s) == D(".69")
+    for wins in range(1, 10):
+        s = next_streak(s, "win")
+        assert s["consecutive_wins"] == wins
+        assert entry_min_price(s) == D(".69")
+    s = next_streak(s, "win")
+    assert s["consecutive_wins"] == 10
+    assert s["reduced_budget"] is True
+    assert entry_min_price(s) == D(".60")
+    # Additional wins keep the unlocked floor without overflowing persisted state.
+    s = next_streak(s, "win")
+    assert s["consecutive_wins"] == 10
+    assert entry_min_price(s) == D(".60")
+    assert entry_min_price(next_streak(s, "loss")) == D(".69")
+
+
+def test_flat_breaks_ten_win_streak_but_keeps_reduced_budget_mode():
+    s = starting_streak()
+    for _ in range(10):
+        s = next_streak(s, "win")
+    flat = next_streak(s, "flat")
+    assert flat == {"consecutive_wins": 0, "reduced_budget": True}
+    assert entry_min_price(flat) == D(".69")
+
+
+def test_relaxed_floor_allows_60c_but_never_below_it():
+    s = starting_streak()
+    for _ in range(10):
+        s = next_streak(s, "win")
+    floor = entry_min_price(s)
+    assert plan_single_coin(market(yes=".60", no=".01"), START + 550,
+                            "KXBTC15M", min_price=floor)
+    assert plan_single_coin(market(yes=".5999", no=".01"), START + 550,
+                            "KXBTC15M", min_price=floor) is None
+    assert budgeted_quantity(D("10"), D(".60"), min_price=floor) > 0
 
 
 def test_flat_interrupts_streak_but_does_not_restore_half_mode():
