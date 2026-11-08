@@ -1,4 +1,4 @@
-"""Minute 9 through close; top two non-BTC performers from the top three.
+"""Minute 9 through close; top two overall performers only; BTC excluded.
 
 Reuse the deployed entry, exit, cash, ownership and streak implementations.
 One filled or potentially-filled market per period remains the limit. A second
@@ -14,7 +14,7 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 
-POLICY = "minute9-top2-skip-btc-v3"
+POLICY = "minute9-top2-strict-skip-btc-v4"
 START_SECONDS = 540
 END_SECONDS = 900
 TOP_COUNT = 2
@@ -89,8 +89,8 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         return
     if not START_SECONDS <= clock() - start < END_SECONDS:
         return
-    # Only a BTC slot can promote rank three. Keep original ranks in diagnostics.
-    selected = [(position, row) for position, row in enumerate(rows[:TOP_COUNT + 1], 1)
+    # Restrict overall ranks before excluding BTC; never promote rank three.
+    selected = [(position, row) for position, row in enumerate(rows[:TOP_COUNT], 1)
                 if row.series != BTC_SERIES][:TOP_COUNT]
     selected_series = {row.series for _, row in selected}
     core.event("M8_TOP2_QUEUE", policy=POLICY, window_start_ms=start * 1000,
