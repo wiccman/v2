@@ -73,6 +73,22 @@ RELAX_FLOOR_AFTER_WINS = 10
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
+ZONE1 = "zone1_regular"
+ZONE2 = "zone2_late"
+
+
+def zone_record_key(ticker, zone):
+    """Journal identity is zone + market, not market alone.
+
+    Preserve legacy regular records keyed by ticker for safe migration.
+    """
+    if not isinstance(ticker, str) or not ticker:
+        raise ValueError("Missing market identity")
+    if zone == ZONE1:
+        return ticker
+    if zone == ZONE2:
+        return "zone2::" + ticker
+    raise ValueError("Unknown entry zone")
 ENTRY_START_SECONDS = 540
 ENTRY_END_SECONDS = int(os.getenv("M9_ENTRY_END_SECONDS", "600"))
 if not 600 <= ENTRY_END_SECONDS <= 900:
@@ -282,6 +298,7 @@ def apply_new_outcomes(journal):
         event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
               entry_kind=record.get("entry_kind", "regular"),
+              entry_zone=record.get("entry_zone", ZONE1),
               result_completed_at=record["outcome"].get("completed_at"),
               streak_replayed_in_completion_order=True,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
@@ -313,6 +330,7 @@ def emit_exit_summary(record, *, source):
         return
     event("M9_EXIT_SUMMARY", ticker=record.get("ticker"), source=source,
           result=outcome.get("status"), net_pnl_dollars=outcome.get("net_pnl_dollars"),
+          entry_zone=record.get("entry_zone", ZONE1),
           bought=outcome.get("bought"), sold=outcome.get("sold"),
           remaining_at_settlement=outcome.get("remaining_at_settlement"),
           completed_at=outcome.get("completed_at"), exit_attempts=len(sells),
@@ -857,14 +875,14 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
                   "created_at": time.time()}
         record = {"ticker": ticker, "series": series, "side": current["side"],
-                  "window_start_ms": start_ms,
+                  "entry_zone": ZONE1, "window_start_ms": start_ms,
                   "quantity": str(quantity), "allocated_dollars": str(allocation),
                   "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
                   "entry_floor_at_entry": str(min_price),
                   "buy": intent, "sells": []}
         journal.data["windows"][ticker] = record
         journal.save()  # A pending/ambiguous POST consumes the slot durably.
-        event("M9_BUY_SUBMIT", ticker=ticker, side=current["side"],
+        event("M9_BUY_SUBMIT", ticker=ticker, entry_zone=ZONE1, side=current["side"],
               quantity=str(quantity), price=current["limit"],
               entry_floor_cents=int(min_price * 100),
               take_profit_cents=int((D(current["limit"]) + PROFIT) * 100))
