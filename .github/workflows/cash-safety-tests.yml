@@ -2,7 +2,7 @@ name: Minute-nine cash safety
 
 on:
   push:
-    branches: [fix/minute9-cash-preflight-rejections]
+    branches: [fix/minute9-cash-preflight-rejections, fix/aggregate-cash-preflight]
   pull_request:
     paths:
       - cash_checked_minute9.py
