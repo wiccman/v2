@@ -69,7 +69,7 @@ def test_regular_slot_untouched_and_half_active_budget_total(scenario):
     assert ticker.startswith("KXETH15M-")
     assert side == "YES" and quantity == 1 and price == D(".97")
     assert core.window_entry_count(journal, START * 1000) == 0
-    assert journal.data["windows"][ticker]["entry_kind"] == late.LATE_KIND
+    assert journal.data["windows"][core.zone_record_key(ticker, core.ZONE2)]["entry_kind"] == late.LATE_KIND
     now[0] += 2.1
     run(journal, client, now, feed)
     assert len(client.posted) == 2
@@ -198,6 +198,128 @@ def test_high_price_fill_has_no_impossible_5cent_tp_but_keeps_stop(scenario):
     assert not record["sells"]  # A 102c take-profit is impossible.
     assert core.exit_decision(D(".97"), D(".76")) == ("stop_loss", D(".76"))
     assert core.exit_decision(D(".97"), D(".96")) == (None, None)
+
+
+def confirmed_zone1_zero_fill(ticker):
+    return {
+        "ticker": ticker, "series": ticker.split("-")[0],
+        "entry_zone": core.ZONE1, "window_start_ms": START * 1000,
+        "quantity": "2", "buy": {"client_id": "old-regular-client",
+                                "order_id": "old-regular-order",
+                                "limit": "0.84", "created_at": START + 600},
+        "entry_zero_fill_verified": {
+            "order_id": "old-regular-order", "client_id": "old-regular-client",
+            "status": "canceled", "filled": "0", "remaining": "0"},
+        "outcome": {"status": "no_fill", "counted": True,
+                    "completed_at": START + 602},
+        "sells": [],
+    }
+
+
+def test_zone1_verified_no_fill_does_not_block_zone2_eth_reentry(scenario):
+    now, events, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    journal.data["windows"][ticker] = confirmed_zone1_zero_fill(ticker)
+    journal.save()
+    feed = Feed(now)
+    run(journal, client, now, feed)
+    key = core.zone_record_key(ticker, core.ZONE2)
+    assert [x[0] for x in client.posted] == [ticker]
+    assert journal.data["windows"][ticker]["entry_zone"] == core.ZONE1
+    assert journal.data["windows"][key]["entry_zone"] == core.ZONE2
+    assert journal.data["windows"][ticker]["outcome"]["status"] == "no_fill"
+    assert journal.data["windows"][key]["buy"]["client_id"] != "old-regular-client"
+    assert core.window_entry_count(journal, START * 1000) == 0
+    assert late.zone2_attempt_exists(journal, ticker)
+    assert any(n == "M9_LATE_BUY_SUBMIT" and d["entry_zone"] == core.ZONE2
+               for n, d in events)
+
+
+def test_zone2_restart_does_not_repeat_same_ticker_after_zone1_no_fill(scenario):
+    now, _, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    journal.data["windows"][ticker] = confirmed_zone1_zero_fill(ticker)
+    journal.save()
+    feed = Feed(now)
+    run(journal, client, now, feed)
+    assert len(client.posted) == 1
+    now[0] += 5
+    run(core.Journal(journal.path), client, now, feed)
+    assert len(client.posted) == 1
+
+
+def test_zone1_ambiguous_order_blocks_zone2_even_without_exchange_inventory(scenario):
+    now, events, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    record = confirmed_zone1_zero_fill(ticker)
+    record.pop("entry_zero_fill_verified")
+    record.pop("outcome")
+    journal.data["windows"][ticker] = record
+    journal.save()
+    run(journal, client, now, Feed(now))
+    assert client.posted == []
+    assert any(n == "M9_LATE_ZONE_BLOCKED" and d["reason"] == "zone1_order_unresolved"
+               for n, d in events)
+
+
+def test_zone1_no_fill_without_proof_cannot_enable_zone2(scenario):
+    now, events, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    record = confirmed_zone1_zero_fill(ticker)
+    record.pop("entry_zero_fill_verified")
+    journal.data["windows"][ticker] = record
+    run(journal, client, now, Feed(now))
+    assert client.posted == []
+    assert any(n == "M9_LATE_ZONE_BLOCKED" and d["reason"] == "zone1_zero_fill_unverified"
+               for n, d in events)
+
+
+def test_zone1_completed_trade_allows_distinct_zone2_only_when_owned(scenario):
+    now, events, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    regular = confirmed_zone1_zero_fill(ticker)
+    regular["outcome"] = {"status": "win", "counted": True,
+                          "completed_at": START + 650,
+                          "bought": "2", "sold": "2",
+                          "remaining_at_settlement": "0"}
+    regular.pop("entry_zero_fill_verified")
+    regular["sells"] = [{"order_id": "old-regular-sell", "client_id": "old-sell-id"}]
+    journal.data["windows"][ticker] = regular
+    client.fills_by_ticker[ticker] = [
+        {"order_id": "old-regular-order", "count_fp": "2"},
+        {"order_id": "old-regular-sell", "count_fp": "2"}]
+    client.orders["old-regular-order"] = {
+        "order_id": "old-regular-order", "ticker": ticker, "status": "executed"}
+    client.orders["old-regular-sell"] = {
+        "order_id": "old-regular-sell", "ticker": ticker, "status": "executed"}
+    allowed, reason = late.zone2_entry_status(client, journal, ticker)
+    assert allowed, reason
+    client.fills_by_ticker[ticker].append({"order_id": "outside", "count_fp": "1"})
+    allowed, reason = late.zone2_entry_status(client, journal, ticker)
+    assert not allowed and reason == "outside_market_fills"
+
+
+def test_zone1_complete_but_unclosed_inventory_blocks_zone2(scenario):
+    now, _, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    regular = confirmed_zone1_zero_fill(ticker)
+    regular["outcome"] = {"status": "win", "completed_at": START + 650,
+                          "bought": "2", "sold": "1",
+                          "remaining_at_settlement": "1"}
+    journal.data["windows"][ticker] = regular
+    assert late.zone2_entry_status(client, journal, ticker) == (
+        False, "zone1_inventory_not_fully_closed")
+
+
+def test_cash_guard_selects_zone2_by_client_order_id_not_zone1_ticker(scenario):
+    now, _, journal, client = scenario
+    ticker = client.market("KXETH15M-TEST")["ticker"]
+    journal.data["windows"][ticker] = confirmed_zone1_zero_fill(ticker)
+    feed = Feed(now)
+    run(journal, client, now, feed)
+    # Zone 1's saved intent must never be overwritten by the new Zone 2 entry.
+    assert journal.data["windows"][ticker]["buy"]["client_id"] == "old-regular-client"
+    assert len(client.posted) == 1
 
 
 def test_preview_never_writes_or_sends_orders(scenario):
