@@ -692,7 +692,7 @@ def main(argv=None):
               entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
-              price_range_cents="59-91", take_profit_cents=5,
+              price_range_cents=f"{int(MIN_PRICE * 100)}-{int(MAX_PRICE * 100)}", take_profit_cents=5,
               stop_bid_cents=int(STOP_BID * 100), stop_execution="bid_limited_reduce_only_ioc")
         while not stop:
             started = time.monotonic()
