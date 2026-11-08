@@ -119,6 +119,8 @@ def test_stop_take_profit_and_inverted_budget_sequence():
     assert core.exit_decision('.75','.80')[0]=='take_profit'
     assert core.exit_decision('.75','.46')==(None,None)
     streak=core.starting_streak()
-    for _ in range(3):streak=core.next_streak(streak,'win')
+    assert core.trade_budget(streak,D(10))==D(10)/3
+    streak=core.next_streak(streak,'loss')
     assert core.trade_budget(streak,D(10))==D(10)
-    assert core.trade_budget(core.next_streak(streak,'loss'),D(10))==D(10)/3
+    streak=core.next_streak(core.next_streak(streak,'win'),'win')
+    assert core.trade_budget(streak,D(10))==D(10)/3
