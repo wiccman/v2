@@ -303,6 +303,7 @@ def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
 
 @pytest.mark.parametrize("outside,can_settle", [
     ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask"}, True),
+    ({"action": "sell", "side": "yes", "outcome_side": "no", "book_side": "ask"}, True),
     ({"action": "buy", "side": "yes", "outcome_side": "yes", "book_side": "bid"}, False),
     ({"action": "sell", "side": "no", "outcome_side": "no", "book_side": "ask"}, False),
     ({"action": "buy", "outcome_side": "no", "book_side": "ask"}, False),
