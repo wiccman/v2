@@ -1,0 +1,36 @@
+name: Read-only Crypto Leader historical market results
+on:
+  push:
+    branches:
+      - analysis/leader-second-closest-20261109
+permissions:
+  contents: read
+jobs:
+  public-market-lookup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch public Kalshi settlement records (no credentials, no orders)
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json, urllib.request, urllib.error, time
+          tickers = ["KXCRYPTOLEAD15M-26NOV082145-ETH","KXCRYPTOLEAD15M-26NOV082200-ETH","KXCRYPTOLEAD15M-26NOV082230-XRP","KXCRYPTOLEAD15M-26NOV082330-BTC","KXCRYPTOLEAD15M-26NOV082345-HYPE","KXCRYPTOLEAD15M-26NOV090000-XRP","KXCRYPTOLEAD15M-26NOV090030-BTC","KXCRYPTOLEAD15M-26NOV090130-BTC","KXCRYPTOLEAD15M-26NOV090145-BTC","KXCRYPTOLEAD15M-26NOV090200-XRP","KXCRYPTOLEAD15M-26NOV090245-BTC","KXCRYPTOLEAD15M-26NOV090300-XRP","KXCRYPTOLEAD15M-26NOV090315-HYPE","KXCRYPTOLEAD15M-26NOV090400-XRP"]
+          hosts = ['https://external-api.kalshi.com', 'https://api.elections.kalshi.com']
+          for ticker in tickers:
+              result = None
+              errors = []
+              for host in hosts:
+                  url = host + '/trade-api/v2/markets/' + ticker
+                  try:
+                      req = urllib.request.Request(url,headers={'User-Agent':'Mozilla/5.0 LeaderMarketAudit/1.0','Accept':'application/json'})
+                      with urllib.request.urlopen(req,timeout=10) as f:
+                          market = json.load(f).get('market', {})
+                      result = { 'ticker':ticker, 'status':market.get('status'), 'result':market.get('result'), 'close_time':market.get('close_time'), 'no_ask_dollars':market.get('no_ask_dollars'), 'last_price_dollars':market.get('last_price_dollars') }
+                      break
+                  except Exception as e:
+                      errors.append(type(e).__name__ + ': ' + str(e)[:95])
+                  time.sleep(0.25)
+              print('MARKET_RESULT ' + json.dumps(result if result else {'ticker':ticker,'errors':errors}), flush=True)
+              time.sleep(0.3)
+          PY
