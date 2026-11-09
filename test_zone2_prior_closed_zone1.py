@@ -77,7 +77,7 @@ def test_prior_closed_zone1_fills_do_not_block_zone2_98c_tp_and_stop(tmp_path, s
     client.bid = D(".70")
     core.reconcile_exit(client, again, record, START + 737)
     assert client.orders["exit-1"]["status"] == "canceled"
-    assert record["stop_armed"]["threshold"] == ".70"
+    assert D(record["stop_armed"]["threshold"]) == D(".70")
     core.reconcile_exit(client, again, record, START + 739)
     assert len(client.submissions) == 2
     assert record["sells"][-1]["purpose"] == "stop_loss"
