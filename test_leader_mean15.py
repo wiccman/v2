@@ -299,3 +299,66 @@ def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
     assert restarted.journal.data["windows"][str(START)]["outcome"]["status"] == "win"
     assert len(venue.submissions) == 1
 
+
+
+@pytest.mark.parametrize("outside,can_settle", [
+    ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask"}, True),
+    ({"action": "buy", "side": "yes", "outcome_side": "yes", "book_side": "bid"}, False),
+    ({"action": "sell", "side": "no", "outcome_side": "no", "book_side": "ask"}, False),
+    ({"action": "buy", "outcome_side": "no", "book_side": "ask"}, False),
+    ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "bid"}, False),
+    ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask",
+      "subaccount_number": 1}, False),
+])
+def test_extra_fill_settles_only_when_proven_same_side_buy(
+        tmp_path, outside, can_settle):
+    now = [START + 183]
+    runner = leader.LeaderRunner(tmp_path / "leader.json",
+                                 provider=Feed(lambda: now[0]),
+                                 clock=lambda: now[0])
+    venue = Exchange()
+    runner.run(venue, live=True)
+    assert len(venue.submissions) == 1
+    own = runner.journal.data["windows"][str(START)]
+    venue.fills.append(dict(
+        ticker=own["ticker"], fill_id="outside-1", order_id="outside-order",
+        count_fp="2", fee_cost="0", no_price_dollars=".71",
+        yes_price_dollars=".29", **outside,
+    ))
+    # Outside activity NEVER enables early close or creates a sell.
+    now[0] = START + 895
+    runner.run(venue, live=True)
+    assert "outcome" not in own
+    assert len(venue.submissions) == 1
+    venue.book.update(status="finalized", result="no")
+    now[0] = START + 930
+    runner.run(venue, live=True)
+    if can_settle:
+        assert own["outcome"]["status"] == "win"
+        assert D(own["outcome"]["bought"]) == D(own["quantity"])
+        assert own["outcome"]["sold"] == "0"
+        assert leader.budget(runner.journal) == D("5")
+    else:
+        assert "outcome" not in own
+        assert leader.budget(runner.journal) is None
+    assert len(venue.submissions) == 1
+
+
+def test_unidentified_outside_fill_does_not_release_budget(tmp_path):
+    now = [START + 183]
+    runner = leader.LeaderRunner(tmp_path / "leader.json",
+                                 provider=Feed(lambda: now[0]),
+                                 clock=lambda: now[0])
+    venue = Exchange()
+    runner.run(venue, live=True)
+    own = runner.journal.data["windows"][str(START)]
+    venue.fills.append({
+        "ticker": own["ticker"], "order_id": "outside-order",
+        "action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask",
+        "count_fp": "1", "no_price_dollars": ".70", "fee_cost": "0",
+    })
+    venue.book.update(status="finalized", result="no")
+    now[0] = START + 940
+    runner.run(venue, live=True)
+    assert "outcome" not in own
+    assert leader.budget(runner.journal) is None
