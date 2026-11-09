@@ -2,8 +2,9 @@
 
 Separate owned-order journal. It does not amend the individual-coin strategy,
 reprice another bot's exits, or trade from stale/incomplete coin data.
-This uses a fresh five-coin Coinbase window-return mean, NOT the currently
-stale TradingView collector. A live opt-in is required independently.
+This freezes the five-coin mean choice from the first CLOSED one-minute
+Coinbase candle, matching the Pine M1 calculation (not live ticker prices).
+A live opt-in is required independently.
 Filled Leader contracts are held through final market settlement, not sold
 at minute 14, and only after verified settlement does the independent budget
 cycle advance. Other single-coin TP/SL strategies are unaffected.
@@ -38,6 +39,41 @@ FEE_RESERVE = D(".03")
 MAX_CONTRACTS = 100
 REFRESH_SECONDS = 15
 TERMINAL = core.TERMINAL
+SIGNAL_SOURCE = "coinbase_closed_minute_one"
+
+
+class OpeningMinutePerformance:
+    """Read only the exact first closed candle; never substitute later prices."""
+    def __init__(self, *, clock=time.time, session_factory=ranked.requests.Session):
+        self.clock, self.session_factory = clock, session_factory
+
+    def _one(self, series, start):
+        iso = lambda ts: ranked.datetime.fromtimestamp(ts, ranked.timezone.utc).isoformat()
+        with self.session_factory() as session:
+            response = session.get(
+                f"{ranked.BASE}/products/{ranked.PRODUCTS[series]}/candles",
+                params={"granularity": 60, "start": iso(start), "end": iso(start + 60)},
+                timeout=(1, 2))
+            response.raise_for_status()
+            candles = response.json()
+        if not isinstance(candles, list):
+            raise ranked.PerformanceUnavailable("invalid_minute_one_candles")
+        rows = [r for r in candles if isinstance(r, list) and len(r) >= 6
+                and r[0] == start]
+        if len(rows) != 1:
+            raise ranked.PerformanceUnavailable("minute_one_missing_or_ambiguous")
+        return ranked.Observation(series, start, D(str(rows[0][3])),
+                                  D(str(rows[0][4])), start + 60)
+
+    def snapshot(self, names, start):
+        if not eligible_window(self.clock(), start, 60, ENTRY_END_SECOND):
+            raise ranked.PerformanceUnavailable("minute_one_not_closed_or_window_expired")
+        with ranked.ThreadPoolExecutor(max_workers=len(names)) as pool:
+            pending = [pool.submit(self._one, name, start) for name in names]
+        rows = [future.result() for future in pending]
+        if not eligible_window(self.clock(), start, 60, ENTRY_END_SECOND):
+            raise ranked.PerformanceUnavailable("minute_one_window_expired")
+        return rows
 
 
 def event(name, **data):
@@ -59,7 +95,7 @@ def coin_mean_choice(observations, start, now):
     mean = sum(returns.values(), D(0)) / D(len(COINS))
     choices = sorted(((abs(returns[coin] - mean), coin)
                       for coin in TRADE_COINS))
-    if len(choices) < 2 or choices[0][0] == choices[1][0]:
+    if len(choices) < 2 or abs(choices[0][0] - choices[1][0]) <= D("1e-10"):
         raise ranked.PerformanceUnavailable("ambiguous_closest_coin")
     return choices[0][1], mean, returns
 
@@ -235,9 +271,32 @@ class LeaderRunner:
     def __init__(self, path, *, provider=None, clock=None):
         self.path = Path(path)
         self.clock = clock or time.time
-        self.provider = provider or ranked.CoinbasePerformance(clock=self.clock)
+        self.provider = provider or OpeningMinutePerformance(clock=self.clock)
         self.journal = core.Journal(self.path)
         self.next_scan = float("-inf")
+
+    def opening_signal(self, start):
+        saved = self.journal.data.setdefault("leader_opening_signals", {})
+        signal = saved.get(str(start))
+        if signal is not None:
+            if (signal.get("source") != SIGNAL_SOURCE
+                    or signal.get("window_start_ms") != start * 1000
+                    or signal.get("sample_ms") != (start + 60) * 1000
+                    or signal.get("coin") not in TRADE_COINS):
+                raise ranked.PerformanceUnavailable("invalid_saved_minute_one_signal")
+            return signal
+        observations = self.provider.snapshot(SOURCE_SERIES, start)
+        if any(row.observed_at != start + 60 for row in observations):
+            raise ranked.PerformanceUnavailable("not_exact_minute_one_close")
+        coin, mean, returns = coin_mean_choice(observations, start, start + 60)
+        signal = {"coin": coin, "mean_return_pct": str(mean),
+                  "returns_pct": {k: str(v) for k, v in returns.items()},
+                  "source": SIGNAL_SOURCE, "window_start_ms": start * 1000,
+                  "sample_ms": (start + 60) * 1000}
+        saved[str(start)] = signal
+        self.journal.save()  # Persist BEFORE quote/funding checks, including skips.
+        event("SIGNAL_LOCKED", **signal)
+        return signal
 
     def run(self, client, *, live):
         # A preview must never send orders or exits, even with live journal data.
@@ -264,11 +323,11 @@ class LeaderRunner:
             return
         self.next_scan = now + REFRESH_SECONDS
         try:
-            observations = self.provider.snapshot(SOURCE_SERIES, start)
-            coin, mean, returns = coin_mean_choice(observations, start, self.clock())
-            event("SIGNAL", selected_coin=coin, mean_return_pct=str(mean),
-                  returns_pct={k: str(v) for k,v in returns.items()},
-                  signal_source="fresh_coinbase_window_returns")
+            signal = self.opening_signal(start)
+            coin = signal["coin"]
+            event("SIGNAL", selected_coin=coin, mean_return_pct=signal["mean_return_pct"],
+                  returns_pct=signal["returns_pct"], sample_ms=signal["sample_ms"],
+                  signal_source=SIGNAL_SOURCE)
             markets = client.markets(series_ticker=SERIES, status="open", limit=100)
             plan = leader_plan(markets, coin, start, self.clock())
             if plan is None:
@@ -315,7 +374,8 @@ class LeaderRunner:
             record = {"ticker": plan["ticker"], "coin": coin, "side": "NO",
                       "window_start_ms": start * 1000, "close_at": plan["close"],
                       "quantity": str(quantity), "budget_dollars": str(allocation),
-                      "entry_signal_source": "fresh_coinbase_window_returns",
+                      "entry_signal_source": SIGNAL_SOURCE,
+                      "entry_signal": dict(signal),
                       "buy": intent, "sells": []}
             self.journal.data["windows"][str(start)] = record
             self.journal.save()
@@ -333,3 +393,4 @@ class LeaderRunner:
             # Do not retry uncertain or acknowledged submissions in this window.
         except Exception as error:
             event("ENTRY_WAIT", **ranked.error_fields(error))
+

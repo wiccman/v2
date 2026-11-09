@@ -31,7 +31,7 @@ class Feed:
         self.clock = clock
     def snapshot(self, names, start):
         assert tuple(names) == leader.SOURCE_SERIES and start == START
-        return observations(self.clock())
+        return observations(START + 60)
 
 
 class Exchange:
@@ -298,3 +298,4 @@ def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
     restarted.run(venue, live=True)
     assert restarted.journal.data["windows"][str(START)]["outcome"]["status"] == "win"
     assert len(venue.submissions) == 1
+
