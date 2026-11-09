@@ -4,6 +4,9 @@ Separate owned-order journal. It does not amend the individual-coin strategy,
 reprice another bot's exits, or trade from stale/incomplete coin data.
 This uses a fresh five-coin Coinbase window-return mean, NOT the currently
 stale TradingView collector. A live opt-in is required independently.
+Filled Leader contracts are held through final market settlement, not sold
+at minute 14, and only after verified settlement does the independent budget
+cycle advance. Other single-coin TP/SL strategies are unaffected.
 """
 from __future__ import annotations
 
@@ -24,8 +27,9 @@ COINS = {"BTC": "KXBTC15M", "ETH": "KXETH15M",
 SOURCE_SERIES = tuple(COINS.values())
 TRADE_COINS = ("BTC", "ETH", "XRP", "HYPE")  # SOL only excluded from Leader entries.
 ENTRY_SECOND = 180
-EXIT_SECOND = 840
+ENTRY_END_SECOND = 840  # Still stop buying at minute 14.
 WINDOW_SECONDS = 900
+HOLD_UNTIL_SETTLEMENT = True  # Never initiate an early Leader sell / TP / SL.
 MIN_NO_ASK = D(".65")
 MAX_NO_LIMIT = D(".99")
 FULL_BUDGET = D("10")
@@ -62,7 +66,7 @@ def coin_mean_choice(observations, start, now):
 
 def leader_plan(markets, coin, start, now):
     """Only an exact current-window NO coin leg, never an UP/DOWN market."""
-    if coin not in TRADE_COINS or not eligible_window(now, start, ENTRY_SECOND, EXIT_SECOND):
+    if coin not in TRADE_COINS or not eligible_window(now, start, ENTRY_SECOND, ENTRY_END_SECOND):
         return None
     selected = []
     for market in markets:
@@ -164,7 +168,7 @@ def _close_result(client, journal, record, now, bought, buys, sold, sells):
 
 
 def reconcile(client, journal, record, now):
-    """Never repeat an uncertain POST. Every sell is owned and fill-audited."""
+    """Never repeat an uncertain POST. Old sells are audited, but no new Leader sell."""
     if record.get("outcome"):
         return
     ticker = record["ticker"]
@@ -220,34 +224,11 @@ def reconcile(client, journal, record, now):
     if now >= record["close_at"]:
         _close_result(client, journal, record, now, bought, buys, sold, sales)
         return
-    if not eligible_window(now, int(record["window_start_ms"] / 1000),
-                           EXIT_SECOND, WINDOW_SECONDS):
-        return
-    if core.position_for(client, ticker) != -remaining:
-        event("POSITION_MISMATCH_WAIT", ticker=ticker, remaining=str(remaining))
-        return
-    if client.all_orders(ticker, "resting"):
-        event("RESTING_ORDER_WAIT", ticker=ticker)
-        return
-    market = client.market(ticker)
-    if market.get("status") not in {"active", "open"}:
-        return
-    bid = _price(market["no_bid_dollars"])
-    limit = (bid * D(100)).to_integral_value(rounding=ROUND_FLOOR) / 100
-    if limit <= D(0) or limit >= D(1):
-        return
-    intent = {"client_id": str(uuid.uuid4()), "created_at": now, "quantity": str(remaining),
-              "target": str(limit), "purpose": "minute14_exit", "execution": "reduce_only_ioc"}
-    record["sells"].append(intent)
-    journal.save()  # Write before POST; no second sell until exact status and fills.
-    event("EXIT_SUBMIT", ticker=ticker, quantity=str(remaining), limit=str(limit))
-    response = client.place_take_profit(ticker, -remaining, limit,
-                                        client_order_id=intent["client_id"])
-    row = response.get("order", response)
-    if row.get("order_id"):
-        intent["order_id"] = row["order_id"]
-        journal.save()
-        event("EXIT_ACK", ticker=ticker, order_id=intent["order_id"])
+    # NO forced minute-14 exit: waiting for Kalshi settlement avoids paying
+    # the last-minute bid/ask spread to unwind an otherwise winning prediction.
+    # Any pre-upgrade sell intents above still reconcile by exact order ID.
+    # New Leader positions are not offered to the bid, stopped, or TP-sold.
+    return
 
 
 class LeaderRunner:
@@ -273,7 +254,7 @@ class LeaderRunner:
         # Never initiate new entries during incomplete prior fills/settlements.
         now = self.clock()
         start = int(now // WINDOW_SECONDS) * WINDOW_SECONDS
-        if not eligible_window(now, start, ENTRY_SECOND, EXIT_SECOND):
+        if not eligible_window(now, start, ENTRY_SECOND, ENTRY_END_SECOND):
             return
         if str(start) in self.journal.data["windows"]:
             return
@@ -327,7 +308,7 @@ class LeaderRunner:
             if core.entry_market_occupied(client, plan["ticker"]):
                 event("SKIP", reason="existing_leader_inventory", coin=coin)
                 return
-            if not eligible_window(self.clock(), start, ENTRY_SECOND, EXIT_SECOND):
+            if not eligible_window(self.clock(), start, ENTRY_SECOND, ENTRY_END_SECOND):
                 return
             intent = {"client_id": str(uuid.uuid4()), "created_at": self.clock(),
                       "limit": str(limit)}
@@ -342,7 +323,7 @@ class LeaderRunner:
                   side="NO", quantity=quantity, limit=str(limit),
                   budget=str(allocation))
             response = client.place_entry(plan["ticker"], "NO", quantity, limit,
-                                          plan["close"], submit_before=start + EXIT_SECOND,
+                                          plan["close"], submit_before=start + ENTRY_END_SECOND,
                                           client_order_id=intent["client_id"], ioc=True)
             row = response.get("order", response)
             if row.get("order_id"):
