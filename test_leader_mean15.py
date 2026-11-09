@@ -150,32 +150,65 @@ def test_first_10_then_5_until_loss(tmp_path):
     assert leader.budget(j) is None
 
 
-def test_actual_buy_exact_no_and_minute14_exit_without_stop(tmp_path):
-    at = [START+183.]
-    feed = Feed(lambda:at[0])
-    svc = leader.LeaderRunner(tmp_path/"leader.json",provider=feed,clock=lambda:at[0])
+def test_actual_buy_exact_no_and_hold_until_settlement_without_stop(tmp_path):
+    at = [START + 183.]
+    feed = Feed(lambda: at[0])
+    svc = leader.LeaderRunner(tmp_path / "leader.json", provider=feed,
+                              clock=lambda: at[0])
     venue = Exchange()
-    svc.run(venue,live=True)
+    assert leader.HOLD_UNTIL_SETTLEMENT is True
+    assert leader.ENTRY_END_SECOND == 840
+    svc.run(venue, live=True)
     assert [s[0] for s in venue.submissions] == ["buy"]
     rec = svc.journal.data["windows"][str(START)]
     assert rec["coin"] == "ETH" and rec["side"] == "NO"
     assert rec["budget_dollars"] == "10" and rec["buy"]["order_id"]
-    at[0] = START+400
-    venue.book["no_bid_dollars"] = ".12"   # NO stop loss by request.
-    svc.run(venue,live=True)
-    assert [s[0] for s in venue.submissions] == ["buy"]
-    at[0] = START+840
-    venue.book["no_bid_dollars"] = ".80"
-    svc.run(venue,live=True)
-    assert [s[0] for s in venue.submissions] == ["buy", "sell"]
-    assert venue.held == 0
-    at[0] = START+842
-    svc.run(venue,live=True)
-    outcome=svc.journal.data["windows"][str(START)]["outcome"]
+    # No stop loss and NO forced IOC exit, even at a good or bad bid.
+    for elapsed, bid in ((400, ".12"), (839, ".90"),
+                         (840, ".80"), (899, ".01"), (900, ".99"), (902, ".01")):
+        at[0] = START + elapsed
+        venue.book["no_bid_dollars"] = bid
+        if elapsed >= 900:
+            venue.book["status"] = "closed"  # Not finalized yet.
+        svc.run(venue, live=True)
+        assert [entry[0] for entry in venue.submissions] == ["buy"]
+        assert svc.journal.data["windows"][str(START)].get("outcome") is None
+        assert leader.budget(svc.journal) is None  # Prior settlement pending.
+    # Only a VERIFIED finalized market result advances the rotation.
+    at[0] = START + 935
+    venue.book.update(status="finalized", result="no")
+    svc.run(venue, live=True)
+    outcome = svc.journal.data["windows"][str(START)]["outcome"]
     assert outcome["status"] == "win"
+    assert outcome["sold"] == "0"
+    assert D(outcome["settled_remainder"]) > 0
     assert leader.budget(svc.journal) == D(5)
-    assert len(venue.submissions) == 2
-    assert venue.submissions[-1][-1]["client_order_id"]
+    assert len(venue.submissions) == 1
+
+
+def test_losing_leader_contract_remains_at_risk_until_final_settlement(tmp_path):
+    at = [START + 183.]
+    svc = leader.LeaderRunner(tmp_path / "leader.json",
+                              provider=Feed(lambda: at[0]), clock=lambda: at[0])
+    venue = Exchange()
+    svc.run(venue, live=True)
+    for seconds in (840, 890, 899, 900, 925):
+        at[0] = START + seconds
+        venue.book["no_bid_dollars"] = ".01"
+        if seconds >= 900:
+            venue.book["status"] = "closed"
+        svc.run(venue, live=True)
+    assert [entry[0] for entry in venue.submissions] == ["buy"]
+    assert leader.budget(svc.journal) is None
+    venue.book.update(status="settled", result="yes")
+    at[0] = START + 940
+    svc.run(venue, live=True)
+    outcome = svc.journal.data["windows"][str(START)]["outcome"]
+    assert outcome["status"] == "loss"
+    assert outcome["sold"] == "0"
+    assert D(outcome["net_pnl_dollars"]) < 0
+    assert leader.budget(svc.journal) == D(10)
+    assert len(venue.submissions) == 1
 
 
 def test_preview_mode_never_exits_existing_position(tmp_path):
@@ -214,17 +247,54 @@ def test_insufficient_cash_does_not_create_order_intent(tmp_path):
     assert not venue.submissions and not svc.journal.data["windows"]
 
 
-def test_partial_ioc_sell_retries_only_after_terminal_fill_proof(tmp_path):
-    at=[START+180]
-    svc=leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
-                            clock=lambda:at[0])
-    venue=Exchange()
-    svc.run(venue,live=True)
-    venue.sell_partial=True
-    at[0]=START+840
-    svc.run(venue,live=True)
-    assert len(venue.submissions)==2
-    at[0]+=2
-    svc.run(venue,live=True)
-    assert len(venue.submissions)==3
-    assert venue.submissions[2][2] < venue.submissions[1][2]
+def test_legacy_pre_upgrade_partial_sell_is_audited_without_new_exit(tmp_path):
+    # A previously submitted live IOC must still be reconciled after an upgrade.
+    at = [START + 180.]
+    svc = leader.LeaderRunner(tmp_path / "leader.json",
+                              provider=Feed(lambda: at[0]), clock=lambda: at[0])
+    venue = Exchange()
+    svc.run(venue, live=True)
+    rec = svc.journal.data["windows"][str(START)]
+    original_qty = D(rec["quantity"])
+    venue.sell_partial = True
+    prior_intent = {"client_id": "old-leader-minute14-sell", "created_at": START + 840,
+                    "quantity": str(original_qty), "purpose": "minute14_exit"}
+    response = venue.place_take_profit(
+        rec["ticker"], -original_qty, D(".80"),
+        client_order_id=prior_intent["client_id"])
+    prior_intent["order_id"] = response["order"]["order_id"]
+    rec["sells"].append(prior_intent)
+    svc.journal.save()
+    assert [s[0] for s in venue.submissions] == ["buy", "sell"]
+
+    at[0] = START + 850
+    svc.run(venue, live=True)
+    assert len(venue.submissions) == 2
+    assert "outcome" not in svc.journal.data["windows"][str(START)]
+    venue.book.update(status="finalized", result="no")
+    at[0] = START + 940
+    svc.run(venue, live=True)
+    result = svc.journal.data["windows"][str(START)]["outcome"]
+    assert result["sold"] == str(original_qty / 2)
+    assert result["settled_remainder"] == str(original_qty / 2)
+    assert result["status"] == "win"
+    assert len(venue.submissions) == 2
+
+
+def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
+    at = [START + 183.]
+    path = tmp_path / "leader.json"
+    venue = Exchange()
+    leader.LeaderRunner(path, provider=Feed(lambda: at[0]),
+                        clock=lambda: at[0]).run(venue, live=True)
+    at[0] = START + 845
+    restarted = leader.LeaderRunner(path, provider=Feed(lambda: at[0]),
+                                   clock=lambda: at[0])
+    restarted.run(venue, live=True)
+    assert [x[0] for x in venue.submissions] == ["buy"]
+    assert restarted.journal.data["windows"][str(START)]["sells"] == []
+    venue.book.update(status="finalized", result="no")
+    at[0] = START + 930
+    restarted.run(venue, live=True)
+    assert restarted.journal.data["windows"][str(START)]["outcome"]["status"] == "win"
+    assert len(venue.submissions) == 1
