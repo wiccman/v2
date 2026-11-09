@@ -280,11 +280,14 @@ def reconcile(client, journal, record, now):
         raise RuntimeError("oversold")
     outside = [row for row in rows if row.get("order_id") not in owned_ids]
     if outside:
+        # Keep foreign trade identity private while logging the exact reason
+        # the settled Leader journal remains blocked.
+        additive = _external_adds_owned_exposure_only(rows, owned_ids, side)
+        market = None
         # Only after venue FINALIZATION can fills independently proven to
         # ADD this bot's exposure be ignored for accounting of its purchase.
         # This never creates an entry/exit, adopts lots, or changes budgets.
-        if (now >= record["close_at"]
-                and _external_adds_owned_exposure_only(rows, owned_ids, side)):
+        if now >= record["close_at"] and additive:
             market = client.market(ticker)
             if (market.get("status") in {"finalized", "settled"}
                     and str(market.get("result", "")).lower() in {"yes", "no"}):
@@ -316,7 +319,25 @@ def reconcile(client, journal, record, now):
                   "primary_subaccount": row.get("subaccount_number", 0) in (0, None),
                   "has_quantity": row.get("count_fp", row.get("count")) is not None,
               } for row in outside[:4]],
-              terminal_window=now >= record["close_at"])
+              terminal_window=now >= record["close_at"],
+              additive_exposure_verified=additive,
+              outside_no_outcome=sum(
+                  row.get("outcome_side") == side.lower() for row in outside),
+              outside_no_book=sum(
+                  row.get("book_side") == ("ask" if side == "NO" else "bid")
+                  for row in outside),
+              outside_no_legacy=sum(
+                  (row.get("action"), row.get("side")) in (
+                      ("buy", side.lower()),
+                      ("sell", "yes" if side == "NO" else "no"))
+                  for row in outside),
+              outside_missing_fill_id=sum(not row.get("fill_id") for row in outside),
+              outside_invalid_primary_subaccount=sum(
+                  row.get("subaccount_number", 0) not in (0, None)
+                  for row in outside),
+              market_status=market.get("status") if market is not None else None,
+              market_result=str(market.get("result", "")).lower()
+                  if market is not None else None)
         return
     remaining = bought - sold
     if remaining == 0:
