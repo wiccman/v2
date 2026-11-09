@@ -138,10 +138,10 @@ def _price_count(value):
 
 def _close_result(client, journal, record, now, bought, buys, sold, sells):
     ticker, side = record["ticker"], record["side"]
-    market = client.market(ticker)
     remaining = bought - sold
     if remaining < 0:
         raise RuntimeError("sell_exceeds_verified_buy")
+    market = client.market(ticker) if remaining else None
     if remaining and (market.get("status") not in {"finalized", "settled"}
                       or str(market.get("result", "")).lower() not in {"yes", "no"}):
         return False
@@ -259,6 +259,9 @@ class LeaderRunner:
         self.next_scan = float("-inf")
 
     def run(self, client, *, live):
+        # A preview must never send orders or exits, even with live journal data.
+        if not live:
+            return
         now = self.clock()
         for record in list(self.journal.data["windows"].values()):
             if record.get("buy") and not record.get("outcome"):
@@ -268,8 +271,6 @@ class LeaderRunner:
                     event("RECONCILE_WAIT", ticker=record.get("ticker"),
                           error_type=type(error).__name__)
         # Never initiate new entries during incomplete prior fills/settlements.
-        if not live:
-            return
         now = self.clock()
         start = int(now // WINDOW_SECONDS) * WINDOW_SECONDS
         if not eligible_window(now, start, ENTRY_SECOND, EXIT_SECOND):
