@@ -369,6 +369,10 @@ class KalshiClient:
         return self.request("POST", "/portfolio/events/orders", body=body, auth=True)
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time, *, submit_before=None, client_order_id=None, ioc=False):
+        # User restriction: SOL is excluded only from Crypto Leader entries.
+        # Keep single-coin SOL orders and all position-closing methods available.
+        if ticker.startswith("KXCRYPTOLEAD15M-") and ticker.rsplit("-", 1)[-1] == "SOL":
+            raise ValueError("SOL entries are blocked in Crypto Leader")
         # A slow quote request or preceding order must not submit an expired entry.
         if time.time() >= min(expiration_time, submit_before if submit_before is not None else expiration_time):
             return {}
