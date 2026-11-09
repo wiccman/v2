@@ -194,10 +194,22 @@ def regular_pass(client, journal, series_list, base_budget, max_contracts, live,
             return  # Next candidate can only be considered on a later poll.
 
 
+def zone_buying_enabled():
+    """Entry-only switch: disabling the zones must never disable owned exits."""
+    return os.getenv("ZONE_BUYING_ENABLED", "true").strip().lower() == "true"
+
+
 def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
              max_entries_per_window=1, *, provider, clock=None):
-    """Maintain regular top-two policy, plus independent 12..15m basket buys."""
+    """Run zone entries when enabled; always reconcile previously owned exits."""
     clock = clock or core.time.time
+    if not zone_buying_enabled():
+        # The core reconciles BOTH zones from the shared persistent journal
+        # before examining new candidates. An empty series list prevents any
+        # fresh single-coin entries, and bypasses late.run_late_pass entirely.
+        return cash.run_cash_checked_pass(client, journal, (), base_budget,
+                                          max_contracts, live, now,
+                                          max_entries_per_window)
     regular_pass(client, journal, series_list, base_budget, max_contracts, live,
                  now, max_entries_per_window, provider=provider, clock=clock)
     # Regular pass always reconciles all owned positions first. Late entries
@@ -276,6 +288,10 @@ def main(argv=None):
                    late_budget_fraction="1/2-active-trade-budget",
                    late_max_coins_per_window=late.MAX_LATE_COINS,
                    late_win_streak_independent=True)
+        if not zone_buying_enabled():
+            core.event("M8_ZONE_ENTRIES_DORMANT", new_zone1_buys=False,
+                       new_zone2_buys=False, owned_tp_sl_reconciliation=True,
+                       leader_runner_independent=True)
         return core.main(argv)
 
 
