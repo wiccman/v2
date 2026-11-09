@@ -203,6 +203,29 @@ def _close_result(client, journal, record, now, bought, buys, sold, sells):
     return True
 
 
+def _external_same_side_buys_only(rows, owned_ids, side):
+    """Prove outside fills only ADDED our held outcome; never adopt outside lots.
+
+    An opposite-side buy or any sell may have reduced the bot's settlement
+    inventory in Kalshi's netted account. Missing/legacy-ambiguous direction
+    fields are not evidence, so they must block this exception.
+    """
+    outside = [f for f in rows if f.get("order_id") not in owned_ids]
+    if not outside:
+        return False
+    for row in outside:
+        if (not row.get("fill_id")
+                or row.get("action") != "buy"
+                or row.get("side") != side.lower()
+                or row.get("outcome_side", side.lower()) != side.lower()
+                or row.get("book_side", "ask" if side == "NO" else "bid")
+                    != ("ask" if side == "NO" else "bid")
+                or row.get("subaccount_number", 0) not in (0, None)
+                or core.fill_contract_quantity(row) <= 0):
+            return False
+    return True
+
+
 def reconcile(client, journal, record, now):
     """Never repeat an uncertain POST. Old sells are audited, but no new Leader sell."""
     if record.get("outcome"):
@@ -250,8 +273,33 @@ def reconcile(client, journal, record, now):
         owned_ids.add(intent["order_id"])
     if sold > bought:
         raise RuntimeError("oversold")
-    if any(row.get("order_id") not in owned_ids for row in rows):
-        event("EXTERNAL_ACTIVITY_WAIT", ticker=ticker)
+    outside = [row for row in rows if row.get("order_id") not in owned_ids]
+    if outside:
+        # Only after venue FINALIZATION can independently proven same-side
+        # external buys be ignored for accounting of this bot-owned purchase.
+        # This never creates an entry/exit, adopts lots, or changes budgets.
+        if (now >= record["close_at"]
+                and _external_same_side_buys_only(rows, owned_ids, side)):
+            market = client.market(ticker)
+            if (market.get("status") in {"finalized", "settled"}
+                    and str(market.get("result", "")).lower() in {"yes", "no"}):
+                event("EXTERNAL_SAME_SIDE_BUYS_SETTLED", ticker=ticker,
+                      external_fill_count=len(outside),
+                      owned_bought=str(bought), owned_sold=str(sold))
+                _close_result(client, journal, record, now, bought, buys, sold, sales)
+                return
+        event("EXTERNAL_ACTIVITY_WAIT", ticker=ticker,
+              external_fill_count=len(outside),
+              foreign_buy_same_side=sum(
+                  row.get("action") == "buy"
+                  and row.get("side") == side.lower() for row in outside),
+              foreign_sells=sum(row.get("action") == "sell" for row in outside),
+              foreign_unknown_action=sum(
+                  row.get("action") not in {"buy", "sell"} for row in outside),
+              foreign_opposite_side=sum(
+                  row.get("side") in {"yes", "no"}
+                  and row.get("side") != side.lower() for row in outside),
+              terminal_window=now >= record["close_at"])
         return
     remaining = bought - sold
     if remaining == 0:
