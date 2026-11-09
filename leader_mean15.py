@@ -291,7 +291,17 @@ class LeaderRunner:
             markets = client.markets(series_ticker=SERIES, status="open", limit=100)
             plan = leader_plan(markets, coin, start, self.clock())
             if plan is None:
-                event("SKIP", reason="selected_coin_quote_not_eligible", coin=coin)
+                # Public quotes and timestamps only; never log account credentials.
+                matching = [m for m in markets
+                            if isinstance(m.get("ticker"), str)
+                            and m["ticker"].startswith(SERIES + "-")
+                            and m["ticker"].rsplit("-", 1)[-1] == coin]
+                event("SKIP", reason="selected_coin_quote_not_eligible", coin=coin,
+                      market_rows=len(markets), matching_rows=len(matching),
+                      quotes=[{"ticker": m.get("ticker"), "status": m.get("status"),
+                               "no_ask": m.get("no_ask_dollars"),
+                               "close_time": m.get("close_time")}
+                              for m in matching[:3]])
                 return
             # Refresh the quote before the final funding decision.
             fresh = client.market(plan["ticker"])
@@ -341,4 +351,4 @@ class LeaderRunner:
                 event("BUY_ACK", ticker=plan["ticker"], order_id=intent["order_id"])
             # Do not retry uncertain or acknowledged submissions in this window.
         except Exception as error:
-            event("ENTRY_WAIT", error_type=type(error).__name__)
+            event("ENTRY_WAIT", **ranked.error_fields(error))
