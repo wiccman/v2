@@ -19,9 +19,9 @@ def market(coin="ETH", no=".72", status="open"):
 
 
 def observations(at):
-    # Returns: BTC +4, ETH +2, SOL +0, XRP +1, HYPE +3.
-    # Mean = +2, so ETH is uniquely closest.
-    points = {"BTC": 4, "ETH": 2, "SOL": 0, "XRP": 1, "HYPE": 3}
+    # Returns: BTC +4, ETH +2, SOL +0, XRP +0, HYPE +3.
+    # Mean = +1.8, so ETH is nearest above it.
+    points = {"BTC": 4, "ETH": 2, "SOL": 0, "XRP": 0, "HYPE": 3}
     return [ranked.Observation(leader.COINS[k], START, D(100),
                                D(100 + v), at) for k,v in points.items()]
 
@@ -128,7 +128,7 @@ def test_exact_contract_only_and_no_sol():
 
 def test_5_coin_mean_selects_eth_and_does_not_allow_stale():
     coin, mean, returns = leader.coin_mean_choice(observations(START+181), START, START+181)
-    assert coin == "ETH" and mean == D(2) and returns["SOL"] == D(0)
+    assert coin == "ETH" and mean == D("1.8") and returns["SOL"] == D(0)
     with pytest.raises(ranked.PerformanceUnavailable):
         leader.coin_mean_choice(observations(START+181)[:-1], START, START+181)
     with pytest.raises(ranked.PerformanceUnavailable):
