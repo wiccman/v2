@@ -303,7 +303,15 @@ def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
 
 @pytest.mark.parametrize("outside,can_settle", [
     ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask"}, True),
-    ({"action": "sell", "side": "yes", "outcome_side": "no", "book_side": "ask"}, True),
+    # Kalshi reports the traded LEG (YES) and the sell book (bid),
+    # even though selling YES is equivalent to adding NO exposure.
+    ({"action": "sell", "side": "yes", "outcome_side": "yes", "book_side": "bid"}, True),
+    ({"action": "sell", "side": "yes", "outcome_side": "no", "book_side": "ask"}, False),
+    ({"action": "sell", "side": "yes", "outcome_side": "yes", "book_side": "ask"}, False),
+    ({"action": "sell", "side": "yes", "outcome_side": "no", "book_side": "bid"}, False),
+    ({"action": "sell", "side": "yes", "book_side": "bid"}, False),
+    ({"action": "sell", "side": "yes", "outcome_side": "yes"}, False),
+    ({"action": "buy", "side": "no", "book_side": "ask"}, False),
     ({"action": "buy", "side": "yes", "outcome_side": "yes", "book_side": "bid"}, False),
     ({"action": "sell", "side": "no", "outcome_side": "no", "book_side": "ask"}, False),
     ({"action": "buy", "outcome_side": "no", "book_side": "ask"}, False),
@@ -363,3 +371,36 @@ def test_unidentified_outside_fill_does_not_release_budget(tmp_path):
     runner.run(venue, live=True)
     assert "outcome" not in own
     assert leader.budget(runner.journal) is None
+
+
+def test_two_venue_shaped_outside_sell_yes_fills_release_only_after_finalization(tmp_path):
+    """Reproduce production XRP NO blocker: external sell YES reports YES/bid."""
+    now = [START + 183]
+    runner = leader.LeaderRunner(tmp_path / "leader.json",
+                                 provider=Feed(lambda: now[0]),
+                                 clock=lambda: now[0])
+    venue = Exchange()
+    runner.run(venue, live=True)
+    own = runner.journal.data["windows"][str(START)]
+    for ix in (1, 2):
+        venue.fills.append({
+            "ticker": own["ticker"], "fill_id": f"outside-fill-{ix}",
+            "order_id": f"outside-order-{ix}", "action": "sell",
+            "side": "yes", "outcome_side": "yes", "book_side": "bid",
+            "subaccount_number": 0, "count_fp": "1",
+            "fee_cost": "0", "no_price_dollars": ".71",
+            "yes_price_dollars": ".29",
+        })
+    now[0] = START + 899
+    runner.run(venue, live=True)
+    assert own.get("outcome") is None
+    assert leader.budget(runner.journal) is None
+    assert len(venue.submissions) == 1
+    venue.book.update(status="finalized", result="no")
+    now[0] = START + 930
+    runner.run(venue, live=True)
+    assert own["outcome"]["status"] == "win"
+    assert D(own["outcome"]["bought"]) == D(own["quantity"])
+    assert own["outcome"]["sold"] == "0"
+    assert leader.budget(runner.journal) == D("5")
+    assert len(venue.submissions) == 1

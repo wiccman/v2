@@ -216,15 +216,18 @@ def _external_adds_owned_exposure_only(rows, owned_ids, side):
         return False
     ours = side.lower()
     opposite = "yes" if ours == "no" else "no"
-    expected_book = "ask" if ours == "no" else "bid"
     for row in outside:
         action, leg = row.get("action"), row.get("side")
         increases_exposure = ((action == "buy" and leg == ours)
                               or (action == "sell" and leg == opposite))
+        # Fill outcome_side identifies the order's traded LEG, not the
+        # equivalent net exposure. A buy NO uses NO/ask; sell YES
+        # adds NO exposure but is reported as YES/bid by Kalshi.
+        expected_book = "ask" if action == "buy" else "bid"
         if (not row.get("fill_id") or not row.get("order_id")
                 or not increases_exposure
-                or row.get("outcome_side", ours) != ours
-                or row.get("book_side", expected_book) != expected_book
+                or row.get("outcome_side") != leg
+                or row.get("book_side") != expected_book
                 or row.get("subaccount_number", 0) not in (0, None)
                 or core.fill_contract_quantity(row) <= 0):
             return False
