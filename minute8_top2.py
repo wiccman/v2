@@ -225,7 +225,8 @@ def installed_policy(provider=None):
             core.event("LEADER_READY", live_enabled=True, market_series=leader.SERIES,
                        signal_source="fresh_coinbase_window_returns",
                        entry_start_second=leader.ENTRY_SECOND,
-                       exit_start_second=leader.EXIT_SECOND,
+                       entry_end_second=leader.ENTRY_END_SECOND,
+                       hold_until_settlement=leader.HOLD_UNTIL_SETTLEMENT,
                        side="NO", min_entry_cents=65,
                        budgets_dollars=["10", "5_until_loss"],
                        stop_loss_enabled=False, excluded_leader_coin="SOL")
@@ -234,8 +235,9 @@ def installed_policy(provider=None):
             leader_runner = None
 
     def execute(*args, **kwargs):
-        # Leader exits get priority even when regular-market processing has an
-        # unrelated exception; no shared journal or risk-rule mutation.
+        # Leader settlement reconciliation gets priority even when regular-
+        # market processing has an unrelated exception. No shared journal,
+        # automated pre-settlement exit, or single-coin risk-rule mutation.
         if leader_runner is not None:
             try:
                 leader_runner.run(args[0], live=args[5])
