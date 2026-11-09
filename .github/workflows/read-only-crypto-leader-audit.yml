@@ -14,7 +14,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import json, urllib.request, urllib.error, time
+          import json, urllib.request, urllib.error, urllib.parse, time, datetime
           tickers = ["KXCRYPTOLEAD15M-26NOV082145-ETH","KXCRYPTOLEAD15M-26NOV082200-ETH","KXCRYPTOLEAD15M-26NOV082230-XRP","KXCRYPTOLEAD15M-26NOV082330-BTC","KXCRYPTOLEAD15M-26NOV082345-HYPE","KXCRYPTOLEAD15M-26NOV090000-XRP","KXCRYPTOLEAD15M-26NOV090030-BTC","KXCRYPTOLEAD15M-26NOV090130-BTC","KXCRYPTOLEAD15M-26NOV090145-BTC","KXCRYPTOLEAD15M-26NOV090200-XRP","KXCRYPTOLEAD15M-26NOV090245-BTC","KXCRYPTOLEAD15M-26NOV090300-XRP","KXCRYPTOLEAD15M-26NOV090315-HYPE","KXCRYPTOLEAD15M-26NOV090400-XRP"]
           hosts = ['https://external-api.kalshi.com', 'https://api.elections.kalshi.com']
           for ticker in tickers:
@@ -32,5 +32,22 @@ jobs:
                       errors.append(type(e).__name__ + ': ' + str(e)[:95])
                   time.sleep(0.25)
               print('MARKET_RESULT ' + json.dumps(result if result else {'ticker':ticker,'errors':errors}), flush=True)
+              if result and result.get('close_time'):
+                  close_ts = int(datetime.datetime.fromisoformat(result['close_time'].replace('Z','+00:00')).timestamp())
+                  query = urllib.parse.urlencode({'start_ts':close_ts-900,'end_ts':close_ts,'period_interval':1})
+                  path = '/trade-api/v2/series/KXCRYPTOLEAD15M/markets/' + ticker + '/candlesticks?' + query
+                  try:
+                      req = urllib.request.Request(hosts[0] + path,headers={'User-Agent':'Mozilla/5.0 LeaderMarketAudit/1.0'})
+                      with urllib.request.urlopen(req,timeout=12) as response:
+                          candles = json.load(response).get('candlesticks',[])
+                      compact = []
+                      for candle in candles:
+                          bid = candle.get('yes_bid') or {}
+                          compact.append({'t':candle.get('end_period_ts'),'low':bid.get('low_dollars',bid.get('low')),
+                                          'high':bid.get('high_dollars',bid.get('high')),
+                                          'close':bid.get('close_dollars',bid.get('close'))})
+                      print('MARKET_CANDLES '+json.dumps({'ticker':ticker,'rows':compact}),flush=True)
+                  except Exception as e:
+                      print('MARKET_CANDLES_ERROR '+json.dumps({'ticker':ticker,'error':str(e)[:130]}),flush=True)
               time.sleep(0.3)
           PY
