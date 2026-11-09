@@ -582,6 +582,7 @@ def verify_completed_trade(client, journal, record, now):
     if sold > bought:
         raise RuntimeError("Exit quantity exceeds verified purchases")
     # A manual fill or another worker's order compromises ownership accounting.
+    valid_order_ids |= verified_previous_zone1_fill_ids(journal, record, fills)
     if any(row.get("order_id") not in valid_order_ids for row in fills):
         return
     sign = 1 if record["side"] == "YES" else -1
@@ -885,6 +886,51 @@ def maybe_arm_sol_20c_kill(journal, record, bid, now):
     return True
 
 
+def verified_previous_zone1_fill_ids(journal, record, fills):
+    """Recognize only the journal-verified, completely exited Zone 1 lot.
+
+    Kalshi's fill history includes earlier purchases and TP sales of the
+    *same ticker* when Zone 2 reenters. They are not outside trades, but no
+    other journal, manual fill, unresolved lot, or partial close is trusted.
+    Always verify the historical fill quantities, not just saved IDs.
+    """
+    if (record.get("entry_zone") != ZONE2
+            or record.get("entry_kind") != "late_basket_rank"):
+        return set()
+    ticker = record.get("ticker")
+    earlier = journal.data["windows"].get(zone_record_key(ticker, ZONE1))
+    if (not isinstance(earlier, dict) or earlier is record
+            or earlier.get("ticker") != ticker
+            or earlier.get("entry_zone", ZONE1) != ZONE1
+            or earlier.get("entry_kind") == "late_basket_rank"):
+        return set()
+    outcome = earlier.get("outcome") or {}
+    if outcome.get("status") not in {"win", "loss", "flat"}:
+        return set()
+    try:
+        purchased = D(str(outcome["bought"]))
+        exited = D(str(outcome["sold"]))
+        remaining = D(str(outcome["remaining_at_settlement"]))
+        if (not all(amount.is_finite() for amount in (purchased, exited, remaining))
+                or purchased <= 0 or exited != purchased or remaining != 0):
+            return set()
+        prior_buy = earlier["buy"]["order_id"]
+        prior_sells = [entry["order_id"] for entry in earlier["sells"]]
+        ids = [prior_buy] + prior_sells
+        if (not prior_sells or any(not isinstance(i, str) or not i for i in ids)
+                or len(ids) != len(set(ids))
+                or prior_buy == record.get("buy", {}).get("order_id")):
+            return set()
+        if filled_quantity(fills, prior_buy)[0] != purchased:
+            return set()
+        if sum((filled_quantity(fills, order_id)[0]
+                for order_id in prior_sells), D(0)) != exited:
+            return set()
+    except (KeyError, TypeError, ValueError, ArithmeticError, RuntimeError):
+        return set()
+    return set(ids)
+
+
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
     buy = find_order(client, ticker, record["buy"])
@@ -981,6 +1027,7 @@ def reconcile_exit(client, journal, record, now):
     owned_ids = {record["buy"]["order_id"]} | {
         intent["order_id"] for intent in record["sells"]
     }
+    owned_ids |= verified_previous_zone1_fill_ids(journal, record, all_fills)
     if any(row.get("order_id") not in owned_ids for row in all_fills):
         # Account positions are netted. Do not assume matching net quantity
         # proves ownership after an outside trade on this same contract.
