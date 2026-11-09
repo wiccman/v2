@@ -1,0 +1,21 @@
+name: Isolated Zone 2 ownership and exit regression
+on:
+  push:
+    branches:
+      - audit/fix-zone2-tp-after-closed-zone1-20261109
+permissions:
+  contents: read
+jobs:
+  offline-safety:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - name: Verify the same-ticker lifetime regression and existing stop/rank guards
+        run: python tools/run_offline_tests.py -q test_zone2_prior_closed_zone1.py test_zone1_buy_timeout.py test_late_basket_minute9.py test_single_coin_minute9.py test_minute8_top2.py tests/test_crypto_leader_only_routing.py test_m9_resting_tp.py
