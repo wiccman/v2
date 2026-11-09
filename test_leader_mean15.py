@@ -110,8 +110,8 @@ def test_entry_window_strict(elapsed, eligible):
 
 
 @pytest.mark.parametrize("price,expected", [
-    (".64", None), (".6499", None), (".65", ".65"),
-    (".6501", ".66"), (".9751", ".98"), (".99", ".99"),
+    (".64", None), (".6499", None), (".65", "0.65"),
+    (".6501", "0.66"), (".9751", "0.98"), (".99", "0.99"),
     (".9901", None), ("1.00", None)])
 def test_no_ask_gate_and_rounding(price, expected):
     p = leader.leader_plan([market(no=price)], "ETH", START, START+185)
