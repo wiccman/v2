@@ -307,6 +307,15 @@ def reconcile(client, journal, record, now):
               foreign_opposite_side=sum(
                   row.get("side") in {"yes", "no"}
                   and row.get("side") != side.lower() for row in outside),
+              external_fill_shapes=[{
+                  "action": row.get("action"), "side": row.get("side"),
+                  "outcome_side": row.get("outcome_side"),
+                  "book_side": row.get("book_side"),
+                  "has_fill_id": bool(row.get("fill_id")),
+                  "has_order_id": bool(row.get("order_id")),
+                  "primary_subaccount": row.get("subaccount_number", 0) in (0, None),
+                  "has_quantity": row.get("count_fp", row.get("count")) is not None,
+              } for row in outside[:4]],
               terminal_window=now >= record["close_at"])
         return
     remaining = bought - sold
