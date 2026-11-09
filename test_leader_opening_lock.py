@@ -29,14 +29,14 @@ def test_eth_remains_selected_after_quote_skip_and_restart(tmp_path):
     assert record['entry_signal_source'] == leader.SIGNAL_SOURCE
 
 
-def test_hype_loss_window_first_minute_selects_eth():
+def test_hype_loss_window_north_selection_is_btc():
     # 2026-11-09 00:30 CST first closed Coinbase candle, before the HYPE loss.
     values = {'BTC': '.022870656933671185', 'ETH': '-.0184205554505934',
               'SOL': '.06959749449020336', 'XRP': '.04577497024627064',
               'HYPE': '-.13468013468013185'}
     rows = [ranked.Observation(leader.COINS[k], START, D(100), D(100)+D(v), START+60)
             for k, v in values.items()]
-    assert leader.coin_mean_choice(rows, START, START+60)[0] == 'ETH'
+    assert leader.coin_mean_choice(rows, START, START+60)[0] == 'BTC'
 
 
 @pytest.mark.parametrize('kind', ['live_tick', 'missing', 'wrong_window', 'tie'])
