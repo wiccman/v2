@@ -203,23 +203,28 @@ def _close_result(client, journal, record, now, bought, buys, sold, sells):
     return True
 
 
-def _external_same_side_buys_only(rows, owned_ids, side):
-    """Prove outside fills only ADDED our held outcome; never adopt outside lots.
+def _external_adds_owned_exposure_only(rows, owned_ids, side):
+    """Require every outside fill to ADD the held outcome, never reduce it.
 
-    An opposite-side buy or any sell may have reduced the bot's settlement
-    inventory in Kalshi's netted account. Missing/legacy-ambiguous direction
-    fields are not evidence, so they must block this exception.
+    Kalshi netting: buy NO OR sell YES adds NO exposure; buy YES OR sell NO
+    adds YES exposure. A sell of the opposite contract does NOT reduce the
+    owned position. Explicit legacy action+side AND current outcome/book-side
+    evidence must agree, and unknown identity/direction still blocks.
     """
     outside = [f for f in rows if f.get("order_id") not in owned_ids]
     if not outside:
         return False
+    ours = side.lower()
+    opposite = "yes" if ours == "no" else "no"
+    expected_book = "ask" if ours == "no" else "bid"
     for row in outside:
-        if (not row.get("fill_id")
-                or row.get("action") != "buy"
-                or row.get("side") != side.lower()
-                or row.get("outcome_side", side.lower()) != side.lower()
-                or row.get("book_side", "ask" if side == "NO" else "bid")
-                    != ("ask" if side == "NO" else "bid")
+        action, leg = row.get("action"), row.get("side")
+        increases_exposure = ((action == "buy" and leg == ours)
+                              or (action == "sell" and leg == opposite))
+        if (not row.get("fill_id") or not row.get("order_id")
+                or not increases_exposure
+                or row.get("outcome_side", ours) != ours
+                or row.get("book_side", expected_book) != expected_book
                 or row.get("subaccount_number", 0) not in (0, None)
                 or core.fill_contract_quantity(row) <= 0):
             return False
@@ -275,16 +280,19 @@ def reconcile(client, journal, record, now):
         raise RuntimeError("oversold")
     outside = [row for row in rows if row.get("order_id") not in owned_ids]
     if outside:
-        # Only after venue FINALIZATION can independently proven same-side
-        # external buys be ignored for accounting of this bot-owned purchase.
+        # Only after venue FINALIZATION can fills independently proven to
+        # ADD this bot's exposure be ignored for accounting of its purchase.
         # This never creates an entry/exit, adopts lots, or changes budgets.
         if (now >= record["close_at"]
-                and _external_same_side_buys_only(rows, owned_ids, side)):
+                and _external_adds_owned_exposure_only(rows, owned_ids, side)):
             market = client.market(ticker)
             if (market.get("status") in {"finalized", "settled"}
                     and str(market.get("result", "")).lower() in {"yes", "no"}):
-                event("EXTERNAL_SAME_SIDE_BUYS_SETTLED", ticker=ticker,
+                event("EXTERNAL_ADDITIVE_FILLS_SETTLED", ticker=ticker,
                       external_fill_count=len(outside),
+                      outside_opposite_sells=sum(
+                          f.get("action") == "sell" and f.get("side") != side.lower()
+                          for f in outside),
                       owned_bought=str(bought), owned_sold=str(sold))
                 _close_result(client, journal, record, now, bought, buys, sold, sales)
                 return
