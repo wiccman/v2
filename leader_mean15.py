@@ -1,4 +1,4 @@
-"""Crypto Leader 15-minute NO-on-closest-to-mean strategy.
+"""Crypto Leader 15-minute NO-on-nearest-above-mean strategy.
 
 Separate owned-order journal. It does not amend the individual-coin strategy,
 reprice another bot's exits, or trade from stale/incomplete coin data.
@@ -40,6 +40,7 @@ MAX_CONTRACTS = 100
 REFRESH_SECONDS = 15
 TERMINAL = core.TERMINAL
 SIGNAL_SOURCE = "coinbase_closed_minute_one"
+SELECTION_POLICY = "nearest_eligible_strictly_above_mean_v1"
 
 
 class OpeningMinutePerformance:
@@ -93,9 +94,13 @@ def coin_mean_choice(observations, start, now):
     if len(returns) != len(COINS):
         raise ranked.PerformanceUnavailable("incomplete_leader_mean")
     mean = sum(returns.values(), D(0)) / D(len(COINS))
-    choices = sorted(((abs(returns[coin] - mean), coin)
-                      for coin in TRADE_COINS))
-    if len(choices) < 2 or abs(choices[0][0] - choices[1][0]) <= D("1e-10"):
+    # North means above the basket mean, even when both values are negative.
+    # SOL remains in the mean but is never an eligible entry candidate.
+    choices = sorted((returns[coin] - mean, coin)
+                     for coin in TRADE_COINS if returns[coin] > mean)
+    if not choices:
+        raise ranked.PerformanceUnavailable("no_eligible_coin_above_mean")
+    if len(choices) > 1 and abs(choices[0][0] - choices[1][0]) <= D("1e-10"):
         raise ranked.PerformanceUnavailable("ambiguous_closest_coin")
     return choices[0][1], mean, returns
 
@@ -279,6 +284,10 @@ class LeaderRunner:
         saved = self.journal.data.setdefault("leader_opening_signals", {})
         signal = saved.get(str(start))
         if signal is not None:
+            # Never reuse a locked choice made under a different selector.
+            # Existing positions reconcile normally; new windows use this policy.
+            if signal.get("selection_policy") != SELECTION_POLICY:
+                raise ranked.PerformanceUnavailable("saved_signal_policy_changed_wait_for_next_window")
             if (signal.get("source") != SIGNAL_SOURCE
                     or signal.get("window_start_ms") != start * 1000
                     or signal.get("sample_ms") != (start + 60) * 1000
@@ -290,6 +299,7 @@ class LeaderRunner:
             raise ranked.PerformanceUnavailable("not_exact_minute_one_close")
         coin, mean, returns = coin_mean_choice(observations, start, start + 60)
         signal = {"coin": coin, "mean_return_pct": str(mean),
+                  "selection_policy": SELECTION_POLICY,
                   "returns_pct": {k: str(v) for k, v in returns.items()},
                   "source": SIGNAL_SOURCE, "window_start_ms": start * 1000,
                   "sample_ms": (start + 60) * 1000}
