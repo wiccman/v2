@@ -230,7 +230,7 @@ def reconcile(client, journal, record, now):
     """Never repeat an uncertain POST. Old sells are audited, but no new Leader sell."""
     if record.get("outcome"):
         return
-    ticker = record["ticker"]
+    ticker, side = record["ticker"], record["side"]
     proof = _owned_fills(client, record)
     if proof is None:
         # IOC should not rest. Cancel only a verified identified live order's
