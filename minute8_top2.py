@@ -16,6 +16,9 @@ import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 import late_basket_minute9 as late
+import leader_mean15 as leader
+import os
+from pathlib import Path
 
 POLICY = "minute9-top2-sol-central-overnight-v6"
 START_SECONDS = 540
@@ -210,8 +213,34 @@ def installed_policy(provider=None):
     previous = (core.ENTRY_START_SECONDS, core.ENTRY_END_SECONDS, core.run_pass)
     provider = provider or ranked.CoinbasePerformance()
     core.ENTRY_START_SECONDS, core.ENTRY_END_SECONDS = START_SECONDS, END_SECONDS
+    leader_runner = None
+    if os.getenv("LEADER_TRADING_ENABLED", "false").lower() == "true":
+        try:
+            path = Path(os.getenv("LEADER_STATE_PATH", "/data/crypto_leader15_live.json"))
+            if os.getenv("RAILWAY_ENVIRONMENT_ID"):
+                mount = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/missing-volume"))
+                if not os.path.ismount(mount) or not path.resolve().is_relative_to(mount.resolve()):
+                    raise RuntimeError("Leader journal requires the persistent volume")
+            leader_runner = leader.LeaderRunner(path)
+            core.event("LEADER_READY", live_enabled=True, market_series=leader.SERIES,
+                       signal_source="fresh_coinbase_window_returns",
+                       entry_start_second=leader.ENTRY_SECOND,
+                       exit_start_second=leader.EXIT_SECOND,
+                       side="NO", min_entry_cents=65,
+                       budgets_dollars=["10", "5_until_loss"],
+                       stop_loss_enabled=False, excluded_leader_coin="SOL")
+        except Exception as error:
+            core.event("LEADER_INITIALIZATION_FAILED", error_type=type(error).__name__)
+            leader_runner = None
 
     def execute(*args, **kwargs):
+        # Leader exits get priority even when regular-market processing has an
+        # unrelated exception; no shared journal or risk-rule mutation.
+        if leader_runner is not None:
+            try:
+                leader_runner.run(args[0], live=args[5])
+            except Exception as error:
+                core.event("LEADER_PASS_PAUSED", error_type=type(error).__name__)
         return run_pass(*args, **kwargs, provider=provider)
 
     core.run_pass = execute
