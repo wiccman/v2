@@ -226,8 +226,14 @@ def installed_policy(provider=None):
     provider = provider or ranked.CoinbasePerformance()
     core.ENTRY_START_SECONDS, core.ENTRY_END_SECONDS = START_SECONDS, END_SECONDS
     leader_runner = None
-    if os.getenv("LEADER_TRADING_ENABLED", "false").lower() == "true":
+    leader_entries = os.getenv("LEADER_TRADING_ENABLED", "false").strip().lower() == "true"
+    leader_exits = os.getenv("LEADER_EXITS_ENABLED", "false").strip().lower() == "true"
+    leader_tp = core.D(0)
+    if leader_entries or leader_exits:
         try:
+            if leader_exits:
+                leader_tp = core.regular_tp_spread_from_cents(
+                    os.getenv("LEADER_TAKE_PROFIT_CENTS", "7"))
             path = Path(os.getenv("LEADER_STATE_PATH", "/data/crypto_leader15_live.json"))
             if os.getenv("RAILWAY_ENVIRONMENT_ID"):
                 mount = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/missing-volume"))
@@ -238,7 +244,9 @@ def installed_policy(provider=None):
                        signal_source="fresh_coinbase_window_returns",
                        entry_start_second=leader.ENTRY_SECOND,
                        entry_end_second=leader.ENTRY_END_SECOND,
-                       hold_until_settlement=leader.HOLD_UNTIL_SETTLEMENT,
+                       hold_until_settlement=not leader_exits,
+                       entries_enabled=leader_entries,
+                       take_profit_cents=int(leader_tp * 100),
                        side="NO", min_entry_cents=65,
                        budgets_dollars=["10", "5_until_loss"],
                        stop_loss_enabled=False, excluded_leader_coin="SOL")
@@ -247,12 +255,12 @@ def installed_policy(provider=None):
             leader_runner = None
 
     def execute(*args, **kwargs):
-        # Leader settlement reconciliation gets priority even when regular-
-        # market processing has an unrelated exception. No shared journal,
-        # automated pre-settlement exit, or single-coin risk-rule mutation.
+        # Leader reconciliation gets priority; entries and optional exits have
+        # independent switches and do not mutate the single-coin rules.
         if leader_runner is not None:
             try:
-                leader_runner.run(args[0], live=args[5])
+                leader_runner.run(args[0], live=args[5], entries_enabled=leader_entries,
+                                  take_profit_spread=leader_tp)
             except Exception as error:
                 core.event("LEADER_PASS_PAUSED", error_type=type(error).__name__)
         return run_pass(*args, **kwargs, provider=provider)
