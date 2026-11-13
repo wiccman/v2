@@ -5,9 +5,10 @@ reprice another bot's exits, or trade from stale/incomplete coin data.
 This freezes the five-coin mean choice from the first CLOSED one-minute
 Coinbase candle, matching the Pine M1 calculation (not live ticker prices).
 A live opt-in is required independently.
-Filled Leader contracts are held through final market settlement, not sold
-at minute 14, and only after verified settlement does the independent budget
-cycle advance. Other single-coin TP/SL strategies are unaffected.
+By default, filled Leader contracts are held through final market settlement.
+An independently enabled take profit can instead post a reduce-only limit at
+verified average entry plus the configured spread, with new buying paused.
+Other single-coin TP/SL strategies are unaffected.
 """
 from __future__ import annotations
 
@@ -30,7 +31,7 @@ TRADE_COINS = ("BTC", "ETH", "XRP", "HYPE")  # SOL only excluded from Leader ent
 ENTRY_SECOND = 180
 ENTRY_END_SECOND = 840  # Still stop buying at minute 14.
 WINDOW_SECONDS = 900
-HOLD_UNTIL_SETTLEMENT = True  # Never initiate an early Leader sell / TP / SL.
+HOLD_UNTIL_SETTLEMENT = True  # Default; take profit requires an explicit opt-in.
 MIN_NO_ASK = D(".65")
 MAX_NO_LIMIT = D(".99")
 FULL_BUDGET = D("10")
@@ -234,8 +235,8 @@ def _external_adds_owned_exposure_only(rows, owned_ids, side):
     return True
 
 
-def reconcile(client, journal, record, now):
-    """Never repeat an uncertain POST. Old sells are audited, but no new Leader sell."""
+def reconcile(client, journal, record, now, *, take_profit_spread=D(0)):
+    """Reconcile owned fills; an optional TP never repeats an uncertain POST."""
     if record.get("outcome"):
         return
     ticker, side = record["ticker"], record["side"]
@@ -328,11 +329,49 @@ def reconcile(client, journal, record, now):
     if now >= record["close_at"]:
         _close_result(client, journal, record, now, bought, buys, sold, sales)
         return
-    # NO forced minute-14 exit: waiting for Kalshi settlement avoids paying
-    # the last-minute bid/ask spread to unwind an otherwise winning prediction.
-    # Any pre-upgrade sell intents above still reconcile by exact order ID.
-    # New Leader positions are not offered to the bid, stopped, or TP-sold.
-    return
+    if take_profit_spread <= 0:
+        return
+    # Do not replace a canceled/rejected TP, including a user's cancellation.
+    # Pending and resting intents returned above, including lost acknowledgements.
+    if any(intent.get("purpose") == "take_profit" for intent in record["sells"]):
+        return
+    sign = D(1) if side == "YES" else D(-1)
+    if core.position_for(client, ticker) != sign * remaining:
+        event("TP_OWNERSHIP_WAIT", ticker=ticker)
+        return
+    if client.all_orders(ticker, "resting"):
+        event("TP_OTHER_ORDER_WAIT", ticker=ticker)
+        return
+    cost = sum((core._outcome_cost(f, -1) * core.fill_contract_quantity(f)
+                for f in buys), D(0)) / bought
+    if not cost.is_finite() or not D(0) < cost < D(1):
+        raise RuntimeError("invalid_verified_entry_cost")
+    target = (cost + take_profit_spread).quantize(D(".01"), rounding=ROUND_CEILING)
+    if target > D(".99"):
+        event("TP_TARGET_UNAVAILABLE", ticker=ticker, entry_cost=str(cost),
+              target=str(target))
+        return  # Never silently shrink the requested profit to fit the price cap.
+    market = client.market(ticker)
+    close = core.parse_time(market["close_time"])
+    if (market.get("ticker") != ticker or market.get("status") not in {"active", "open"}
+            or close != record["close_at"] or close <= now):
+        return
+    intent = {"client_id": str(uuid.uuid4()), "quantity": str(remaining),
+              "target": str(target), "entry_cost": str(cost),
+              "purpose": "take_profit", "execution": "reduce_only_gtc",
+              "created_at": now}
+    record["sells"].append(intent)
+    journal.save()  # Persist ownership and reservation before the POST.
+    event("TP_SUBMIT", ticker=ticker, quantity=str(remaining), target=str(target),
+          entry_cost=str(cost), execution="reduce_only_gtc")
+    response = client.place_resting_take_profit(
+        ticker, sign * remaining, target, expiration_time=close,
+        client_order_id=intent["client_id"], reduce_only=True)
+    row = response.get("order", response)
+    if row.get("order_id"):
+        intent["order_id"] = row["order_id"]
+        journal.save()
+        event("TP_ACK", ticker=ticker, order_id=intent["order_id"], target=str(target))
 
 
 class LeaderRunner:
@@ -366,18 +405,24 @@ class LeaderRunner:
         event("SIGNAL_LOCKED", **signal)
         return signal
 
-    def run(self, client, *, live):
+    def run(self, client, *, live, entries_enabled=True, take_profit_spread=D(0)):
         # A preview must never send orders or exits, even with live journal data.
         if not live:
             return
+        if (not isinstance(take_profit_spread, D) or not take_profit_spread.is_finite()
+                or not D(0) <= take_profit_spread < D(1)):
+            raise ValueError("Invalid Leader take-profit spread")
         now = self.clock()
         for record in list(self.journal.data["windows"].values()):
             if record.get("buy") and not record.get("outcome"):
                 try:
-                    reconcile(client, self.journal, record, self.clock())
+                    reconcile(client, self.journal, record, self.clock(),
+                              take_profit_spread=take_profit_spread)
                 except Exception as error:
                     event("RECONCILE_WAIT", ticker=record.get("ticker"),
                           error_type=type(error).__name__)
+        if not entries_enabled:
+            return
         # Never initiate new entries during incomplete prior fills/settlements.
         now = self.clock()
         start = int(now // WINDOW_SECONDS) * WINDOW_SECONDS
