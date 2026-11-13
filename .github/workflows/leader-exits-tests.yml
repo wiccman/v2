@@ -1,0 +1,31 @@
+name: Crypto Leader exits offline checks
+
+on:
+  push:
+    branches: [prep/leader-paused-tp-7c]
+  pull_request:
+    paths:
+      - leader_mean15.py
+      - minute8_top2.py
+      - kalshi.py
+      - test_leader_take_profit.py
+      - test_leader_mean15.py
+      - test_leader_opening_lock.py
+      - .github/workflows/leader-exits-tests.yml
+
+permissions:
+  contents: read
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - run: python tools/run_offline_tests.py -q test_leader_take_profit.py test_leader_mean15.py test_leader_opening_lock.py tests/test_crypto_leader_only_routing.py test_m9_resting_tp.py
