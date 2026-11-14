@@ -25,6 +25,7 @@ HOLD_UNTIL_SETTLEMENT = True  # Never initiate an early Leader sell / TP / SL.
 MIN_NO_ASK = D(".65")
 MAX_NO_LIMIT = D(".99")
 WINDOW_BUDGET = D("5")
+AFTER_LOSS_BUDGET = D("2.50")
 FEE_RESERVE = D(".03")
 MAX_CONTRACTS = 100
 REFRESH_SECONDS = 15
@@ -120,11 +121,18 @@ def leader_plan(markets, coin, start, now):
 
 
 def budget(journal):
-    """Cap each window at $5 and block new entries while ownership is unresolved."""
+    """Use the last verified result and block entries while ownership is unresolved."""
     if any(r.get("buy") and not r.get("outcome")
            for r in journal.data["windows"].values()):
         return None
-    return WINDOW_BUDGET
+    last = max(
+        (r["outcome"] for r in journal.data["windows"].values()
+         if r.get("entry_signal_source") == SIGNAL_SOURCE
+         and r.get("outcome", {}).get("status") in {"win", "loss"}),
+        key=lambda o: o["completed_at"],
+        default=None,
+    )
+    return AFTER_LOSS_BUDGET if last and last["status"] == "loss" else WINDOW_BUDGET
 
 
 def _price(value):
