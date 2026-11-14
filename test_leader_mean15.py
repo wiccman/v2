@@ -19,9 +19,8 @@ def market(coin="ETH", no=".72", status="open"):
 
 
 def observations(at):
-    # Returns: BTC +4, ETH -2, SOL +5, XRP +1, HYPE +3.
-    # ETH is the lowest return.
-    points = {"BTC": 4, "ETH": -2, "SOL": 5, "XRP": 1, "HYPE": 3}
+    # HYPE is closest to the mean and ETH is second-closest.
+    points = {"BTC": 4, "ETH": D("2.2"), "SOL": 5, "XRP": 0, "HYPE": 3}
     return [ranked.Observation(leader.COINS[k], START, D(100),
                                D(100 + v), at) for k,v in points.items()]
 
@@ -126,13 +125,13 @@ def test_exact_contract_and_sol_eligibility():
     assert leader.leader_plan([market("ETH", status="closed")], "ETH", START, START+250) is None
 
 
-def test_lowest_return_selects_eth_and_rejects_stale_data():
-    coin, mean, returns = leader.lowest_return_choice(observations(START+181), START, START+181)
-    assert coin == "ETH" and mean == D("2.2") and returns["SOL"] == D(5)
+def test_mean_rank_selects_eth_and_rejects_stale_data():
+    coin, fallback, mean, returns = leader.mean_rank_choices(observations(START+181), START, START+181)
+    assert coin == "ETH" and fallback == "HYPE" and mean == D("2.84") and returns["SOL"] == D(5)
     with pytest.raises(ranked.PerformanceUnavailable):
-        leader.lowest_return_choice(observations(START+181)[:-1], START, START+181)
+        leader.mean_rank_choices(observations(START+181)[:-1], START, START+181)
     with pytest.raises(ranked.PerformanceUnavailable):
-        leader.lowest_return_choice(observations(START+181), START, START+250)
+        leader.mean_rank_choices(observations(START+181), START, START+250)
 
 
 def test_budget_follows_last_settled_result(tmp_path):
