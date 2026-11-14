@@ -11,6 +11,8 @@ from pathlib import Path
 import single_coin_minute9 as core
 import performance_ranked_minute9 as ranked
 from cash_checked_minute9 import cash_snapshot
+from kalshi import EntryNotDispatched
+from request_coordinator import RequestDeferred
 
 SERIES = "KXCRYPTOLEAD15M"
 COINS = {"BTC": "KXBTC15M", "ETH": "KXETH15M",
@@ -180,6 +182,55 @@ def _price_count(value):
     return result
 
 
+def _finish_not_dispatched(journal, record, now, reason):
+    """Only the pre-transport exception path or audited incident may call this."""
+    if record["buy"].get("order_id") or record.get("sells"):
+        raise RuntimeError("Cannot release an acknowledged or managed entry")
+    record["submission_proof"] = {"kind": "not_dispatched", "reason": reason}
+    record["outcome"] = {"status": "no_fill", "completed_at": now}
+    journal.save()
+    event("ENTRY_NOT_SENT", ticker=record["ticker"], reason=reason)
+
+
+def _recover_known_sol_guard(client, journal, record, now):
+    """One audited legacy incident, not an age-based unknown-order release.
+
+    At 2026-11-14 04:34:01Z the old adapter unconditionally raised for SOL
+    before HTTP dispatch (still present through 24cf68e, kalshi.py:375).
+    Logs show BUY_SUBMIT then ValueError 85 microseconds later. Match that
+    exact incident only, and retain the block if any venue evidence conflicts.
+    An empty order lookup alone is never proof of non-dispatch.
+    """
+    intent = record.get("buy", {})
+    if not (record.get("ticker") == "KXCRYPTOLEAD15M-26NOV132345-SOL"
+            and record.get("window_start_ms") == 1794630600000
+            and record.get("close_at") == 1794631500
+            and record.get("coin") == "SOL" and record.get("side") == "NO"
+            and record.get("entry_signal_source") == PREVIOUS_SIGNAL_SOURCE
+            and record.get("quantity") == "4" and record.get("budget_dollars") == "5"
+            and intent.get("limit") == "0.98"
+            and type(intent.get("created_at")) in (int, float)
+            and 1794630841 <= intent["created_at"] < 1794630842
+            and not intent.get("order_id") and not record.get("sells")
+            and not record.get("outcome")):
+        return False
+    ticker = record["ticker"]
+    if (core.find_order(client, ticker, intent) is not None
+            or client.all_orders(ticker) or client.all_fills(ticker)):
+        return False
+    for position in client.positions(ticker):
+        if (position.get("ticker") != ticker
+                or _price_count(abs(D(str(position.get("position_fp", "NaN"))))) != 0):
+            return False
+    market = client.market(ticker)
+    if (market.get("ticker") != ticker
+            or market.get("status") not in {"finalized", "settled"}
+            or str(market.get("result", "")).lower() not in {"yes", "no"}):
+        return False
+    _finish_not_dispatched(journal, record, now, "audited_20261114_sol_local_guard")
+    return True
+
+
 def _close_result(client, journal, record, now, bought, buys, sold, sells):
     ticker, side = record["ticker"], record["side"]
     remaining = bought - sold
@@ -241,6 +292,8 @@ def _external_adds_owned_exposure_only(rows, owned_ids, side):
 def reconcile(client, journal, record, now):
     """Never repeat an uncertain POST. Old sells are audited, but no new Leader sell."""
     if record.get("outcome"):
+        return
+    if _recover_known_sol_guard(client, journal, record, now):
         return
     ticker, side = record["ticker"], record["side"]
     proof = _owned_fills(client, record)
@@ -444,9 +497,15 @@ class LeaderRunner:
             event("BUY_SUBMIT", ticker=plan["ticker"], coin=coin,
                   side="NO", quantity=quantity, limit=str(limit),
                   budget=str(allocation))
-            response = client.place_entry(plan["ticker"], "NO", quantity, limit,
-                                          plan["close"], submit_before=start + ENTRY_END_SECOND,
-                                          client_order_id=intent["client_id"], ioc=True)
+            try:
+                response = client.place_entry(plan["ticker"], "NO", quantity, limit,
+                                              plan["close"], submit_before=start + ENTRY_END_SECOND,
+                                              client_order_id=intent["client_id"], ioc=True)
+            except (EntryNotDispatched, RequestDeferred) as error:
+                reason = (error.reason if isinstance(error, EntryNotDispatched)
+                          else "shared_api_cooldown")
+                _finish_not_dispatched(self.journal, record, self.clock(), reason)
+                return  # Keep one attempt per window; no immediate fallback/retry.
             row = response.get("order", response)
             if row.get("order_id"):
                 intent["order_id"] = row["order_id"]
