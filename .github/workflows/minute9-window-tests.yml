@@ -1,0 +1,30 @@
+name: Minute-nine through close
+on:
+  push:
+    branches: [fix/minute9-until-close]
+  pull_request:
+    paths:
+      - single_coin_minute9.py
+      - performance_ranked_minute9.py
+      - test_minute9_until_close.py
+      - .github/workflows/minute9-window-tests.yml
+permissions:
+  contents: read
+jobs:
+  entry-window:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -r requirements.txt
+      - name: Existing guards and new late-entry regressions
+        run: python tools/run_offline_tests.py -q test_single_coin_minute9.py test_minute9_queue.py test_performance_ranked_minute9.py test_cash_checked_minute9.py test_minute9_until_close.py
+      - name: Production 900-second setting
+        env:
+          M9_ENTRY_END_SECONDS: "900"
+        run: python tools/run_offline_tests.py -q test_minute9_until_close.py

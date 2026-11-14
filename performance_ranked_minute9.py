@@ -193,7 +193,7 @@ def run_ranked_pass(client, journal, series_list, base_budget, max_contracts,
         # Core reconciles exits before it first iterates this generator.
         checked = clock()
         start = int(checked // 900) * 900
-        if not 540 <= checked - start < 600:
+        if not core.ENTRY_START_SECONDS <= checked - start < core.ENTRY_END_SECONDS:
             return
         if core.window_entry_count(journal, start * 1000) >= max_entries_per_window:
             return
@@ -203,7 +203,7 @@ def run_ranked_pass(client, journal, series_list, base_budget, max_contracts,
         except Exception as error:
             emit("M9_PERFORMANCE_UNAVAILABLE", **error_fields(error))
             return
-        if not 540 <= clock() - start < 600:
+        if not core.ENTRY_START_SECONDS <= clock() - start < core.ENTRY_END_SECONDS:
             emit("M9_PERFORMANCE_WINDOW_EXPIRED", window_start_ms=start * 1000)
             return
         proxy.start = start
@@ -216,7 +216,7 @@ def run_ranked_pass(client, journal, series_list, base_budget, max_contracts,
                      "return_pct": str(r.return_pct), "observed_at": r.observed_at}
                     for i, r in enumerate(rows)])
         for row in rows:
-            if not 540 <= clock() - start < 600:
+            if not core.ENTRY_START_SECONDS <= clock() - start < core.ENTRY_END_SECONDS:
                 return
             yield row.series
 

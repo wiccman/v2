@@ -1,7 +1,7 @@
 """Single-coin 15-minute Kalshi markets: minute-nine buy, +5c gross exit.
 
 For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
-whichever side has a quoted ask from 59c through 91c during elapsed minute 9.
+whichever side has a quoted ask from 59c through 91c from elapsed minute 9 until the configured entry cutoff.
 No basket mean, leader rank, direction indicator or other coin-selection rule.
 Both sides qualifying is ambiguous, so the market is skipped. By default
 only one filled or potentially-filled market per 15-minute window is allowed.
@@ -12,6 +12,8 @@ M9_MAX_ENTRIES_PER_WINDOW can increase the filled/pending-market limit.
 Only orders matched to this runner's saved client/order IDs are managed.
 Outside positions and orders are left untouched; overlapping markets are skipped.
 
+Set M9_ENTRY_END_SECONDS=900 for entries from minute 9 until market close;
+the unset default of 600 preserves the archived minute-nine-only mode.
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
@@ -46,6 +48,10 @@ MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = D(".59"), D(".91"), D(".05"), D(".45")
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
+ENTRY_START_SECONDS = 540
+ENTRY_END_SECONDS = int(os.getenv("M9_ENTRY_END_SECONDS", "600"))
+if not 600 <= ENTRY_END_SECONDS <= 900:
+    raise ValueError("M9_ENTRY_END_SECONDS must be between 600 and 900")
 
 
 def event(name, **details):
@@ -61,7 +67,7 @@ def parse_time(value):
 
 
 def plan_single_coin(market, now, series):
-    """Return one eligible YES/NO ask in [59, 91]c at 9:00–9:59 elapsed."""
+    """Return an eligible YES/NO ask from minute 9 until the exclusive cutoff."""
     ticker = str(market.get("ticker", ""))
     if not ticker.startswith(series + "-") or market.get("status") not in {"active", "open"}:
         return None
@@ -71,7 +77,7 @@ def plan_single_coin(market, now, series):
         return None
     # Each 15-minute series settles a fixed 900s after the contract window opens.
     open_at = close - 900
-    if not 540 <= now - open_at < 600:
+    if not ENTRY_START_SECONDS <= now - open_at < ENTRY_END_SECONDS:
         return None
     candidates = []
     for side in ("YES", "NO"):
@@ -488,7 +494,7 @@ def queue_skip(client_market, now, series):
     """Explain in-window quote skips; do not spam logs for future markets."""
     try:
         start = parse_time(client_market["close_time"]) - 900
-        if not 540 <= now - start < 600:
+        if not ENTRY_START_SECONDS <= now - start < ENTRY_END_SECONDS:
             return
     except (KeyError, TypeError, ValueError, AttributeError):
         return
@@ -584,8 +590,8 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         if entry_market_occupied(client, ticker):
             event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
             continue
-        # Portfolio checks may have taken time. Never extend minute 9.
-        if not start_ms / 1000 + 540 <= time.time() < start_ms / 1000 + 600:
+        # Portfolio checks may have taken time. Never extend the entry cutoff.
+        if not start_ms / 1000 + ENTRY_START_SECONDS <= time.time() < start_ms / 1000 + ENTRY_END_SECONDS:
             event("M9_QUEUE_ADVANCE", ticker=ticker, reason="entry_window_ended")
             continue
         intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
@@ -601,7 +607,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
               quantity=str(quantity), price=current["limit"])
         try:
             response = client.place_entry(ticker, current["side"], quantity, D(current["limit"]),
-                parse_time(market["close_time"]), submit_before=(start_ms + 600000) / 1000,
+                parse_time(market["close_time"]), submit_before=start_ms / 1000 + ENTRY_END_SECONDS,
                 client_order_id=intent["client_id"], ioc=True)
         except Exception as error:
             # Log structured diagnostics, not raw responses or credentials.
@@ -682,6 +688,8 @@ def main(argv=None):
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               max_entries_per_window=max_entries_per_window,
               entry_queue_policy=ENTRY_QUEUE_POLICY,
+              entry_start_seconds=ENTRY_START_SECONDS,
+              entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
               price_range_cents="59-91", take_profit_cents=5,
