@@ -135,7 +135,7 @@ def test_lowest_return_selects_eth_and_rejects_stale_data():
         leader.lowest_return_choice(observations(START+181), START, START+250)
 
 
-def test_fixed_five_dollar_budget(tmp_path):
+def test_budget_follows_last_settled_result(tmp_path):
     from single_coin_minute9 import Journal
     j = Journal(tmp_path/"leader.json")
     assert leader.budget(j) == D(5)
@@ -144,7 +144,14 @@ def test_fixed_five_dollar_budget(tmp_path):
             "ticker":TICKER, "outcome":{"status":status, "completed_at":len(j.data["windows"])+1}}
         assert leader.budget(j) == D(5)
     j.data["windows"]["loss"] = {"ticker":TICKER,
+        "entry_signal_source": leader.SIGNAL_SOURCE,
         "outcome":{"status":"loss","completed_at":100}}
+    assert leader.budget(j) == D("2.50")
+    j.data["windows"]["empty"] = {"entry_signal_source": leader.SIGNAL_SOURCE,
+        "outcome":{"status":"no_fill","completed_at":101}}
+    assert leader.budget(j) == D("2.50")
+    j.data["windows"]["recovery"] = {"entry_signal_source": leader.SIGNAL_SOURCE,
+        "outcome":{"status":"win","completed_at":102}}
     assert leader.budget(j) == D(5)
     j.data["windows"]["pending"] = {"ticker":TICKER,"buy":{"client_id":"UNCERTAIN"}}
     assert leader.budget(j) is None
@@ -207,7 +214,7 @@ def test_losing_leader_contract_remains_at_risk_until_final_settlement(tmp_path)
     assert outcome["status"] == "loss"
     assert outcome["sold"] == "0"
     assert D(outcome["net_pnl_dollars"]) < 0
-    assert leader.budget(svc.journal) == D(5)
+    assert leader.budget(svc.journal) == D("2.50")
     assert len(venue.submissions) == 1
 
 

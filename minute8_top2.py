@@ -241,6 +241,7 @@ def installed_policy(provider=None):
                        hold_until_settlement=leader.HOLD_UNTIL_SETTLEMENT,
                        side="NO", min_entry_cents=65,
                        budget_dollars=str(leader.WINDOW_BUDGET),
+                       budget_after_loss_dollars=str(leader.AFTER_LOSS_BUDGET),
                        stop_loss_enabled=False)
         except Exception as error:
             core.event("LEADER_INITIALIZATION_FAILED", error_type=type(error).__name__)
