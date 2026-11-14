@@ -40,22 +40,28 @@ class MinuteFourPerformance:
 
     def _one(self, series, start):
         iso = lambda ts: ranked.datetime.fromtimestamp(ts, ranked.timezone.utc).isoformat()
+        stamps = (start, start + SIGNAL_SECOND - 60)
         with self.session_factory() as session:
-            response = session.get(
-                f"{ranked.BASE}/products/{ranked.PRODUCTS[series]}/candles",
-                params={"granularity": 60, "start": iso(start), "end": iso(start + SIGNAL_SECOND)},
-                timeout=(1, 2))
-            response.raise_for_status()
-            candles = response.json()
-        if not isinstance(candles, list):
-            raise ranked.PerformanceUnavailable("invalid_minute_four_candles")
-        selected = []
-        for stamp in (start, start + SIGNAL_SECOND - 60):
-            rows = [r for r in candles if isinstance(r, list) and len(r) >= 6
-                    and r[0] == stamp]
-            if len(rows) != 1:
-                raise ranked.PerformanceUnavailable("minute_four_missing_or_ambiguous")
-            selected.append(rows[0])
+            # A narrow query can keep returning an incomplete candle set.
+            # Widen the request once, but accept only the exact target bars.
+            for end in (start + SIGNAL_SECOND, start + ENTRY_END_SECOND):
+                response = session.get(
+                    f"{ranked.BASE}/products/{ranked.PRODUCTS[series]}/candles",
+                    params={"granularity": 60, "start": iso(start), "end": iso(end)},
+                    timeout=(1, 2))
+                response.raise_for_status()
+                candles = response.json()
+                if not isinstance(candles, list):
+                    raise ranked.PerformanceUnavailable("invalid_minute_four_candles")
+                matches = [[r for r in candles if isinstance(r, list) and len(r) >= 6
+                            and r[0] == stamp] for stamp in stamps]
+                if any(len(rows) > 1 for rows in matches):
+                    break
+                if all(matches):
+                    selected = [rows[0] for rows in matches]
+                    break
+        if not all(len(rows) == 1 for rows in matches):
+            raise ranked.PerformanceUnavailable("minute_four_missing_or_ambiguous")
         opening, closing = selected
         return ranked.Observation(series, start, D(str(opening[3])),
                                   D(str(closing[4])), start + SIGNAL_SECOND)
