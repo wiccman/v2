@@ -19,9 +19,9 @@ def market(coin="ETH", no=".72", status="open"):
 
 
 def observations(at):
-    # Returns: BTC +4, ETH +2, SOL +0, XRP +1, HYPE +3.
-    # Mean = +2, so ETH is uniquely closest.
-    points = {"BTC": 4, "ETH": 2, "SOL": 0, "XRP": 1, "HYPE": 3}
+    # Returns: BTC +4, ETH -2, SOL +5, XRP +1, HYPE +3.
+    # ETH is the lowest return.
+    points = {"BTC": 4, "ETH": -2, "SOL": 5, "XRP": 1, "HYPE": 3}
     return [ranked.Observation(leader.COINS[k], START, D(100),
                                D(100 + v), at) for k,v in points.items()]
 
@@ -31,7 +31,7 @@ class Feed:
         self.clock = clock
     def snapshot(self, names, start):
         assert tuple(names) == leader.SOURCE_SERIES and start == START
-        return observations(START + 60)
+        return observations(START + 240)
 
 
 class Exchange:
@@ -103,8 +103,8 @@ class Exchange:
 
 
 @pytest.mark.parametrize("elapsed,eligible", [
-    (0, False), (60, False), (179.99, False), (180, True), (181, True),
-    (839.99, True), (840, False), (899, False), (900, False)])
+    (0, False), (60, False), (239.99, False), (240, True), (241, True),
+    (299.99, True), (300, False), (899, False), (900, False)])
 def test_entry_window_strict(elapsed, eligible):
     assert bool(leader.leader_plan([market()], "ETH", START, START+elapsed)) == eligible
 
@@ -114,55 +114,55 @@ def test_entry_window_strict(elapsed, eligible):
     (".6501", "0.66"), (".9751", "0.98"), (".99", "0.99"),
     (".9901", None), ("1.00", None)])
 def test_no_ask_gate_and_rounding(price, expected):
-    p = leader.leader_plan([market(no=price)], "ETH", START, START+185)
+    p = leader.leader_plan([market(no=price)], "ETH", START, START+245)
     assert (str(p["limit"]) if p else None) == expected
 
 
-def test_exact_contract_only_and_no_sol():
-    assert leader.leader_plan([market("SOL")], "SOL", START, START+200) is None
-    assert leader.leader_plan([market("BTC")], "BTC", START, START+200)
-    assert leader.leader_plan([market("ETH")], "BTC", START, START+200) is None
-    assert leader.leader_plan([market("ETH"), market("ETH")], "ETH", START, START+200) is None
-    assert leader.leader_plan([market("ETH", status="closed")], "ETH", START, START+200) is None
+def test_exact_contract_and_sol_eligibility():
+    assert leader.leader_plan([market("SOL")], "SOL", START, START+250)
+    assert leader.leader_plan([market("BTC")], "BTC", START, START+250)
+    assert leader.leader_plan([market("ETH")], "BTC", START, START+250) is None
+    assert leader.leader_plan([market("ETH"), market("ETH")], "ETH", START, START+250) is None
+    assert leader.leader_plan([market("ETH", status="closed")], "ETH", START, START+250) is None
 
 
-def test_5_coin_mean_selects_eth_and_does_not_allow_stale():
-    coin, mean, returns = leader.coin_mean_choice(observations(START+181), START, START+181)
-    assert coin == "ETH" and mean == D(2) and returns["SOL"] == D(0)
+def test_lowest_return_selects_eth_and_rejects_stale_data():
+    coin, mean, returns = leader.lowest_return_choice(observations(START+181), START, START+181)
+    assert coin == "ETH" and mean == D("2.2") and returns["SOL"] == D(5)
     with pytest.raises(ranked.PerformanceUnavailable):
-        leader.coin_mean_choice(observations(START+181)[:-1], START, START+181)
+        leader.lowest_return_choice(observations(START+181)[:-1], START, START+181)
     with pytest.raises(ranked.PerformanceUnavailable):
-        leader.coin_mean_choice(observations(START+181), START, START+200)
+        leader.lowest_return_choice(observations(START+181), START, START+250)
 
 
-def test_first_10_then_5_until_loss(tmp_path):
+def test_fixed_five_dollar_budget(tmp_path):
     from single_coin_minute9 import Journal
     j = Journal(tmp_path/"leader.json")
-    assert leader.budget(j) == D(10)
+    assert leader.budget(j) == D(5)
     for status in ("win", "win", "flat"):
         j.data["windows"][str(len(j.data["windows"]))] = {
             "ticker":TICKER, "outcome":{"status":status, "completed_at":len(j.data["windows"])+1}}
         assert leader.budget(j) == D(5)
     j.data["windows"]["loss"] = {"ticker":TICKER,
         "outcome":{"status":"loss","completed_at":100}}
-    assert leader.budget(j) == D(10)
+    assert leader.budget(j) == D(5)
     j.data["windows"]["pending"] = {"ticker":TICKER,"buy":{"client_id":"UNCERTAIN"}}
     assert leader.budget(j) is None
 
 
 def test_actual_buy_exact_no_and_hold_until_settlement_without_stop(tmp_path):
-    at = [START + 183.]
+    at = [START + 243.]
     feed = Feed(lambda: at[0])
     svc = leader.LeaderRunner(tmp_path / "leader.json", provider=feed,
                               clock=lambda: at[0])
     venue = Exchange()
     assert leader.HOLD_UNTIL_SETTLEMENT is True
-    assert leader.ENTRY_END_SECOND == 840
+    assert leader.ENTRY_END_SECOND == 300
     svc.run(venue, live=True)
     assert [s[0] for s in venue.submissions] == ["buy"]
     rec = svc.journal.data["windows"][str(START)]
     assert rec["coin"] == "ETH" and rec["side"] == "NO"
-    assert rec["budget_dollars"] == "10" and rec["buy"]["order_id"]
+    assert rec["budget_dollars"] == "5" and rec["buy"]["order_id"]
     # No stop loss and NO forced IOC exit, even at a good or bad bid.
     for elapsed, bid in ((400, ".12"), (839, ".90"),
                          (840, ".80"), (899, ".01"), (900, ".99"), (902, ".01")):
@@ -174,7 +174,7 @@ def test_actual_buy_exact_no_and_hold_until_settlement_without_stop(tmp_path):
         assert [entry[0] for entry in venue.submissions] == ["buy"]
         assert svc.journal.data["windows"][str(START)].get("outcome") is None
         assert leader.budget(svc.journal) is None  # Prior settlement pending.
-    # Only a VERIFIED finalized market result advances the rotation.
+    # Only a VERIFIED finalized market result completes the window.
     at[0] = START + 935
     venue.book.update(status="finalized", result="no")
     svc.run(venue, live=True)
@@ -187,7 +187,7 @@ def test_actual_buy_exact_no_and_hold_until_settlement_without_stop(tmp_path):
 
 
 def test_losing_leader_contract_remains_at_risk_until_final_settlement(tmp_path):
-    at = [START + 183.]
+    at = [START + 243.]
     svc = leader.LeaderRunner(tmp_path / "leader.json",
                               provider=Feed(lambda: at[0]), clock=lambda: at[0])
     venue = Exchange()
@@ -207,12 +207,12 @@ def test_losing_leader_contract_remains_at_risk_until_final_settlement(tmp_path)
     assert outcome["status"] == "loss"
     assert outcome["sold"] == "0"
     assert D(outcome["net_pnl_dollars"]) < 0
-    assert leader.budget(svc.journal) == D(10)
+    assert leader.budget(svc.journal) == D(5)
     assert len(venue.submissions) == 1
 
 
 def test_preview_mode_never_exits_existing_position(tmp_path):
-    at = [START+183]
+    at = [START+243]
     svc = leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
                               clock=lambda:at[0])
     venue = Exchange()
@@ -223,7 +223,7 @@ def test_preview_mode_never_exits_existing_position(tmp_path):
 
 
 def test_unresolved_entry_prevents_repeat_and_unknown_sell(tmp_path):
-    at=[START+180]
+    at=[START+240]
     svc=leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
                             clock=lambda:at[0])
     venue=Exchange()
@@ -238,7 +238,7 @@ def test_unresolved_entry_prevents_repeat_and_unknown_sell(tmp_path):
 
 
 def test_insufficient_cash_does_not_create_order_intent(tmp_path):
-    at=[START+180]
+    at=[START+240]
     svc=leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
                             clock=lambda:at[0])
     venue=Exchange()
@@ -249,7 +249,7 @@ def test_insufficient_cash_does_not_create_order_intent(tmp_path):
 
 def test_legacy_pre_upgrade_partial_sell_is_audited_without_new_exit(tmp_path):
     # A previously submitted live IOC must still be reconciled after an upgrade.
-    at = [START + 180.]
+    at = [START + 240.]
     svc = leader.LeaderRunner(tmp_path / "leader.json",
                               provider=Feed(lambda: at[0]), clock=lambda: at[0])
     venue = Exchange()
@@ -282,7 +282,7 @@ def test_legacy_pre_upgrade_partial_sell_is_audited_without_new_exit(tmp_path):
 
 
 def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
-    at = [START + 183.]
+    at = [START + 243.]
     path = tmp_path / "leader.json"
     venue = Exchange()
     leader.LeaderRunner(path, provider=Feed(lambda: at[0]),
@@ -321,7 +321,7 @@ def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
 ])
 def test_extra_fill_settles_only_when_proven_same_side_buy(
         tmp_path, outside, can_settle):
-    now = [START + 183]
+    now = [START + 243]
     runner = leader.LeaderRunner(tmp_path / "leader.json",
                                  provider=Feed(lambda: now[0]),
                                  clock=lambda: now[0])
@@ -354,7 +354,7 @@ def test_extra_fill_settles_only_when_proven_same_side_buy(
 
 
 def test_unidentified_outside_fill_does_not_release_budget(tmp_path):
-    now = [START + 183]
+    now = [START + 243]
     runner = leader.LeaderRunner(tmp_path / "leader.json",
                                  provider=Feed(lambda: now[0]),
                                  clock=lambda: now[0])
@@ -375,7 +375,7 @@ def test_unidentified_outside_fill_does_not_release_budget(tmp_path):
 
 def test_two_venue_shaped_outside_sell_yes_fills_release_only_after_finalization(tmp_path):
     """Reproduce production XRP NO blocker: external sell YES reports YES/bid."""
-    now = [START + 183]
+    now = [START + 243]
     runner = leader.LeaderRunner(tmp_path / "leader.json",
                                  provider=Feed(lambda: now[0]),
                                  clock=lambda: now[0])

@@ -235,13 +235,13 @@ def installed_policy(provider=None):
                     raise RuntimeError("Leader journal requires the persistent volume")
             leader_runner = leader.LeaderRunner(path)
             core.event("LEADER_READY", live_enabled=True, market_series=leader.SERIES,
-                       signal_source="fresh_coinbase_window_returns",
+                       signal_source=leader.SIGNAL_SOURCE,
                        entry_start_second=leader.ENTRY_SECOND,
                        entry_end_second=leader.ENTRY_END_SECOND,
                        hold_until_settlement=leader.HOLD_UNTIL_SETTLEMENT,
                        side="NO", min_entry_cents=65,
-                       budgets_dollars=["10", "5_until_loss"],
-                       stop_loss_enabled=False, excluded_leader_coin="SOL")
+                       budget_dollars=str(leader.WINDOW_BUDGET),
+                       stop_loss_enabled=False)
         except Exception as error:
             core.event("LEADER_INITIALIZATION_FAILED", error_type=type(error).__name__)
             leader_runner = None
