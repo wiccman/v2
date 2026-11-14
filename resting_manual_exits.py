@@ -155,8 +155,10 @@ class RestingManualExitWorker(ManualLimitExitWorker):
         # Only this configured transition may reprice unedited, verified exits.
         return super()._accepts_target_policy(saved) or (
             self.state.get("execution_mode") == "resting_limit"
-            and saved == {"mode": "price_increment", "increment": "0.05"}
-            and self.price_increment == D(".03"))
+            and isinstance(saved, dict) and saved.get("mode") == "price_increment"
+            and ((saved.get("increment") == "0.05" and self.price_increment == D(".03"))
+                 or (saved.get("increment") in {"0.03", "0.05", "0.07"}
+                     and self.price_increment == D(".06"))))
 
     def _validate_execution_mode(self):
         if self.price_increment is None:

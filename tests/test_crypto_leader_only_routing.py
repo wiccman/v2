@@ -47,3 +47,26 @@ def test_zone_buying_can_be_restored_without_code_changes(monkeypatch):
 def test_dormant_switch_is_fail_closed_for_unrecognized_value(monkeypatch):
     monkeypatch.setenv("ZONE_BUYING_ENABLED", "disabled")
     assert not router.zone_buying_enabled()
+
+
+def test_manual_tp_worker_runs_with_leader_and_excludes_bot_owned_markets(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("ZONE_BUYING_ENABLED", "false")
+    monkeypatch.setenv("MANUAL_EXITS_ENABLED", "true")
+    monkeypatch.setenv("LEADER_TRADING_ENABLED", "false")
+    worker = Mock()
+    start = Mock(return_value=worker)
+    monkeypatch.setattr(router, "manual_take_profit", start)
+    monkeypatch.setattr(router, "run_pass", Mock())
+    journal = SimpleNamespace(data={"windows": {
+        "zone2::KXETH15M-test": {"ticker": "KXETH15M-test", "buy": {"client_id": "owned"}},
+    }})
+    with router.installed_policy(provider=Mock()):
+        router.core.run_pass("client", journal, (), 5, 5, False, 720)
+        start.assert_not_called()
+        router.core.run_pass("client", journal, (), 5, 5, True, 720)
+        router.core.run_pass("client", journal, (), 5, 5, True, 722)
+    start.assert_called_once()
+    assert worker.run_once.call_count == 2
+    worker.run_once.assert_called_with(excluded_tickers={"KXETH15M-test"})
