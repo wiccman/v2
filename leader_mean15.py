@@ -1,4 +1,4 @@
-"""Crypto Leader NO on the lowest return after four completed minutes."""
+"""Crypto Leader NO on the second-closest return to the minute-four basket mean."""
 from __future__ import annotations
 
 import math
@@ -30,7 +30,8 @@ FEE_RESERVE = D(".03")
 MAX_CONTRACTS = 100
 REFRESH_SECONDS = 15
 TERMINAL = core.TERMINAL
-SIGNAL_SOURCE = "coinbase_minute_four_lowest_return"
+PREVIOUS_SIGNAL_SOURCE = "coinbase_minute_four_lowest_return"
+SIGNAL_SOURCE = "coinbase_minute_four_mean_rank"
 
 
 class MinuteFourPerformance:
@@ -86,7 +87,7 @@ def eligible_window(now, start, lower, upper):
             and lower <= now - start < upper)
 
 
-def lowest_return_choice(observations, start, now):
+def mean_rank_choices(observations, start, now):
     """Require five fresh same-window returns; do not promote incomplete feeds."""
     rows = ranked.ranked_observations(observations, SOURCE_SERIES, start, now)
     returns = {name: row.return_pct for name, series in COINS.items()
@@ -94,11 +95,11 @@ def lowest_return_choice(observations, start, now):
     if len(returns) != len(COINS):
         raise ranked.PerformanceUnavailable("incomplete_leader_mean")
     mean = sum(returns.values(), D(0)) / D(len(COINS))
-    choices = sorted(((returns[coin], coin)
+    choices = sorted(((abs(returns[coin] - mean), coin)
                       for coin in TRADE_COINS))
-    if len(choices) < 2 or abs(choices[0][0] - choices[1][0]) <= D("1e-10"):
-        raise ranked.PerformanceUnavailable("ambiguous_lowest_return")
-    return choices[0][1], mean, returns
+    if any(choices[i + 1][0] - choices[i][0] <= D("1e-10") for i in (0, 1)):
+        raise ranked.PerformanceUnavailable("ambiguous_mean_rank")
+    return choices[1][1], choices[0][1], mean, returns
 
 
 def leader_plan(markets, coin, start, now):
@@ -133,7 +134,7 @@ def budget(journal):
         return None
     last = max(
         (r["outcome"] for r in journal.data["windows"].values()
-         if r.get("entry_signal_source") == SIGNAL_SOURCE
+         if r.get("entry_signal_source") in {SIGNAL_SOURCE, PREVIOUS_SIGNAL_SOURCE}
          and r.get("outcome", {}).get("status") in {"win", "loss"}),
         key=lambda o: o["completed_at"],
         default=None,
@@ -347,20 +348,22 @@ class LeaderRunner:
         self.next_scan = float("-inf")
 
     def minute_four_signal(self, start):
-        saved = self.journal.data.setdefault("leader_minute_four_signals", {})
+        saved = self.journal.data.setdefault("leader_minute_four_mean_signals", {})
         signal = saved.get(str(start))
         if signal is not None:
             if (signal.get("source") != SIGNAL_SOURCE
                     or signal.get("window_start_ms") != start * 1000
                     or signal.get("sample_ms") != (start + SIGNAL_SECOND) * 1000
-                    or signal.get("coin") not in TRADE_COINS):
+                    or signal.get("coin") not in TRADE_COINS
+                    or signal.get("fallback_coin") not in TRADE_COINS
+                    or signal["coin"] == signal["fallback_coin"]):
                 raise ranked.PerformanceUnavailable("invalid_saved_minute_four_signal")
             return signal
         observations = self.provider.snapshot(SOURCE_SERIES, start)
         if any(row.observed_at != start + SIGNAL_SECOND for row in observations):
             raise ranked.PerformanceUnavailable("not_exact_minute_four_close")
-        coin, mean, returns = lowest_return_choice(observations, start, start + SIGNAL_SECOND)
-        signal = {"coin": coin, "mean_return_pct": str(mean),
+        coin, fallback_coin, mean, returns = mean_rank_choices(observations, start, start + SIGNAL_SECOND)
+        signal = {"coin": coin, "fallback_coin": fallback_coin, "mean_return_pct": str(mean),
                   "returns_pct": {k: str(v) for k, v in returns.items()},
                   "source": SIGNAL_SOURCE, "window_start_ms": start * 1000,
                   "sample_ms": (start + SIGNAL_SECOND) * 1000}
@@ -395,48 +398,36 @@ class LeaderRunner:
         self.next_scan = now + REFRESH_SECONDS
         try:
             signal = self.minute_four_signal(start)
-            coin = signal["coin"]
-            event("SIGNAL", selected_coin=coin, mean_return_pct=signal["mean_return_pct"],
-                  returns_pct=signal["returns_pct"], sample_ms=signal["sample_ms"],
-                  signal_source=SIGNAL_SOURCE)
             markets = client.markets(series_ticker=SERIES, status="open", limit=100)
-            plan = leader_plan(markets, coin, start, self.clock())
-            if plan is None:
-                # Public quotes and timestamps only; never log account credentials.
-                matching = [m for m in markets
-                            if isinstance(m.get("ticker"), str)
-                            and m["ticker"].startswith(SERIES + "-")
-                            and m["ticker"].rsplit("-", 1)[-1] == coin]
-                event("SKIP", reason="selected_coin_quote_not_eligible", coin=coin,
-                      market_rows=len(markets), matching_rows=len(matching),
-                      quotes=[{"ticker": m.get("ticker"), "status": m.get("status"),
-                               "no_ask": m.get("no_ask_dollars"),
-                               "close_time": m.get("close_time")}
-                              for m in matching[:3]])
-                return
-            # Refresh the quote before the final funding decision.
-            fresh = client.market(plan["ticker"])
-            if leader_plan([fresh], coin, start, self.clock()) is None:
-                event("SKIP", reason="fresh_quote_changed", coin=coin)
-                return
-            limit = (D(str(fresh["no_ask_dollars"])) * 100).to_integral_value(
-                rounding=ROUND_CEILING) / 100
-            quote = _price(fresh["no_ask_dollars"])
-            if quote < MIN_NO_ASK or limit > MAX_NO_LIMIT:
-                return
             allocation = budget(self.journal)
-            available_cash, shards = cash_snapshot(client.balance())
-            index = fresh.get("exchange_index")
-            if (type(index) is not int or index < 0 or shards is None
-                    or index not in shards):
-                event("SKIP", reason="exchange_funding_unavailable", coin=coin)
-                return
-            quantity = _quantity(allocation, limit, min(available_cash, shards[index]))
-            if quantity < 1:
-                event("SKIP", reason="insufficient_funded_cash", coin=coin)
-                return
-            if core.entry_market_occupied(client, plan["ticker"]):
-                event("SKIP", reason="existing_leader_inventory", coin=coin)
+            for coin in (signal["coin"], signal["fallback_coin"]):
+                plan = leader_plan(markets, coin, start, self.clock())
+                if plan is None:
+                    event("SKIP", reason="selected_coin_quote_not_eligible", coin=coin)
+                    continue
+                fresh = client.market(plan["ticker"])
+                if fresh.get("ticker") != plan["ticker"]:
+                    raise ValueError("fresh_quote_ticker_mismatch")
+                plan = leader_plan([fresh], coin, start, self.clock())
+                if plan is None:
+                    event("SKIP", reason="fresh_quote_changed", coin=coin)
+                    continue
+                limit = plan["limit"]
+                available_cash, shards = cash_snapshot(client.balance())
+                index = fresh.get("exchange_index")
+                if (type(index) is not int or index < 0 or shards is None
+                        or index not in shards):
+                    event("SKIP", reason="exchange_funding_unavailable", coin=coin)
+                    return
+                quantity = _quantity(allocation, limit, min(available_cash, shards[index]))
+                if quantity < 1:
+                    event("SKIP", reason="insufficient_funded_cash", coin=coin)
+                    continue
+                if core.entry_market_occupied(client, plan["ticker"]):
+                    event("SKIP", reason="existing_leader_inventory", coin=coin)
+                    return
+                break
+            else:
                 return
             if not eligible_window(self.clock(), start, ENTRY_SECOND, ENTRY_END_SECOND):
                 return
