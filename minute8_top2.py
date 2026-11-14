@@ -8,7 +8,7 @@ No trading on import, no transfers, no sleeps in the exit-monitoring loop.
 from __future__ import annotations
 
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -17,6 +17,8 @@ import performance_ranked_minute9 as ranked
 import cash_checked_minute9 as cash
 import late_basket_minute9 as late
 import leader_mean15 as leader
+from manual_exit_runner import ManualExitService, Settings, flag
+from resting_manual_exits import RestingExitOnlyClient
 import os
 from pathlib import Path
 
@@ -199,6 +201,41 @@ def zone_buying_enabled():
     return os.getenv("ZONE_BUYING_ENABLED", "true").strip().lower() == "true"
 
 
+def manual_take_profit(client, stack):
+    """Use the existing manual ownership journal and restrict the client to exits."""
+    import fcntl
+
+    settings = Settings.read({
+        **os.environ,
+        "MANUAL_EXIT_MODE": "resting_limit",
+        "MANUAL_EXIT_INCREMENT_CENTS": "6",
+        "MANUAL_STOP_LOSS_CENTS": "0",
+    }, live=True)
+    if not set(settings.series) <= set(core.DEFAULT_SERIES):
+        raise ValueError("Manual TP scope must contain only single-coin crypto series")
+    if os.getenv("RAILWAY_ENVIRONMENT_ID"):
+        mount = Path(os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "/missing-volume"))
+        if not os.path.ismount(mount) or not all(
+            path.resolve().is_relative_to(mount.resolve())
+            for path in (settings.entry_state, settings.automatic_exit_state, settings.manual_state)
+        ):
+            raise RuntimeError("Manual TP journals must reside on the persistent volume")
+    with ExitStack() as startup:
+        lock = startup.enter_context(settings.entry_state.with_suffix(".lock").open("a"))
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        session = startup.enter_context(core.requests.Session())
+        session.mount("https://", core.requests.adapters.HTTPAdapter(max_retries=0))
+        exits = RestingExitOnlyClient(client.key_id, timeout=client.timeout,
+                                    coordinator=client.coordinator, role="exit",
+                                    session=session, dry_run=False)
+        exits.private_key = client.private_key
+        service = ManualExitService(exits, settings, emit=core.event)
+        stack.enter_context(startup.pop_all())
+    core.event("MANUAL_EXIT_CONFIG", increment_cents=6, series=settings.series,
+               mode=settings.execution_mode, stop_loss_enabled=False, dry_run=False)
+    return service
+
+
 def run_pass(client, journal, series_list, base_budget, max_contracts, live, now,
              max_entries_per_window=1, *, provider, clock=None):
     """Run zone entries when enabled; always reconcile previously owned exits."""
@@ -226,6 +263,9 @@ def installed_policy(provider=None):
     provider = provider or ranked.CoinbasePerformance()
     core.ENTRY_START_SECONDS, core.ENTRY_END_SECONDS = START_SECONDS, END_SECONDS
     leader_runner = None
+    manual_runner = None
+    manual_start_after = 0
+    resources = ExitStack()
     if os.getenv("LEADER_TRADING_ENABLED", "false").lower() == "true":
         try:
             path = Path(os.getenv("LEADER_STATE_PATH", "/data/crypto_leader15_live.json"))
@@ -248,6 +288,7 @@ def installed_policy(provider=None):
             leader_runner = None
 
     def execute(*args, **kwargs):
+        nonlocal manual_runner, manual_start_after
         # Leader settlement reconciliation gets priority even when regular-
         # market processing has an unrelated exception. No shared journal,
         # automated pre-settlement exit, or single-coin risk-rule mutation.
@@ -256,13 +297,32 @@ def installed_policy(provider=None):
                 leader_runner.run(args[0], live=args[5])
             except Exception as error:
                 core.event("LEADER_PASS_PAUSED", error_type=type(error).__name__)
-        return run_pass(*args, **kwargs, provider=provider)
+        result = run_pass(*args, **kwargs, provider=provider)
+        if args[5] and not zone_buying_enabled():
+            try:
+                if not flag(os.environ, "MANUAL_EXITS_ENABLED"):
+                    return result
+                if manual_runner is None and core.time.monotonic() >= manual_start_after:
+                    manual_start_after = core.time.monotonic() + 30
+                    manual_runner = manual_take_profit(args[0], resources)
+                if manual_runner is not None:
+                    # Both M9 zones own their fills through a separate journal.
+                    # Leave any market with an M9 intent to that runner.
+                    excluded = {
+                        record["ticker"] for record in args[1].data["windows"].values()
+                        if record.get("buy")
+                    }
+                    manual_runner.run_once(excluded_tickers=excluded)
+            except Exception as error:
+                core.event("MANUAL_TP_PASS_PAUSED", **ranked.error_fields(error))
+        return result
 
     core.run_pass = execute
     try:
         with cash.installed_guard():
             yield
     finally:
+        resources.close()
         core.ENTRY_START_SECONDS, core.ENTRY_END_SECONDS, core.run_pass = previous
 
 
