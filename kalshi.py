@@ -24,6 +24,13 @@ class KalshiAPIError(RuntimeError):
         self.code = code
 
 
+class EntryNotDispatched(ValueError):
+    """A local entry validation failed before the order transport was called."""
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
+
+
 def terminal_ioc_receipt(intent):
     """Validate a saved V2 IOC placement result without a delayed GET.
 
@@ -369,12 +376,26 @@ class KalshiClient:
         return self.request("POST", "/portfolio/events/orders", body=body, auth=True)
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time, *, submit_before=None, client_order_id=None, ioc=False):
-        # User restriction: SOL is excluded only from Crypto Leader entries.
-        # Keep single-coin SOL orders and all position-closing methods available.
-        if ticker.startswith("KXCRYPTOLEAD15M-") and ticker.rsplit("-", 1)[-1] == "SOL":
-            raise ValueError("SOL entries are blocked in Crypto Leader")
+        # All five Leader coins are eligible. Validate locally and distinguish
+        # a proven non-dispatch from an exception after a POST may have arrived.
+        leader_entry = ticker.startswith("KXCRYPTOLEAD15M-")
+        if leader_entry:
+            try:
+                count, price = Decimal(quantity), Decimal(outcome_price)
+                deadline = min(expiration_time, submit_before if submit_before is not None else expiration_time)
+                valid = (prediction in {"YES", "NO"}
+                         and count.is_finite() and count > 0
+                         and count == count.to_integral_value()
+                         and price.is_finite() and 0 < price < 1
+                         and Decimal(str(deadline)).is_finite())
+            except (InvalidOperation, ValueError, TypeError):
+                valid = False
+            if not valid:
+                raise EntryNotDispatched("invalid_entry_arguments")
         # A slow quote request or preceding order must not submit an expired entry.
         if time.time() >= min(expiration_time, submit_before if submit_before is not None else expiration_time):
+            if leader_entry:
+                raise EntryNotDispatched("entry_deadline_passed")
             return {}
         outcome_price = Decimal(outcome_price)
         if prediction == "YES":
