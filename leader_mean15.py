@@ -1,14 +1,4 @@
-"""Crypto Leader 15-minute NO-on-closest-to-mean strategy.
-
-Separate owned-order journal. It does not amend the individual-coin strategy,
-reprice another bot's exits, or trade from stale/incomplete coin data.
-This freezes the five-coin mean choice from the first CLOSED one-minute
-Coinbase candle, matching the Pine M1 calculation (not live ticker prices).
-A live opt-in is required independently.
-Filled Leader contracts are held through final market settlement, not sold
-at minute 14, and only after verified settlement does the independent budget
-cycle advance. Other single-coin TP/SL strategies are unaffected.
-"""
+"""Crypto Leader NO on the lowest return after four completed minutes."""
 from __future__ import annotations
 
 import math
@@ -26,24 +16,24 @@ SERIES = "KXCRYPTOLEAD15M"
 COINS = {"BTC": "KXBTC15M", "ETH": "KXETH15M",
          "SOL": "KXSOL15M", "XRP": "KXXRP15M", "HYPE": "KXHYPE15M"}
 SOURCE_SERIES = tuple(COINS.values())
-TRADE_COINS = ("BTC", "ETH", "XRP", "HYPE")  # SOL only excluded from Leader entries.
-ENTRY_SECOND = 180
-ENTRY_END_SECOND = 840  # Still stop buying at minute 14.
+TRADE_COINS = tuple(COINS)
+SIGNAL_SECOND = 240
+ENTRY_SECOND = SIGNAL_SECOND
+ENTRY_END_SECOND = 300  # Entry is available only during the minute after the signal.
 WINDOW_SECONDS = 900
 HOLD_UNTIL_SETTLEMENT = True  # Never initiate an early Leader sell / TP / SL.
 MIN_NO_ASK = D(".65")
 MAX_NO_LIMIT = D(".99")
-FULL_BUDGET = D("10")
-HALF_BUDGET = D("5")
+WINDOW_BUDGET = D("5")
 FEE_RESERVE = D(".03")
 MAX_CONTRACTS = 100
 REFRESH_SECONDS = 15
 TERMINAL = core.TERMINAL
-SIGNAL_SOURCE = "coinbase_closed_minute_one"
+SIGNAL_SOURCE = "coinbase_minute_four_lowest_return"
 
 
-class OpeningMinutePerformance:
-    """Read only the exact first closed candle; never substitute later prices."""
+class MinuteFourPerformance:
+    """Measure the window open to the exact fourth candle close."""
     def __init__(self, *, clock=time.time, session_factory=ranked.requests.Session):
         self.clock, self.session_factory = clock, session_factory
 
@@ -52,27 +42,31 @@ class OpeningMinutePerformance:
         with self.session_factory() as session:
             response = session.get(
                 f"{ranked.BASE}/products/{ranked.PRODUCTS[series]}/candles",
-                params={"granularity": 60, "start": iso(start), "end": iso(start + 60)},
+                params={"granularity": 60, "start": iso(start), "end": iso(start + SIGNAL_SECOND)},
                 timeout=(1, 2))
             response.raise_for_status()
             candles = response.json()
         if not isinstance(candles, list):
-            raise ranked.PerformanceUnavailable("invalid_minute_one_candles")
-        rows = [r for r in candles if isinstance(r, list) and len(r) >= 6
-                and r[0] == start]
-        if len(rows) != 1:
-            raise ranked.PerformanceUnavailable("minute_one_missing_or_ambiguous")
-        return ranked.Observation(series, start, D(str(rows[0][3])),
-                                  D(str(rows[0][4])), start + 60)
+            raise ranked.PerformanceUnavailable("invalid_minute_four_candles")
+        selected = []
+        for stamp in (start, start + SIGNAL_SECOND - 60):
+            rows = [r for r in candles if isinstance(r, list) and len(r) >= 6
+                    and r[0] == stamp]
+            if len(rows) != 1:
+                raise ranked.PerformanceUnavailable("minute_four_missing_or_ambiguous")
+            selected.append(rows[0])
+        opening, closing = selected
+        return ranked.Observation(series, start, D(str(opening[3])),
+                                  D(str(closing[4])), start + SIGNAL_SECOND)
 
     def snapshot(self, names, start):
-        if not eligible_window(self.clock(), start, 60, ENTRY_END_SECOND):
-            raise ranked.PerformanceUnavailable("minute_one_not_closed_or_window_expired")
+        if not eligible_window(self.clock(), start, SIGNAL_SECOND, ENTRY_END_SECOND):
+            raise ranked.PerformanceUnavailable("minute_four_not_closed_or_window_expired")
         with ranked.ThreadPoolExecutor(max_workers=len(names)) as pool:
             pending = [pool.submit(self._one, name, start) for name in names]
         rows = [future.result() for future in pending]
-        if not eligible_window(self.clock(), start, 60, ENTRY_END_SECOND):
-            raise ranked.PerformanceUnavailable("minute_one_window_expired")
+        if not eligible_window(self.clock(), start, SIGNAL_SECOND, ENTRY_END_SECOND):
+            raise ranked.PerformanceUnavailable("minute_four_window_expired")
         return rows
 
 
@@ -85,7 +79,7 @@ def eligible_window(now, start, lower, upper):
             and lower <= now - start < upper)
 
 
-def coin_mean_choice(observations, start, now):
+def lowest_return_choice(observations, start, now):
     """Require five fresh same-window returns; do not promote incomplete feeds."""
     rows = ranked.ranked_observations(observations, SOURCE_SERIES, start, now)
     returns = {name: row.return_pct for name, series in COINS.items()
@@ -93,10 +87,10 @@ def coin_mean_choice(observations, start, now):
     if len(returns) != len(COINS):
         raise ranked.PerformanceUnavailable("incomplete_leader_mean")
     mean = sum(returns.values(), D(0)) / D(len(COINS))
-    choices = sorted(((abs(returns[coin] - mean), coin)
+    choices = sorted(((returns[coin], coin)
                       for coin in TRADE_COINS))
     if len(choices) < 2 or abs(choices[0][0] - choices[1][0]) <= D("1e-10"):
-        raise ranked.PerformanceUnavailable("ambiguous_closest_coin")
+        raise ranked.PerformanceUnavailable("ambiguous_lowest_return")
     return choices[0][1], mean, returns
 
 
@@ -126,16 +120,11 @@ def leader_plan(markets, coin, start, now):
 
 
 def budget(journal):
-    """First $10, then $5 until the next verified loss; no-fill is neutral."""
-    unfinished = [r for r in journal.data["windows"].values()
-                  if r.get("buy") and not r.get("outcome")]
-    if unfinished:
+    """Cap each window at $5 and block new entries while ownership is unresolved."""
+    if any(r.get("buy") and not r.get("outcome")
+           for r in journal.data["windows"].values()):
         return None
-    finalized = sorted(((r["outcome"]["completed_at"], r.get("ticker", ""),
-                         r["outcome"]["status"])
-                        for r in journal.data["windows"].values()
-                        if r.get("outcome", {}).get("status") in {"win", "loss", "flat"}))
-    return FULL_BUDGET if not finalized or finalized[-1][2] == "loss" else HALF_BUDGET
+    return WINDOW_BUDGET
 
 
 def _price(value):
@@ -339,28 +328,28 @@ class LeaderRunner:
     def __init__(self, path, *, provider=None, clock=None):
         self.path = Path(path)
         self.clock = clock or time.time
-        self.provider = provider or OpeningMinutePerformance(clock=self.clock)
+        self.provider = provider or MinuteFourPerformance(clock=self.clock)
         self.journal = core.Journal(self.path)
         self.next_scan = float("-inf")
 
-    def opening_signal(self, start):
-        saved = self.journal.data.setdefault("leader_opening_signals", {})
+    def minute_four_signal(self, start):
+        saved = self.journal.data.setdefault("leader_minute_four_signals", {})
         signal = saved.get(str(start))
         if signal is not None:
             if (signal.get("source") != SIGNAL_SOURCE
                     or signal.get("window_start_ms") != start * 1000
-                    or signal.get("sample_ms") != (start + 60) * 1000
+                    or signal.get("sample_ms") != (start + SIGNAL_SECOND) * 1000
                     or signal.get("coin") not in TRADE_COINS):
-                raise ranked.PerformanceUnavailable("invalid_saved_minute_one_signal")
+                raise ranked.PerformanceUnavailable("invalid_saved_minute_four_signal")
             return signal
         observations = self.provider.snapshot(SOURCE_SERIES, start)
-        if any(row.observed_at != start + 60 for row in observations):
-            raise ranked.PerformanceUnavailable("not_exact_minute_one_close")
-        coin, mean, returns = coin_mean_choice(observations, start, start + 60)
+        if any(row.observed_at != start + SIGNAL_SECOND for row in observations):
+            raise ranked.PerformanceUnavailable("not_exact_minute_four_close")
+        coin, mean, returns = lowest_return_choice(observations, start, start + SIGNAL_SECOND)
         signal = {"coin": coin, "mean_return_pct": str(mean),
                   "returns_pct": {k: str(v) for k, v in returns.items()},
                   "source": SIGNAL_SOURCE, "window_start_ms": start * 1000,
-                  "sample_ms": (start + 60) * 1000}
+                  "sample_ms": (start + SIGNAL_SECOND) * 1000}
         saved[str(start)] = signal
         self.journal.save()  # Persist BEFORE quote/funding checks, including skips.
         event("SIGNAL_LOCKED", **signal)
@@ -391,7 +380,7 @@ class LeaderRunner:
             return
         self.next_scan = now + REFRESH_SECONDS
         try:
-            signal = self.opening_signal(start)
+            signal = self.minute_four_signal(start)
             coin = signal["coin"]
             event("SIGNAL", selected_coin=coin, mean_return_pct=signal["mean_return_pct"],
                   returns_pct=signal["returns_pct"], sample_ms=signal["sample_ms"],
