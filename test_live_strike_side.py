@@ -75,7 +75,7 @@ def test_opposite_inventory_waits_for_natural_exit_before_scalping(monkeypatch):
 
 
 @pytest.mark.parametrize('spot,side', [('100010', 'YES'), ('99990', 'NO')])
-def test_full_cycle_uses_live_strike_after_eight_minutes(monkeypatch, spot, side):
+def test_retained_gateway_uses_live_strike_after_eight_minutes(monkeypatch, spot, side):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 480)
     fake.held = D('0')
     monkeypatch.setattr(bot, 'END', 720)
@@ -86,7 +86,7 @@ def test_full_cycle_uses_live_strike_after_eight_minutes(monkeypatch, spot, side
     market.update(yes_ask_dollars='.70' if side == 'YES' else '.30',
                   no_ask_dollars='.70' if side == 'NO' else '.30')
     monkeypatch.setattr(fake, 'market', lambda ticker: market)
-    bot.cycle(state)
+    bot.funded_entry(record, state, 'TEST', side, D('.70'), closed, 'regular')
     assert fake.entries
     assert {intent['side'] for intent in record['entry_intents']} == {side}
     assert {D(intent['exit_target']) for intent in record['entry_intents']} == {D('.76')}
@@ -115,3 +115,6 @@ def historical_high_price_policy(monkeypatch):
     """
     monkeypatch.setattr(bot, 'BLOCKED_BUY_START', 900)
     monkeypatch.setattr(bot, 'BLOCKED_BUY_END', 900)
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

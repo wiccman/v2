@@ -1,8 +1,10 @@
 import base64
+import json
 import os
 import time
 import uuid
 from decimal import Decimal, InvalidOperation
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,6 +22,13 @@ class KalshiAPIError(RuntimeError):
         self.status_code = status_code
         self.retry_after = retry_after
         self.code = code
+
+
+class EntryNotDispatched(ValueError):
+    """A local entry validation failed before the order transport was called."""
+    def __init__(self, reason):
+        self.reason = reason
+        super().__init__(reason)
 
 
 def terminal_ioc_receipt(intent):
@@ -81,6 +90,8 @@ class KalshiClient:
         self.quote_ttl = quote_ttl
         self.clock = clock or time.monotonic
         self._market_cache = {}
+        self._archived_tickers = set()
+        self._archive_cutoff_cache = None
         pem = b""
         if private_key_b64:
             pem = base64.b64decode(private_key_b64)
@@ -144,6 +155,15 @@ class KalshiClient:
                     code = candidate
             except (ValueError, TypeError, AttributeError):
                 pass
+            # Safe transport diagnostics distinguish submission from reconciliation failures.
+            safe_code = code if isinstance(code, str) and len(code) <= 80 and all(
+                ch.isalnum() or ch in "_-" for ch in code) else None
+            route = path
+            if "/orders/" in route:
+                route = route.split("/orders/")[0] + "/orders/{order_id}"
+            print(json.dumps({"event": "KALSHI_HTTP_ERROR", "method": method.upper(),
+                              "route": route, "http_status": response.status_code,
+                              "api_code": safe_code}), flush=True)
             raise KalshiAPIError(
                 response.status_code, f"Kalshi API {response.status_code} {method.upper()} {path}: {details}",
                 retry_after=retry_after, code=code,
@@ -160,7 +180,14 @@ class KalshiClient:
         if cached and 0 <= now - cached[0] < self.quote_ttl:
             return dict(cached[1])
         self._market_cache.pop(ticker, None)
-        market = self.request("GET", "/markets/" + ticker)["market"]
+        try:
+            market = self.request("GET", "/markets/" + ticker)["market"]
+        except KalshiAPIError as error:
+            if error.status_code != 404:
+                raise
+            # Archived settled markets move to the historical endpoint.
+            # Never mistake a missing market for a final result.
+            market = self.request("GET", "/historical/markets/" + ticker)["market"]
         # Age from request START: slow responses cannot extend quote freshness.
         self._market_cache[ticker] = (now, dict(market))
         return market
@@ -170,10 +197,12 @@ class KalshiClient:
 
     def order(self, order_id, ticker=None):
         """Resolve an order with market context; a 404 is never terminal proof."""
-        params = {"market_ticker": ticker, "exchange_index": -1} if ticker else None
+        # GetOrder is an aggregate read identified by the order_id path only.
+        # Market/shard routing arguments are for V2 mutations (e.g. cancel),
+        # not this read endpoint. A 404 still requires exact-ID history lookup.
         try:
             order = self.request("GET", "/portfolio/orders/" + order_id,
-                                 params=params, auth=True)["order"]
+                                 auth=True)["order"]
         except KalshiAPIError as error:
             if error.status_code != 404 or not ticker:
                 raise
@@ -210,6 +239,67 @@ class KalshiClient:
             cursors.add(cursor)
             params["cursor"] = cursor
 
+    def _orders_archive_cutoff(self):
+        """Cached archive handoff boundary; a missing cutoff is never proof."""
+        now = self.clock()
+        saved = self._archive_cutoff_cache
+        if saved and 0 <= now - saved[0] < 300:
+            return saved[1]
+        payload = self.request("GET", "/historical/cutoff")
+        try:
+            stamp = datetime.fromisoformat(payload["orders_updated_ts"].replace("Z", "+00:00"))
+            if stamp.tzinfo is None:
+                raise ValueError("Naive historical cutoff")
+            cutoff = stamp.timestamp()
+        except (KeyError, TypeError, AttributeError, ValueError) as error:
+            raise RuntimeError("Invalid Kalshi historical cutoff") from error
+        self._archive_cutoff_cache = (now, cutoff)
+        return cutoff
+
+    def _historical_rows(self, kind, ticker):
+        """Read only this market and primary subaccount, across all pages."""
+        if kind not in {"orders", "fills"} or not ticker:
+            raise ValueError("Invalid historical query")
+        params = {"ticker": ticker, "limit": 1000, "subaccount": 0}
+        found, cursors = [], set()
+        while True:
+            result = self.request("GET", "/historical/" + kind,
+                                  params=params, auth=True)
+            found.extend(result[kind])
+            cursor = result.get("cursor")
+            if not cursor:
+                return found
+            if cursor in cursors:
+                raise RuntimeError("Historical pagination cursor repeated")
+            cursors.add(cursor)
+            params["cursor"] = cursor
+
+    def archived_order(self, ticker, created_at, *, order_id=None, client_id=None):
+        """Recover only an exact owned order past Kalshi's archive cutoff.
+
+        This is a read-only fallback. No match NEVER authorizes an order
+        retry, a cancellation claim or an assumption of zero fills.
+        """
+        if ((order_id is None) == (client_id is None)):
+            raise ValueError("Exactly one order identity is required")
+        if (isinstance(created_at, bool) or not isinstance(created_at, (int, float))
+                or not 0 <= created_at < float("inf")):
+            return None
+        if created_at > self._orders_archive_cutoff():
+            return None
+        key, expected = ("order_id", order_id) if order_id is not None else (
+            "client_order_id", client_id)
+        matches = [row for row in self._historical_rows("orders", ticker)
+                   if row.get("ticker") == ticker and row.get(key) == expected]
+        if len(matches) > 1:
+            raise RuntimeError("Multiple archived orders matched one identity")
+        if not matches:
+            return None
+        if matches[0].get("subaccount_number", 0) not in (0, None):
+            raise RuntimeError("Historical order subaccount mismatch")
+        self._archived_tickers.add(ticker)
+        return matches[0]
+
     def btc_reference_price(self):
         response = self.request("GET", "/cfbenchmarks/values", params={"id": "BRTI"}, auth=True)
         return _latest_index_value(response)
@@ -239,7 +329,7 @@ class KalshiClient:
         return self.request("GET", "/portfolio/fills", params=params, auth=True).get("fills", [])
 
     def all_fills(self, ticker):
-        """Complete primary-account history for paired inventory reconciliation."""
+        """Read owned fills without losing trades moved to historical storage."""
         params = {"ticker": ticker, "limit": 1000, "subaccount": 0}
         found, cursors = [], set()
         while True:
@@ -247,11 +337,28 @@ class KalshiClient:
             found.extend(result["fills"])
             cursor = result.get("cursor")
             if not cursor:
-                return found
+                break
             if cursor in cursors:
                 raise RuntimeError("Fill pagination cursor repeated")
             cursors.add(cursor)
             params["cursor"] = cursor
+        if ticker in self._archived_tickers:
+            # Historical fills are needed to reconcile an archived order.
+            # Deduplicate overlap during Kalshi's archive handoff by fill_id.
+            indexed = {row.get("fill_id"): row for row in found if row.get("fill_id")}
+            for row in self._historical_rows("fills", ticker):
+                if row.get("ticker", row.get("market_ticker")) != ticker:
+                    raise RuntimeError("Historical fill identity mismatch")
+                fill_id = row.get("fill_id")
+                if not fill_id:
+                    raise RuntimeError("Historical fill missing identity")
+                if fill_id in indexed:
+                    if indexed[fill_id].get("order_id") != row.get("order_id"):
+                        raise RuntimeError("Historical fill identity mismatch")
+                    continue
+                found.append(row)
+                indexed[fill_id] = row
+        return found
 
     def orders(self, ticker=None, status="resting"):
         return self.all_orders(ticker, status)
@@ -269,8 +376,26 @@ class KalshiClient:
         return self.request("POST", "/portfolio/events/orders", body=body, auth=True)
 
     def place_entry(self, ticker, prediction, quantity, outcome_price, expiration_time, *, submit_before=None, client_order_id=None, ioc=False):
+        # All five Leader coins are eligible. Validate locally and distinguish
+        # a proven non-dispatch from an exception after a POST may have arrived.
+        leader_entry = ticker.startswith("KXCRYPTOLEAD15M-")
+        if leader_entry:
+            try:
+                count, price = Decimal(quantity), Decimal(outcome_price)
+                deadline = min(expiration_time, submit_before if submit_before is not None else expiration_time)
+                valid = (prediction in {"YES", "NO"}
+                         and count.is_finite() and count > 0
+                         and count == count.to_integral_value()
+                         and price.is_finite() and 0 < price < 1
+                         and Decimal(str(deadline)).is_finite())
+            except (InvalidOperation, ValueError, TypeError):
+                valid = False
+            if not valid:
+                raise EntryNotDispatched("invalid_entry_arguments")
         # A slow quote request or preceding order must not submit an expired entry.
         if time.time() >= min(expiration_time, submit_before if submit_before is not None else expiration_time):
+            if leader_entry:
+                raise EntryNotDispatched("entry_deadline_passed")
             return {}
         outcome_price = Decimal(outcome_price)
         if prediction == "YES":
@@ -302,6 +427,27 @@ class KalshiClient:
                 reduce_only=True, ioc=True, client_order_id=client_order_id,
             )
         return {}
+
+    def place_resting_take_profit(self, ticker, signed_quantity, outcome_price,
+                                  expiration_time=None, *, client_order_id=None):
+        """GTC exit; caller verifies owned inventory and cancels before a stop."""
+        quantity, price = Decimal(signed_quantity), Decimal(outcome_price)
+        if not quantity or not Decimal(0) < price < Decimal(1):
+            raise ValueError("Invalid resting exit")
+        return self._order(ticker, "ask" if quantity > 0 else "bid", abs(quantity),
+                           price if quantity > 0 else Decimal(1) - price,
+                           expiration_time=expiration_time, client_order_id=client_order_id)
+
+    def place_resting_stop(self, ticker, signed_quantity, outcome_price,
+                           expiration_time=None, *, client_order_id=None):
+        """Reduce-only GTC limit; software triggers the stop BEFORE this POST."""
+        quantity, price = Decimal(signed_quantity), Decimal(outcome_price)
+        if not quantity or not Decimal(0) < price < Decimal(1):
+            raise ValueError("Invalid resting stop")
+        return self._order(ticker, "ask" if quantity > 0 else "bid", abs(quantity),
+                           price if quantity > 0 else Decimal(1) - price,
+                           reduce_only=True, expiration_time=expiration_time,
+                           client_order_id=client_order_id)
 
     def cancel(self, order_id, ticker):
         return self.request("DELETE", "/portfolio/events/orders/" + order_id,

@@ -151,10 +151,11 @@ def test_logs_visible_even_if_csv_write_fails(monkeypatch, tmp_path, capsys):
     assert row['event'] == 'LOOP_ERROR' and row['ticker'] == 'T'
 
 
-def test_signal_entries_have_priority_and_dual_batch_shares_market_cap(monkeypatch):
+def test_pending_regular_entry_blocks_dual_batch_within_shared_market_cap(monkeypatch):
     fake, record, state, clock, closed = cycle_setup(monkeypatch, 120)
     monkeypatch.setattr(bot, 'BUDGET', D('2'))
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, 'TEST', 'YES', closed, 'regular'))
+    bot.place_dual_limit_buys(record, 'TEST', closed, state=state)
     intents = record['entry_intents']
     assert [i['kind'] for i in intents[:1]] == ['regular']
     dual = [i for i in intents if i['kind'] == 'dual']
@@ -171,7 +172,8 @@ def test_slow_quote_is_not_backdated_to_scheduled_snapshot(monkeypatch):
         clock[0] = 1000000140
         return original(ticker)
     monkeypatch.setattr(fake, 'market', slow_market)
-    bot.cycle(state)
+    current = fake.market('TEST')
+    bot.update_prediction(record, 'TEST', current, clock[0] - (closed.timestamp() - 900))
     assert record['predictions'][0]['status'] == 'missed'
     assert all(i['side'] == 'YES' for i in record['entry_intents'])
 
@@ -201,14 +203,14 @@ def test_opening_bias_posts_one_side_at_52_and_cancels_at_two_minutes(monkeypatc
     monkeypatch.setattr(bot, "SPOT_ENTRY_WINDOW", 0)
     monkeypatch.setattr(bot, "START", 120)
     monkeypatch.setattr(bot, "OPENING_BIAS_ENABLED", True)
-    bot.cycle(state)
+    bot.funded_entry(record, state, "TEST", "YES", D(".52"), closed, "opening_bias")
     assert len(fake.entries) == 1
     side, quantity, price, options = fake.entries[0]
     assert side == "bid" and price == D("0.52")
     assert options["expiration_time"] == 1000000120
     intent = record["entry_intents"][0]
     assert intent["kind"] == "opening_bias" and intent["exit_target"] == "0.6"
-    order_id = record["orders"][0]
+    order_id = intent["order_id"]
     bot.reconcile_entries(state, now_timestamp=1000000120)
     assert fake.cancelled == [order_id]
     assert intent["entry_closed"] is True
@@ -220,7 +222,10 @@ def test_new_entry_does_not_fetch_previous_bias(monkeypatch):
     def unavailable(*args):
         raise AssertionError('Previous bias must not be required')
     monkeypatch.setattr(bot, 'previous_market_bias', unavailable)
-    bot.cycle(state)
+    list(bot.paired_entries(record, state, 'TEST', 'YES', closed, 'regular'))
     assert record['signal'] is None
     assert fake.entries
     assert all(D(i['price']) in bot.ENTRY_EXIT_PAIRS for i in record['entry_intents'])
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

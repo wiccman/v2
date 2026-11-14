@@ -177,7 +177,10 @@ def test_refresh_budget_is_shared_across_submissions_in_one_market_pass(tmp_path
     monkeypatch.setattr(service.worker, "observe", changing)
     assert not service.run_once()
     assert calls == [WTI, WTI, WTI] and len(refresh_events(events)) == 1
-    assert len(exchange.sent) == 1 and exchange.cancelled == exit_ids(exchange)
+    assert len(exchange.sent) == 2 and exchange.cancelled == exit_ids(exchange)
+    assert [order["count"] for order in exchange.sent] == ["4", "6"]
+    # Both verified fills are submitted in one bounded batch; the next
+    # inconsistent observation exhausts the single shared refresh allowance.
 
 
 def test_each_market_gets_its_own_single_refresh(tmp_path, monkeypatch):

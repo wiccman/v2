@@ -54,21 +54,41 @@ def run(c,j,now,live=True):
     return safe.run_cash_checked_pass(c,j,c.series,D(10),100,live,now[0])
 
 
-def test_total_sixteen_but_market_zero_defers_funding_to_venue(setup):
+@pytest.mark.parametrize('total,market_cash', [('16.00','0.00'), ('44.6587','0.5908')])
+def test_aggregate_cash_cannot_override_market_shard_shortfall(setup,total,market_cash):
     j,now,events=setup
-    c=CashExchange(payload={'balance':1600,'balance_dollars':'16.00',
-                           'balance_breakdown':[{'exchange_index':0,'balance':'16.00'},
-                                                {'exchange_index':2,'balance':'0.00'}]})
+    c=CashExchange(payload={'balance_dollars':total,
+                           'balance_breakdown':[{'exchange_index':2,'balance':market_cash}]})
     run(c,j,now)
-    assert len(c.posted)==1 and c.balance_calls==1
-    assert core.window_entry_count(j,START*1000)==1
+    assert c.posted==[] and c.balance_calls==1
     r=next(iter(j.data['windows'].values()))
-    assert 'entry_no_order_proof' not in r
+    assert r['outcome']['reason']=='insufficient_market_cash'
+    assert safe.release_proven_no_order(r)
+    check=next(d for n,d in events if n=='M9_CASH_CHECK')
+    assert check['total_cash_dollars']==total and check['market_cash_dollars']==market_cash
+    assert check['cash_check_scope']=='market_exchange_cash'
+    funding=next(d for n,d in events if n=='M9_EXCHANGE_FUNDING_REQUIRED')
+    assert funding['available_dollars']==market_cash and funding['transfers_enabled'] is False
+    assert not any(n=='M9_ENTRY_CASH_RESIZED' for n,d in events)
+
+
+def test_total_cash_below_one_contract_never_posts(setup):
+    j,now,events=setup
+    c=CashExchange(payload={'balance_dollars':'0.59',
+                           'balance_breakdown':[{'exchange_index':2,'balance':'0.59'}]})
+    run(c,j,now)
+    assert not c.posted and c.balance_calls==1
+    assert core.window_entry_count(j,START*1000)==0
+    r=next(iter(j.data['windows'].values()))
+    assert r['entry_no_order_proof']['kind']=='not_dispatched'
     assert core.Journal(j.path).data==j.data
     assert j.data['streak']==core.starting_streak()
     check=next(d for n,d in events if n=='M9_CASH_CHECK')
-    assert check['total_cash_dollars']=='16.00' and check['market_cash_dollars']=='0.00'
-    assert check['cash_check_scope']=='aggregate_account_cash'
+    assert check['total_cash_dollars']=='0.59' and check['market_cash_dollars']=='0.59'
+    assert check['cash_check_scope']=='market_exchange_cash'
+    skipped=next(d for n,d in events if n=='M9_ENTRY_NOT_SENT')
+    assert skipped['reason']=='insufficient_total_cash'
+    assert skipped['minimum_one_contract_with_fee_reserve_dollars']=='0.78'
 
 
 def test_funded_shard_preserves_budget_quantity_side_and_price(setup):
@@ -77,19 +97,19 @@ def test_funded_shard_preserves_budget_quantity_side_and_price(setup):
     run(c,j,now)
     assert len(c.posted)==1
     ticker,side,qty,limit=c.posted[0]
-    assert side=='YES' and qty==12 and limit==D('.75')
-    assert qty*(limit+core.FEE_RESERVE)<=D(10)
-    assert j.data['windows'][ticker]['allocated_dollars']=='10'
+    assert side=='YES' and qty==4 and limit==D('.75')
+    assert qty*(limit+core.FEE_RESERVE)<=D(10)/3
+    assert D(j.data['windows'][ticker]['allocated_dollars'])==D(10)/3
     assert core.window_entry_count(j,START*1000)==1
 
 
 def test_explicit_insufficient_rejection_is_terminal_without_immediate_backup(setup):
     j,now,events=setup
     c=CashExchange({'KXBTC15M':'api_error'})
-    for _ in range(3):j.data['streak']=core.next_streak(j.data['streak'],'win')
+    j.data['streak']=core.next_streak(j.data['streak'],'loss')
     before=copy.deepcopy(j.data['streak'])
     run(c,j,now)
-    assert len(c.posted)==1 and c.posted[0][2]==4
+    assert len(c.posted)==1 and c.posted[0][2]==12
     r=j.data['windows'][c.posted[0][0]]
     assert r['entry_no_order_proof']['kind']=='exchange_rejected'
     assert r['outcome']['reason']=='insufficient_balance'
@@ -161,9 +181,9 @@ def test_low_shard_does_not_increase_budget_or_quantity(setup):
     j,now,_=setup
     c=CashExchange(payload={'balance':1600,'balance_breakdown':[{'exchange_index':2,'balance':'8.00'}]})
     run(c,j,now)
-    assert len(c.posted)==1 and c.posted[0][2]==12
-    assert next(iter(j.data['windows'].values()))['quantity']=='12'
-    assert core.STOP_BID==D('.45') and core.PROFIT==D('.05')
+    assert len(c.posted)==1 and c.posted[0][2]==4
+    assert next(iter(j.data['windows'].values()))['quantity']=='4'
+    assert core.STOP_DROP==D('.21') and core.PROFIT==D('.10')
 
 
 def test_rejection_proof_cannot_release_existing_or_mismatched_order(setup):
@@ -215,3 +235,37 @@ def test_adapter_does_not_erase_performance_fallback_or_leak_overrides():
     with safe.installed_guard():
         assert ranked._CORE_RUN_PASS is safe.run_cash_checked_pass
     assert ranked._CORE_RUN_PASS is old_pass and core.entry_slot_released is old_slot
+
+
+
+def test_market_shard_cap_is_durable_before_dispatch(setup):
+    j,now,events=setup
+    c=CashExchange(payload={'balance_dollars':'5.9321','balance_breakdown':[{'exchange_index':2,'balance':'5.9321'}]})
+    ticker=c.series[0]+'-case'
+    r={'ticker':ticker,'side':'YES','quantity':'7','window_start_ms':START*1000,
+       'buy':{'client_id':'exact','limit':'0.85'},'sells':[]}
+    j.data['windows'][ticker]=r
+    c.market=lambda t:{'ticker':t,'exchange_index':2}
+    captured=[]
+    def post(*args,**kwargs):
+        assert core.Journal(j.path).data['windows'][ticker]['quantity']=='6'
+        captured.append(args)
+        return {'order':{'order_id':'confirmed'}}
+    c.place_entry=post
+    safe.CashCheckedClient(c,j,safe.CashState()).place_entry(ticker,'YES',7,D('.85'),START+900,client_order_id='exact',ioc=True)
+    assert captured[0][2]==6
+    assert r['cash_preflight']['required_with_fee_reserve_dollars']=='5.28'
+
+
+def test_shard_cash_reduces_existing_budget_quantity_never_increases_it(setup):
+    j,now,events=setup
+    c=CashExchange(payload={'balance_dollars':'44.6587',
+                           'balance_breakdown':[{'exchange_index':0,'balance':'43.5787'},
+                                                {'exchange_index':2,'balance':'1.0800'}]})
+    run(c,j,now)
+    assert len(c.posted)==1
+    assert c.posted[0][2]==1
+    r=next(iter(j.data['windows'].values()))
+    assert r['quantity']=='1'
+    assert D(r['cash_preflight']['market_cash_dollars'])==D('1.08')
+    assert any(name=='M9_ENTRY_CASH_RESIZED' for name,_ in events)

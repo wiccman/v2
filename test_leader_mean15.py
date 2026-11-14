@@ -1,0 +1,412 @@
+"""Offline Crypto Leader safety tests: no real Kalshi submissions."""
+from datetime import datetime, timezone
+from decimal import Decimal as D
+import pytest
+
+import leader_mean15 as leader
+import performance_ranked_minute9 as ranked
+
+
+START = 1793763000
+TICKER = "KXCRYPTOLEAD15M-26NOV031500-ETH"
+CLOSE = datetime.fromtimestamp(START + 900, timezone.utc).isoformat()
+
+
+def market(coin="ETH", no=".72", status="open"):
+    return {"ticker": TICKER.rsplit("-", 1)[0] + "-" + coin,
+            "status": status, "no_ask_dollars": no, "no_bid_dollars": ".80",
+            "close_time": CLOSE, "exchange_index": 2}
+
+
+def observations(at):
+    # HYPE is closest to the mean and ETH is second-closest.
+    points = {"BTC": 4, "ETH": D("2.2"), "SOL": 5, "XRP": 0, "HYPE": 3}
+    return [ranked.Observation(leader.COINS[k], START, D(100),
+                               D(100 + v), at) for k,v in points.items()]
+
+
+class Feed:
+    def __init__(self, clock):
+        self.clock = clock
+    def snapshot(self, names, start):
+        assert tuple(names) == leader.SOURCE_SERIES and start == START
+        return observations(START + 240)
+
+
+class Exchange:
+    def __init__(self):
+        self.book = market()
+        self.submissions = []
+        self.orders = {}
+        self.fills = []
+        self.held = D(0)
+        self.lose_ack = False
+        self.sell_partial = False
+        self.cash = D("50")
+
+    def markets(self, **params):
+        assert params["series_ticker"] == "KXCRYPTOLEAD15M"
+        return [dict(self.book)]
+    def market(self, ticker):
+        assert ticker == self.book["ticker"]
+        return dict(self.book)
+    def balance(self):
+        return {"balance_dollars": str(self.cash), "balance_breakdown":
+                [{"exchange_index": 2, "balance": str(self.cash)}]}
+    def positions(self, ticker):
+        return [{"ticker": ticker, "position_fp": str(self.held)}] if self.held else []
+    def all_orders(self, ticker, status=None):
+        return [o for o in self.orders.values() if o["ticker"] == ticker
+                and (status is None or o["status"] == status)]
+    def all_fills(self, ticker):
+        return [f for f in self.fills if f["ticker"] == ticker]
+    def order(self, order_id, ticker):
+        row = self.orders[order_id]
+        assert row["ticker"] == ticker
+        return dict(row)
+    def place_entry(self, ticker, side, quantity, limit, close, **kwargs):
+        assert side == "NO" and kwargs.get("ioc") is True
+        assert kwargs["client_order_id"]
+        oid = "B" + str(len(self.submissions))
+        self.submissions.append(("buy", ticker, quantity, limit, kwargs))
+        if self.lose_ack:
+            return {}
+        self.orders[oid] = {"ticker":ticker,"order_id":oid,
+            "client_order_id":kwargs["client_order_id"],
+            "status":"executed", "fill_count_fp":str(quantity)}
+        self.held -= D(quantity)
+        self.fills.append({"ticker":ticker,"order_id":oid,"fill_id":"FB"+oid,
+            "count_fp":str(quantity), "no_price_dollars":str(limit),
+            "yes_price_dollars":str(D(1)-D(limit)), "fee_cost":"0.01",
+            "book_side":"ask"})
+        return {"order":{"order_id":oid}}
+    def place_take_profit(self, ticker, signed_quantity, limit, **kwargs):
+        assert D(signed_quantity) < 0
+        oid = "S" + str(len(self.submissions))
+        qty = -D(signed_quantity)
+        filled = qty / 2 if self.sell_partial else qty
+        self.submissions.append(("sell", ticker, qty, D(limit), kwargs))
+        self.orders[oid] = {"ticker":ticker,"order_id":oid,
+            "client_order_id":kwargs["client_order_id"],
+            "status":"canceled" if self.sell_partial else "executed",
+            "fill_count_fp":str(filled)}
+        self.held += filled
+        self.fills.append({"ticker":ticker,"order_id":oid,"fill_id":"FS"+oid,
+            "count_fp":str(filled), "no_price_dollars":str(limit),
+            "yes_price_dollars":str(D(1)-D(limit)), "fee_cost":"0.01",
+            "book_side":"bid"})
+        return {"order":{"order_id":oid}}
+    def cancel(self, order_id, ticker):
+        assert order_id in self.orders and self.orders[order_id]["ticker"] == ticker
+        self.orders[order_id]["status"] = "canceled"
+
+
+@pytest.mark.parametrize("elapsed,eligible", [
+    (0, False), (60, False), (239.99, False), (240, True), (241, True),
+    (299.99, True), (300, False), (899, False), (900, False)])
+def test_entry_window_strict(elapsed, eligible):
+    assert bool(leader.leader_plan([market()], "ETH", START, START+elapsed)) == eligible
+
+
+@pytest.mark.parametrize("price,expected", [
+    (".64", None), (".6499", None), (".65", "0.65"),
+    (".6501", "0.66"), (".9751", "0.98"), (".99", "0.99"),
+    (".9901", None), ("1.00", None)])
+def test_no_ask_gate_and_rounding(price, expected):
+    p = leader.leader_plan([market(no=price)], "ETH", START, START+245)
+    assert (str(p["limit"]) if p else None) == expected
+
+
+def test_exact_contract_and_sol_eligibility():
+    assert leader.leader_plan([market("SOL")], "SOL", START, START+250)
+    assert leader.leader_plan([market("BTC")], "BTC", START, START+250)
+    assert leader.leader_plan([market("ETH")], "BTC", START, START+250) is None
+    assert leader.leader_plan([market("ETH"), market("ETH")], "ETH", START, START+250) is None
+    assert leader.leader_plan([market("ETH", status="closed")], "ETH", START, START+250) is None
+
+
+def test_mean_rank_selects_eth_and_rejects_stale_data():
+    coin, fallback, mean, returns = leader.mean_rank_choices(observations(START+181), START, START+181)
+    assert coin == "ETH" and fallback == "HYPE" and mean == D("2.84") and returns["SOL"] == D(5)
+    with pytest.raises(ranked.PerformanceUnavailable):
+        leader.mean_rank_choices(observations(START+181)[:-1], START, START+181)
+    with pytest.raises(ranked.PerformanceUnavailable):
+        leader.mean_rank_choices(observations(START+181), START, START+250)
+
+
+def test_budget_follows_last_settled_result(tmp_path):
+    from single_coin_minute9 import Journal
+    j = Journal(tmp_path/"leader.json")
+    assert leader.budget(j) == D(5)
+    for status in ("win", "win", "flat"):
+        j.data["windows"][str(len(j.data["windows"]))] = {
+            "ticker":TICKER, "outcome":{"status":status, "completed_at":len(j.data["windows"])+1}}
+        assert leader.budget(j) == D(5)
+    j.data["windows"]["loss"] = {"ticker":TICKER,
+        "entry_signal_source": leader.SIGNAL_SOURCE,
+        "outcome":{"status":"loss","completed_at":100}}
+    assert leader.budget(j) == D("2.50")
+    j.data["windows"]["empty"] = {"entry_signal_source": leader.SIGNAL_SOURCE,
+        "outcome":{"status":"no_fill","completed_at":101}}
+    assert leader.budget(j) == D("2.50")
+    j.data["windows"]["recovery"] = {"entry_signal_source": leader.SIGNAL_SOURCE,
+        "outcome":{"status":"win","completed_at":102}}
+    assert leader.budget(j) == D(5)
+    j.data["windows"]["pending"] = {"ticker":TICKER,"buy":{"client_id":"UNCERTAIN"}}
+    assert leader.budget(j) is None
+
+
+def test_actual_buy_exact_no_and_hold_until_settlement_without_stop(tmp_path):
+    at = [START + 243.]
+    feed = Feed(lambda: at[0])
+    svc = leader.LeaderRunner(tmp_path / "leader.json", provider=feed,
+                              clock=lambda: at[0])
+    venue = Exchange()
+    assert leader.HOLD_UNTIL_SETTLEMENT is True
+    assert leader.ENTRY_END_SECOND == 300
+    svc.run(venue, live=True)
+    assert [s[0] for s in venue.submissions] == ["buy"]
+    rec = svc.journal.data["windows"][str(START)]
+    assert rec["coin"] == "ETH" and rec["side"] == "NO"
+    assert rec["budget_dollars"] == "5" and rec["buy"]["order_id"]
+    # No stop loss and NO forced IOC exit, even at a good or bad bid.
+    for elapsed, bid in ((400, ".12"), (839, ".90"),
+                         (840, ".80"), (899, ".01"), (900, ".99"), (902, ".01")):
+        at[0] = START + elapsed
+        venue.book["no_bid_dollars"] = bid
+        if elapsed >= 900:
+            venue.book["status"] = "closed"  # Not finalized yet.
+        svc.run(venue, live=True)
+        assert [entry[0] for entry in venue.submissions] == ["buy"]
+        assert svc.journal.data["windows"][str(START)].get("outcome") is None
+        assert leader.budget(svc.journal) is None  # Prior settlement pending.
+    # Only a VERIFIED finalized market result completes the window.
+    at[0] = START + 935
+    venue.book.update(status="finalized", result="no")
+    svc.run(venue, live=True)
+    outcome = svc.journal.data["windows"][str(START)]["outcome"]
+    assert outcome["status"] == "win"
+    assert outcome["sold"] == "0"
+    assert D(outcome["settled_remainder"]) > 0
+    assert leader.budget(svc.journal) == D(5)
+    assert len(venue.submissions) == 1
+
+
+def test_losing_leader_contract_remains_at_risk_until_final_settlement(tmp_path):
+    at = [START + 243.]
+    svc = leader.LeaderRunner(tmp_path / "leader.json",
+                              provider=Feed(lambda: at[0]), clock=lambda: at[0])
+    venue = Exchange()
+    svc.run(venue, live=True)
+    for seconds in (840, 890, 899, 900, 925):
+        at[0] = START + seconds
+        venue.book["no_bid_dollars"] = ".01"
+        if seconds >= 900:
+            venue.book["status"] = "closed"
+        svc.run(venue, live=True)
+    assert [entry[0] for entry in venue.submissions] == ["buy"]
+    assert leader.budget(svc.journal) is None
+    venue.book.update(status="settled", result="yes")
+    at[0] = START + 940
+    svc.run(venue, live=True)
+    outcome = svc.journal.data["windows"][str(START)]["outcome"]
+    assert outcome["status"] == "loss"
+    assert outcome["sold"] == "0"
+    assert D(outcome["net_pnl_dollars"]) < 0
+    assert leader.budget(svc.journal) == D("2.50")
+    assert len(venue.submissions) == 1
+
+
+def test_preview_mode_never_exits_existing_position(tmp_path):
+    at = [START+243]
+    svc = leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
+                              clock=lambda:at[0])
+    venue = Exchange()
+    svc.run(venue,live=True)
+    at[0] = START+845
+    svc.run(venue,live=False)
+    assert len(venue.submissions) == 1
+
+
+def test_unresolved_entry_prevents_repeat_and_unknown_sell(tmp_path):
+    at=[START+240]
+    svc=leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
+                            clock=lambda:at[0])
+    venue=Exchange()
+    venue.lose_ack=True
+    svc.run(venue,live=True)
+    at[0]=START+300
+    svc.run(venue,live=True)
+    at[0]=START+841
+    svc.run(venue,live=True)
+    assert [a[0] for a in venue.submissions]==["buy"]
+    assert svc.journal.data["windows"][str(START)].get("outcome") is None
+
+
+def test_insufficient_cash_does_not_create_order_intent(tmp_path):
+    at=[START+240]
+    svc=leader.LeaderRunner(tmp_path/"leader.json",provider=Feed(lambda:at[0]),
+                            clock=lambda:at[0])
+    venue=Exchange()
+    venue.cash=D(".40")
+    svc.run(venue,live=True)
+    assert not venue.submissions and not svc.journal.data["windows"]
+
+
+def test_legacy_pre_upgrade_partial_sell_is_audited_without_new_exit(tmp_path):
+    # A previously submitted live IOC must still be reconciled after an upgrade.
+    at = [START + 240.]
+    svc = leader.LeaderRunner(tmp_path / "leader.json",
+                              provider=Feed(lambda: at[0]), clock=lambda: at[0])
+    venue = Exchange()
+    svc.run(venue, live=True)
+    rec = svc.journal.data["windows"][str(START)]
+    original_qty = D(rec["quantity"])
+    venue.sell_partial = True
+    prior_intent = {"client_id": "old-leader-minute14-sell", "created_at": START + 840,
+                    "quantity": str(original_qty), "purpose": "minute14_exit"}
+    response = venue.place_take_profit(
+        rec["ticker"], -original_qty, D(".80"),
+        client_order_id=prior_intent["client_id"])
+    prior_intent["order_id"] = response["order"]["order_id"]
+    rec["sells"].append(prior_intent)
+    svc.journal.save()
+    assert [s[0] for s in venue.submissions] == ["buy", "sell"]
+
+    at[0] = START + 850
+    svc.run(venue, live=True)
+    assert len(venue.submissions) == 2
+    assert "outcome" not in svc.journal.data["windows"][str(START)]
+    venue.book.update(status="finalized", result="no")
+    at[0] = START + 940
+    svc.run(venue, live=True)
+    result = svc.journal.data["windows"][str(START)]["outcome"]
+    assert result["sold"] == str(original_qty / 2)
+    assert result["settled_remainder"] == str(original_qty / 2)
+    assert result["status"] == "win"
+    assert len(venue.submissions) == 2
+
+
+def test_restarted_leader_does_not_create_new_exit_before_settlement(tmp_path):
+    at = [START + 243.]
+    path = tmp_path / "leader.json"
+    venue = Exchange()
+    leader.LeaderRunner(path, provider=Feed(lambda: at[0]),
+                        clock=lambda: at[0]).run(venue, live=True)
+    at[0] = START + 845
+    restarted = leader.LeaderRunner(path, provider=Feed(lambda: at[0]),
+                                   clock=lambda: at[0])
+    restarted.run(venue, live=True)
+    assert [x[0] for x in venue.submissions] == ["buy"]
+    assert restarted.journal.data["windows"][str(START)]["sells"] == []
+    venue.book.update(status="finalized", result="no")
+    at[0] = START + 930
+    restarted.run(venue, live=True)
+    assert restarted.journal.data["windows"][str(START)]["outcome"]["status"] == "win"
+    assert len(venue.submissions) == 1
+
+
+
+@pytest.mark.parametrize("outside,can_settle", [
+    ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask"}, True),
+    # Kalshi reports the traded LEG (YES) and the sell book (bid),
+    # even though selling YES is equivalent to adding NO exposure.
+    ({"action": "sell", "side": "yes", "outcome_side": "yes", "book_side": "bid"}, True),
+    ({"action": "sell", "side": "yes", "outcome_side": "no", "book_side": "ask"}, False),
+    ({"action": "sell", "side": "yes", "outcome_side": "yes", "book_side": "ask"}, False),
+    ({"action": "sell", "side": "yes", "outcome_side": "no", "book_side": "bid"}, False),
+    ({"action": "sell", "side": "yes", "book_side": "bid"}, False),
+    ({"action": "sell", "side": "yes", "outcome_side": "yes"}, False),
+    ({"action": "buy", "side": "no", "book_side": "ask"}, False),
+    ({"action": "buy", "side": "yes", "outcome_side": "yes", "book_side": "bid"}, False),
+    ({"action": "sell", "side": "no", "outcome_side": "no", "book_side": "ask"}, False),
+    ({"action": "buy", "outcome_side": "no", "book_side": "ask"}, False),
+    ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "bid"}, False),
+    ({"action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask",
+      "subaccount_number": 1}, False),
+])
+def test_extra_fill_settles_only_when_proven_same_side_buy(
+        tmp_path, outside, can_settle):
+    now = [START + 243]
+    runner = leader.LeaderRunner(tmp_path / "leader.json",
+                                 provider=Feed(lambda: now[0]),
+                                 clock=lambda: now[0])
+    venue = Exchange()
+    runner.run(venue, live=True)
+    assert len(venue.submissions) == 1
+    own = runner.journal.data["windows"][str(START)]
+    venue.fills.append(dict(
+        ticker=own["ticker"], fill_id="outside-1", order_id="outside-order",
+        count_fp="2", fee_cost="0", no_price_dollars=".71",
+        yes_price_dollars=".29", **outside,
+    ))
+    # Outside activity NEVER enables early close or creates a sell.
+    now[0] = START + 895
+    runner.run(venue, live=True)
+    assert "outcome" not in own
+    assert len(venue.submissions) == 1
+    venue.book.update(status="finalized", result="no")
+    now[0] = START + 930
+    runner.run(venue, live=True)
+    if can_settle:
+        assert own["outcome"]["status"] == "win"
+        assert D(own["outcome"]["bought"]) == D(own["quantity"])
+        assert own["outcome"]["sold"] == "0"
+        assert leader.budget(runner.journal) == D("5")
+    else:
+        assert "outcome" not in own
+        assert leader.budget(runner.journal) is None
+    assert len(venue.submissions) == 1
+
+
+def test_unidentified_outside_fill_does_not_release_budget(tmp_path):
+    now = [START + 243]
+    runner = leader.LeaderRunner(tmp_path / "leader.json",
+                                 provider=Feed(lambda: now[0]),
+                                 clock=lambda: now[0])
+    venue = Exchange()
+    runner.run(venue, live=True)
+    own = runner.journal.data["windows"][str(START)]
+    venue.fills.append({
+        "ticker": own["ticker"], "order_id": "outside-order",
+        "action": "buy", "side": "no", "outcome_side": "no", "book_side": "ask",
+        "count_fp": "1", "no_price_dollars": ".70", "fee_cost": "0",
+    })
+    venue.book.update(status="finalized", result="no")
+    now[0] = START + 940
+    runner.run(venue, live=True)
+    assert "outcome" not in own
+    assert leader.budget(runner.journal) is None
+
+
+def test_two_venue_shaped_outside_sell_yes_fills_release_only_after_finalization(tmp_path):
+    """Reproduce production XRP NO blocker: external sell YES reports YES/bid."""
+    now = [START + 243]
+    runner = leader.LeaderRunner(tmp_path / "leader.json",
+                                 provider=Feed(lambda: now[0]),
+                                 clock=lambda: now[0])
+    venue = Exchange()
+    runner.run(venue, live=True)
+    own = runner.journal.data["windows"][str(START)]
+    for ix in (1, 2):
+        venue.fills.append({
+            "ticker": own["ticker"], "fill_id": f"outside-fill-{ix}",
+            "order_id": f"outside-order-{ix}", "action": "sell",
+            "side": "yes", "outcome_side": "yes", "book_side": "bid",
+            "subaccount_number": 0, "count_fp": "1",
+            "fee_cost": "0", "no_price_dollars": ".71",
+            "yes_price_dollars": ".29",
+        })
+    now[0] = START + 899
+    runner.run(venue, live=True)
+    assert own.get("outcome") is None
+    assert leader.budget(runner.journal) is None
+    assert len(venue.submissions) == 1
+    venue.book.update(status="finalized", result="no")
+    now[0] = START + 930
+    runner.run(venue, live=True)
+    assert own["outcome"]["status"] == "win"
+    assert D(own["outcome"]["bought"]) == D(own["quantity"])
+    assert own["outcome"]["sold"] == "0"
+    assert leader.budget(runner.journal) == D("5")
+    assert len(venue.submissions) == 1

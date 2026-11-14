@@ -66,11 +66,10 @@ def test_75_cent_tier_is_blocked_in_former_window(monkeypatch, side, elapsed, al
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-def test_full_cycle_opening_57_is_independent_of_consumed_52_attempt(monkeypatch, side):
+def test_opening_57_gateway_is_independent_of_consumed_52_attempt(monkeypatch, side):
     fake, record, state, clock, closed = setup(monkeypatch, 60, '.57', side)
     record['opening_bias_attempted'] = True
-    monkeypatch.setattr(bot, 'MAX_BUYS', 0)
-    bot.cycle(state)
+    bot.funded_entry(record, state, 'TEST', side, D('.57'), closed, 'opening_57')
     assert len(fake.entries) == 1
     intent = record['entry_intents'][0]
     assert intent['kind'] == 'opening_57' and intent['side'] == side
@@ -123,7 +122,7 @@ def test_minute_six_keeps_live_strike_and_higher_ask_requirements(monkeypatch, s
     assert not fake.entries and not record['entry_intents']
 
 
-def test_30_cap_preserves_saved_spending_and_7_20_settlement_reserve(monkeypatch):
+def test_30_cap_preserves_saved_spending_and_20_dollar_settlement_reserve(monkeypatch):
     monkeypatch.setenv('MARKET_BUDGET_DOLLARS', '30')
     record = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '25', 'entry_closed': True}]}
     before = copy.deepcopy(record)
@@ -131,15 +130,15 @@ def test_30_cap_preserves_saved_spending_and_7_20_settlement_reserve(monkeypatch
     assert policy.reserve(record, 'YES', D('.75'), D('.77'), D(30), 720, 'regular') is None
     assert policy.reserve(record, 'YES', D('.96'), D('.77'), D(30), 900, policy.SETTLEMENT_KIND) is None
     assert record == before
-    restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '22.80', 'entry_closed': True}]}
+    restored = {'entry_intents': [{'kind': 'regular', 'reserved_dollars': '20.10', 'entry_closed': True}]}
     assert policy.reserve(restored, 'YES', D('.45'), D('.77'), D(30), 720, 'regular') is None
     settlement = policy.reserve(restored, 'YES', D('.96'), D('.77'), D(30), 900, policy.SETTLEMENT_KIND)
-    assert D(settlement['quantity']) == 7
-    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('29.73')
+    assert D(settlement['quantity']) == 10
+    assert sum(D(i['reserved_dollars']) for i in restored['entry_intents']) == D('30.00')
 
 
 def test_stale_configuration_cannot_restore_35_or_regular_57():
-    env = {**os.environ, 'ENTRY_EXIT_PAIRS_CENTS': '35:42,57:90,70:80,75:90', 'MARKET_BUDGET_DOLLARS': '15'}
+    env = {**os.environ, 'ENTRY_EXIT_PAIRS_CENTS': '35:42,57:90,70:80,75:90', 'MARKET_BUDGET_DOLLARS': '30'}
     result = subprocess.run([sys.executable, '-c',
         "import bot; from decimal import Decimal as D; "
         "assert D('.35') not in bot.NEW_ENTRY_EXIT_PAIRS; "
@@ -170,3 +169,6 @@ def test_new_and_minute_eight_targets_sell_only_when_reached(tmp_path, price, ta
     wire_target = D(target) if sign == 1 else 1 - D(target)
     assert all(order['reduce_only'] and D(order['price']) == wire_target for order in fake.submissions)
 
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

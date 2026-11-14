@@ -98,13 +98,14 @@ def test_contradictory_future_close_is_not_archived(tmp_path):
     assert not service.worker.ledger(T).get("window_closed") and not e.sent
 
 
-def test_no_extra_market_lookup_for_fully_reserved_fills(tmp_path):
+def test_fully_reserved_fills_still_check_stops_and_tick_grid(tmp_path):
     e, service, _, _ = setup(tmp_path)
     e.buy(price=".42")
     assert service.run_once() and len(e.sent) == 1
-    e.market = Mock(side_effect=AssertionError("Redundant market lookup"))
+    e.market = Mock(wraps=e.market)
     assert not service.worker.maybe_submit(T, {}, {})
-    e.market.assert_not_called()
+    e.market.assert_called_once_with(T)
+    assert len(e.sent) == 1  # The quote check must not duplicate the resting TP.
 
 
 def test_no_market_lookup_without_a_sell_plan(tmp_path):

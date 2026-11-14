@@ -160,9 +160,13 @@ class QueueDiagnostics:
         self.client, self.clock, self.emit = client, clock, emit
         self.ranks = {}
         self.start = None
+        self.min_price = core.MIN_PRICE
 
     def __getattr__(self, name):
         return getattr(self.client, name)
+
+    def set_entry_min_price(self, min_price):
+        self.min_price = core.D(str(min_price))
 
     def markets(self, **kwargs):
         rows = self.client.markets(**kwargs)
@@ -172,7 +176,7 @@ class QueueDiagnostics:
                 close = core.parse_time(row["close_time"])
                 if self.start is None or close != self.start + 900:
                     continue
-                plan = core.plan_single_coin(row, self.clock(), series)
+                plan = core.plan_single_coin(row, self.clock(), series, min_price=self.min_price)
                 self.emit("M9_QUEUE_ELIGIBLE" if plan else "M9_QUEUE_SKIPPED",
                     series=series, rank=self.ranks.get(series), ticker=row.get("ticker"),
                     yes_ask=row.get("yes_ask_dollars"), no_ask=row.get("no_ask_dollars"),

@@ -27,24 +27,27 @@ def test_62_cent_entry_window_is_five_to_six_minutes(monkeypatch, elapsed, allow
 
 
 @pytest.mark.parametrize('side', ['YES', 'NO'])
-def test_regular_orders_repeat_after_interval_within_shared_cap(monkeypatch, side):
+def test_regular_gateway_caps_pending_inventory_and_recovers_zero_fills(monkeypatch, side):
     fake, record, state, clock, closed = setup(monkeypatch, 300, '.60', side)
-    monkeypatch.setattr(bot, 'ENTRY_EXIT_PAIRS', {D('.62'): D('.67')})
-    monkeypatch.setattr(bot, 'INTERVAL', 7)
-    monkeypatch.setattr(bot, 'MAX_BUYS', 10)
-    monkeypatch.setattr(fake, 'order', lambda oid, ticker=None: {'order_id': oid, 'status': 'executed'})
-    bot.cycle(state)
-    assert len(fake.entries) == 1
-    clock[0] += 6
-    bot.cycle(state)
-    assert len(fake.entries) == 1
-    clock[0] += 1
-    bot.cycle(state)
-    assert len(fake.entries) == 2 and record['buys'] == 2
-    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == D('5.20')
+    first, qty = bot.funded_entry(record, state, 'TEST', side, D('.62'), closed, 'regular')
+    assert first['order_id'] and qty == 4
+    extra, qty = bot.funded_entry(record, state, 'TEST', side, D('.62'), closed, 'regular')
+    assert extra['order_id'] and qty == 1  # Five pending contracts fill the initial slot.
+    assert bot.funded_entry(record, state, 'TEST', side, D('.62'), closed, 'regular') == ({}, 0)
+    monkeypatch.setattr(fake, 'order', lambda oid, ticker=None: {
+        'order_id': oid, 'status': 'canceled', 'fill_count_fp': '0',
+        'maker_fees_dollars': '0', 'taker_fees_dollars': '0'})
+    bot.reconcile_entries(state)
+    assert all(D(i['reserved_dollars']) == 0 for i in record['entry_intents'])
+    second, qty = bot.funded_entry(record, state, 'TEST', side, D('.62'), closed, 'regular')
+    assert second['order_id'] != first['order_id'] and qty == 4
+    assert sum(D(i['reserved_dollars']) for i in record['entry_intents']) == D('2.60')
 
 
 def test_higher_early_limits_cannot_consume_allowance_at_contract_start(monkeypatch):
     fake, record, state, clock, closed = setup(monkeypatch, 0, '.60')
     bot.cycle(state)
     assert not fake.entries and not record['entry_intents']
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

@@ -192,7 +192,7 @@ class ManualExitService:
     def read_entries(self):
         return read_journal(self.settings.entry_state)
 
-    def run_once(self, fill_tickers=()):
+    def run_once(self, fill_tickers=(), *, excluded_tickers=()):
         # A fresh read detects another writer even if it bypasses the file lock.
         try:
             self.read_entries()
@@ -200,7 +200,7 @@ class ManualExitService:
             known = set(self.worker.state["markets"])
             # New positions and confirmed live markets precede historical cleanup.
             priority = {ticker for ticker in fill_tickers if self.worker.allowed(ticker)}
-            tickers = sorted(self.worker.discover() | priority, key=lambda ticker:
+            tickers = sorted((self.worker.discover() | priority) - set(excluded_tickers), key=lambda ticker:
                              (ticker not in priority, ticker in known, ticker not in self._live_tickers, ticker))
         except Exception as error:
             # A shared API cooldown (or 429 on the discovery request) is not

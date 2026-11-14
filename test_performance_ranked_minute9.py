@@ -195,7 +195,7 @@ def test_priced_out_leader_falls_to_second_without_consuming_slot(tmp_path, monk
     assert exchange.checked[:2] == ['KXETH15M', 'KXSOL15M']
     assert len(exchange.posted) == 1
     assert exchange.posted[0][0].startswith('KXSOL15M-')
-    assert exchange.posted[0][2] == 20
+    assert exchange.posted[0][2] == 3  # SOL is half of the original $15/3 allocation
     assert core.window_entry_count(journal, START*1000) == 1
     skipped = [data for name, data in events if name == 'M9_QUEUE_SKIPPED']
     assert skipped[0]['rank'] == 1 and skipped[0]['yes_ask'] == '.96'
@@ -210,7 +210,7 @@ def test_two_priced_out_coins_fall_to_third(tmp_path, monkeypatch):
 
 def test_eligible_first_place_wins_even_if_second_has_higher_odds(tmp_path, monkeypatch):
     exchange = Exchange()
-    exchange.prices['KXETH15M'] = ('.60', '.41')
+    exchange.prices['KXETH15M'] = ('.69', '.32')
     exchange.prices['KXSOL15M'] = ('.90', '.11')
     exchange, _, _ = run(tmp_path, monkeypatch, exchange=exchange)
     assert exchange.posted[0][0].startswith('KXETH15M-')

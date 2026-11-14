@@ -31,15 +31,15 @@ def test_every_opening_route_buys_opposite_strike_without_bias(monkeypatch, spot
 
 
 @pytest.mark.parametrize("side", ["YES", "NO"])
-def test_full_cycle_and_restart_use_live_opposite_side(monkeypatch, side):
+def test_gateway_and_restart_use_live_opposite_side(monkeypatch, side):
     fake, record, state, clock, closed = setup(monkeypatch, 0, ".52", side)
     monkeypatch.setattr(fake, "markets", lambda **kw: pytest.fail("No opening lookbacks"))
-    bot.cycle(state)
+    bot.funded_entry(record, state, "TEST", side, D(".52"), closed, "opening_bias")
     assert fake.entries and {i["side"] for i in record["entry_intents"]} == {side}
     assert "entry_bias" not in record
     restored = copy.deepcopy(state)
     original_count = len(fake.entries)
-    bot.cycle(restored)
+    bot.funded_entry(restored["markets"]["TEST"], restored, "TEST", side, D(".52"), closed, "opening_bias")
     assert len(fake.entries) == original_count
 
 
@@ -51,11 +51,11 @@ def test_bad_or_equal_reference_does_not_spend_then_retries(monkeypatch, spot):
             raise TimeoutError("reference unavailable")
         return D(spot)
     monkeypatch.setattr(fake, "btc_reference_price", reference)
-    bot.cycle(state)
+    bot.funded_entry(record, state, "TEST", "YES", D(".52"), closed, "opening_bias")
     assert not fake.entries and not record["entry_intents"]
-    assert not record["opening_bias_attempted"]
+    assert not record.get("opening_bias_attempted")
     monkeypatch.setattr(fake, "btc_reference_price", lambda: D("99990"))
-    bot.cycle(state)
+    bot.funded_entry(record, state, "TEST", "YES", D(".52"), closed, "opening_bias")
     assert fake.entries
 
 
@@ -120,7 +120,9 @@ def test_optional_routes_select_opposite_side_themselves(monkeypatch, route):
     else:
         monkeypatch.setattr(fake, "btc_reference_price", lambda: D("100100"))
         monkeypatch.setattr(bot, "OPENING_BIAS_ENABLED", False)
-        monkeypatch.setattr(bot, "MAX_BUYS", 0)
-        bot.cycle(state)
+        bot.funded_entry(record, state, "TEST", "NO", D(".45"), closed, "spot")
     assert fake.entries and {i["side"] for i in record["entry_intents"]} == {"NO"}
     assert {i["kind"] for i in record["entry_intents"]} == {route}
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

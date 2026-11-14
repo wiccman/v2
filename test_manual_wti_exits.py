@@ -29,7 +29,10 @@ def setup(tmp_path, *, series=WTI_SERIES):
     entry_path = tmp_path / "state.json"
     entry_path.write_text('{"markets": {}}')
     entry_path.with_name("state_take_profit.json").write_text('{"markets": {}}')
-    settings = replace(Settings.read({"STATE_PATH": str(entry_path)}),
+    # These fixtures isolate resting targets and ownership reconciliation;
+    # stop activation/migration has separate explicit coverage.
+    settings = replace(Settings.read({"STATE_PATH": str(entry_path),
+                                      "MANUAL_STOP_LOSS_CENTS": "0"}),
                        series=series, dry_run=False)
     events = []
     service = ManualExitService(exchange, settings, clock=exchange.clock,

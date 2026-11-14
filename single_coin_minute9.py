@@ -1,7 +1,7 @@
-"""Single-coin 15-minute Kalshi markets: minute-nine buy, +5c gross exit.
+"""Single-coin 15-minute Kalshi markets: minute-nine buy, resting +10c gross TP.
 
 For BTC/ETH/SOL/XRP/HYPE individual UP/DOWN contracts, this strategy buys
-whichever side has a quoted ask from 59c through 91c from elapsed minute 9 until the configured entry cutoff.
+whichever side has a quoted ask from 69c through 89c from elapsed minute 9 until the configured entry cutoff.
 No basket mean, leader rank, direction indicator or other coin-selection rule.
 Both sides qualifying is ambiguous, so the market is skipped. By default
 only one filled or potentially-filled market per 15-minute window is allowed.
@@ -17,17 +17,20 @@ the unset default of 600 preserves the archived minute-nine-only mode.
 Standalone preview mode by default. Live mode requires --live AND an explicit
 M9_TRADING_ENABLED=true setting. DO NOT run alongside another bot that adopts
 all outside buys as manual inventory: competing take-profits could oversell.
-A fixed 45c executable bid triggers a price-protected reduce-only IOC,
-regardless of entry price. The actual exit fill can be below 45c on a gap;
-IOC exits require the process to run.
-After three confirmed profitable trades, the per-entry budget drops to
-one third of the normal allocation until the next confirmed losing trade; then the consecutive-win count resets.
+A drop of M9_STOP_DROP_CENTS (default 21c) below the verified average entry
+cost in the executable bid triggers a reduce-only IOC, canceling any resting TP
+first. A fast gap or illiquid book can result in a worse realized loss;
+the exit runner requires the process to be running. Optional M9_STOP_ORDER_MODE=gtc\nsubmits a reduce-only GTC limit only after the stop fires, and reprices\nresting orders as the executable bid falls; GTC does not guarantee a fill.
+At startup use one third of the normal budget. A verified loss enables the full
+budget; two consecutive wins at full budget return to one third, which stays
+active until the next verified loss. A loss at full budget resets its win count.
 """
 from __future__ import annotations
 
 import argparse
 import fcntl
 import json
+import math
 import os
 import signal
 import tempfile
@@ -40,14 +43,64 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from kalshi import KalshiClient
+from kalshi import KalshiClient, KalshiAPIError
 from price_pairs import _outcome_cost
 
 DEFAULT_SERIES = ("KXBTC15M", "KXETH15M", "KXSOL15M", "KXXRP15M", "KXHYPE15M")
-MIN_PRICE, MAX_PRICE, PROFIT, STOP_BID = D(".59"), D(".91"), D(".05"), D(".45")
+MIN_PRICE, RELAXED_MIN_PRICE, MAX_PRICE = (D(".69"), D(".60"), D(".89"))
+
+
+def regular_tp_spread_from_cents(value):
+    """Configure only new Zone 1 TP spreads; keep durable entry-specific targets."""
+    if (not isinstance(value, str) or not value.isascii() or not value.isdecimal()
+            or not 1 <= int(value) <= 30):
+        raise ValueError("M9_TP_SPREAD_CENTS must be an integer from 1 to 30")
+    return D(value) / D("100")
+
+
+PROFIT = regular_tp_spread_from_cents(os.getenv("M9_TP_SPREAD_CENTS", "10"))
+
+
+def stop_drop_from_cents(value):
+    """Validate the absolute cent drop from verified average entry cost."""
+    if (not isinstance(value, str) or not value.isascii() or not value.isdecimal()
+            or not 1 <= int(value) <= 99):
+        raise ValueError("M9_STOP_DROP_CENTS must be an integer from 1 to 99")
+    return D(value) / D("100")
+
+
+STOP_DROP = stop_drop_from_cents(os.getenv("M9_STOP_DROP_CENTS", "21"))
+SOL_ABSOLUTE_KILL_BID = D(".20")  # independent emergency close, both zones
+
+
+def stop_threshold_for_entry(cost):
+    """Executable-bid trigger at verified average entry cost minus 21 cents."""
+    cost = D(str(cost))
+    if not cost.is_finite() or not D(0) < cost < D(1):
+        raise ValueError("Invalid verified entry cost")
+    return cost - STOP_DROP
+RELAX_FLOOR_AFTER_WINS = 10
 TERMINAL = {"executed", "canceled", "cancelled", "expired", "rejected"}
 FEE_RESERVE = D(".03")  # conservative per-contract entry fee allowance
 ENTRY_QUEUE_POLICY = "confirmed-zero-fill-fallback-v1"
+ZONE1_BUY_TIMEOUT_SECONDS = 120
+ZONE1_CANCEL_RETRY_SECONDS = 15
+ZONE1 = "zone1_regular"
+ZONE2 = "zone2_late"
+
+
+def zone_record_key(ticker, zone):
+    """Journal identity is zone + market, not market alone.
+
+    Preserve legacy regular records keyed by ticker for safe migration.
+    """
+    if not isinstance(ticker, str) or not ticker:
+        raise ValueError("Missing market identity")
+    if zone == ZONE1:
+        return ticker
+    if zone == ZONE2:
+        return "zone2::" + ticker
+    raise ValueError("Unknown entry zone")
 ENTRY_START_SECONDS = 540
 ENTRY_END_SECONDS = int(os.getenv("M9_ENTRY_END_SECONDS", "600"))
 if not 600 <= ENTRY_END_SECONDS <= 900:
@@ -66,8 +119,11 @@ def parse_time(value):
     return parsed.timestamp()
 
 
-def plan_single_coin(market, now, series):
-    """Return an eligible YES/NO ask from minute 9 until the exclusive cutoff."""
+def plan_single_coin(market, now, series, *, min_price=None):
+    """Return an eligible YES/NO ask using the active streak-dependent floor."""
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
+    if not min_price.is_finite() or not RELAXED_MIN_PRICE <= min_price <= MAX_PRICE:
+        raise ValueError("Invalid entry minimum")
     ticker = str(market.get("ticker", ""))
     if not ticker.startswith(series + "-") or market.get("status") not in {"active", "open"}:
         return None
@@ -85,7 +141,7 @@ def plan_single_coin(market, now, series):
             ask = D(str(market[side.lower() + "_ask_dollars"]))
         except (KeyError, ValueError, TypeError, ArithmeticError):
             continue
-        if not ask.is_finite() or ask < MIN_PRICE or ask > MAX_PRICE:
+        if not ask.is_finite() or ask < min_price or ask > MAX_PRICE:
             continue
         limit = (ask * 100).to_integral_value(rounding=ROUND_CEILING) / 100
         if limit <= MAX_PRICE:
@@ -98,25 +154,36 @@ def plan_single_coin(market, now, series):
             "window_end_ms": int(close * 1000)}
 
 
-def exit_decision(cost, bid, *, stop_armed=False):
+def exit_decision(cost, bid, *, stop_armed=False, profit=None):
     """Return (exit kind, protected IOC limit) from executable bid and fill cost.
 
-    The fixed 45-cent bid is the trigger, independent of the actual entry cost:
-    on a gap the exit limit is the currently quoted bid, not the stop threshold.
-    A latched stop keeps priority over TP through later price recovery/restarts.
+    Stop when executable bid is 21c below verified average entry cost.
+    On a gap the IOC limit is the currently quoted bid, not the threshold.
+    A latched stop keeps priority over TP through recovery and restarts.
     """
     cost, bid = D(str(cost)), D(str(bid))
+    profit = PROFIT if profit is None else D(str(profit))
+    if not profit.is_finite() or not D(0) < profit < D(1):
+        raise ValueError("Invalid take-profit spread")
     if not cost.is_finite() or not D(0) < cost < D(1):
         raise ValueError("Invalid verified entry cost")
     if not bid.is_finite() or not D(0) <= bid <= D(1):
         raise ValueError("Invalid executable bid")
-    if stop_armed or bid <= STOP_BID:
+    if stop_armed or bid <= stop_threshold_for_entry(cost):
         # No executable bid means stop stays armed and is retried next pass.
         return "stop_loss", bid if D(0) < bid < D(1) else None
-    target = (cost + PROFIT).quantize(D(".01"), rounding=ROUND_CEILING)
+    target = (cost + profit).quantize(D(".01"), rounding=ROUND_CEILING)
     if target > D(".99"):
         return None, None
     return ("take_profit", target) if bid >= target else (None, None)
+
+
+def stop_exit_order_mode():
+    """IOC is the legacy default; GTC is enabled only by explicit configuration."""
+    mode = os.getenv("M9_STOP_ORDER_MODE", "ioc").strip().lower()
+    if mode not in {"ioc", "gtc"}:
+        raise ValueError("M9_STOP_ORDER_MODE must be ioc or gtc")
+    return mode
 
 
 def starting_streak():
@@ -124,58 +191,266 @@ def starting_streak():
 
 
 def next_streak(streak, outcome):
-    """A win must be confirmed, not a submitted order or an unrealized gain."""
+    """Track global wins separately from consecutive wins at the full budget.
+
+    The persisted legacy 'reduced_budget' flag is True for the $6.66
+    allocation after the previous inversion. Keep it for journal compatibility.
+    Missing full_budget_wins in legacy journals means zero wins in that phase.
+    """
     wins = streak["consecutive_wins"]
-    half = streak["reduced_budget"]
-    if type(wins) is not int or wins < 0 or wins > 3 or type(half) is not bool:
+    full_budget = streak["reduced_budget"]
+    full_wins = streak.get("full_budget_wins", 0)
+    if (type(wins) is not int or not 0 <= wins <= RELAX_FLOOR_AFTER_WINS
+            or type(full_budget) is not bool
+            or type(full_wins) is not int or not 0 <= full_wins <= 1
+            or (not full_budget and "full_budget_wins" in streak)):
         raise ValueError("Invalid persisted streak")
     if outcome == "loss":
-        return starting_streak()
+        # First loss at $2.22 returns to $6.66; a loss at $6.66
+        # resets the two-win counter but stays at $6.66.
+        return {"consecutive_wins": 0, "reduced_budget": True,
+                "full_budget_wins": 0}
     if outcome == "flat":
-        return {"consecutive_wins": wins if half else 0, "reduced_budget": half}
+        # Flat breaks consecutive wins, without changing the active budget.
+        return ({"consecutive_wins": 0, "reduced_budget": True,
+                 "full_budget_wins": 0} if full_budget else starting_streak())
     if outcome != "win":
         raise ValueError("Only finalized trade results advance the streak")
-    if half:
-        return {"consecutive_wins": 3, "reduced_budget": True}
-    wins = min(3, wins + 1)
-    return {"consecutive_wins": wins, "reduced_budget": wins >= 3}
+    wins = min(RELAX_FLOOR_AFTER_WINS, wins + 1)
+    if full_budget:
+        if full_wins == 1:
+            # Two full-budget wins: return to $2.22 until first loss.
+            return {"consecutive_wins": wins, "reduced_budget": False}
+        return {"consecutive_wins": wins, "reduced_budget": True,
+                "full_budget_wins": 1}
+    return {"consecutive_wins": wins, "reduced_budget": False}
 
 
-def trade_budget(streak, base_budget):
-    """One third of base dollars, not one third of contracts; no compounding."""
+def entry_min_price(streak):
+    """69c normally; unlock a 60c floor after ten consecutive confirmed wins."""
+    # Validate using the same persisted-state contract as next_streak.
+    next_streak(streak, "flat")
+    return RELAXED_MIN_PRICE if streak["consecutive_wins"] >= RELAX_FLOOR_AFTER_WINS else MIN_PRICE
+
+
+BUDGET_CYCLE_POLICY = "zone1-full3-third-until-loss-half2-v1"
+BUDGET_PHASES = ("full", "third", "half")
+SOL_BUDGET_FACTOR = D("0.5")
+
+
+def new_budget_cycle(started_at):
+    """Start a new strategy at full size, ignoring earlier journal outcomes."""
+    timestamp = float(started_at)
+    if not math.isfinite(timestamp) or timestamp < 0:
+        raise ValueError("Invalid budget cycle start")
+    return {"policy": BUDGET_CYCLE_POLICY, "started_at": timestamp,
+            "phase": "full", "phase_wins": 0}
+
+
+def validate_budget_cycle(cycle):
+    if (not isinstance(cycle, dict)
+            or cycle.get("policy") != BUDGET_CYCLE_POLICY
+            or cycle.get("phase") not in BUDGET_PHASES
+            or type(cycle.get("phase_wins")) is not int
+            or not 0 <= cycle["phase_wins"] <= 2
+            or (cycle["phase"] == "third" and cycle["phase_wins"] != 0)
+            or (cycle["phase"] == "half" and cycle["phase_wins"] > 1)
+            or isinstance(cycle.get("started_at"), bool)
+            or not isinstance(cycle.get("started_at"), (int, float))
+            or not math.isfinite(cycle["started_at"])
+            or cycle["started_at"] < 0):
+        raise ValueError("Invalid persisted three-stage budget cycle")
+    return cycle
+
+
+def advance_budget_cycle(cycle, outcome):
+    """Full: 3 consecutive wins -> third; third: loss -> half;
+    half: 2 consecutive wins -> full. Losses in full/half reset counters.
+    Zone 2 and no-fills are excluded by caller.
+    """
+    validate_budget_cycle(cycle)
+    phase, wins = cycle["phase"], cycle["phase_wins"]
+    if outcome == "flat":
+        wins = 0
+    elif outcome == "loss":
+        wins = 0
+        if phase == "third":
+            phase = "half"
+    elif outcome == "win":
+        if phase != "third":
+            wins += 1
+            if (phase == "full" and wins == 3 or
+                    phase == "half" and wins == 2):
+                phase = "third" if phase == "full" else "full"
+                wins = 0
+    else:
+        raise ValueError("Only verified Zone 1 results advance budget phase")
+    return dict(cycle, phase=phase, phase_wins=wins)
+
+
+def rebuild_budget_cycle(journal):
+    """Reconcile delayed outcomes by completion time, scoped to this policy.
+
+    Only entries SUBMITTED after this policy was enabled are counted.
+    A recovered old trade cannot change the budget stage.
+    """
+    existing = journal.data.get("budget_cycle_v2")
+    if existing is None:
+        return None
+    validate_budget_cycle(existing)
+    cycle = new_budget_cycle(existing["started_at"])
+    events = []
+    for record in journal.data["windows"].values():
+        if record.get("entry_kind") == "late_basket_rank":
+            continue
+        outcome = record.get("outcome") or {}
+        if outcome.get("status") not in {"win", "loss", "flat"}:
+            continue
+        buy = record.get("buy") or {}
+        at = buy.get("created_at")
+        if (type(at) not in (int, float) or not math.isfinite(at)
+                or at < cycle["started_at"]):
+            continue
+        completed = outcome.get("completed_at")
+        if type(completed) not in (int, float) or not math.isfinite(completed):
+            raise RuntimeError("Invalid budget-cycle trade completion timestamp")
+        ticker = record.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            raise RuntimeError("Invalid budget-cycle ticker")
+        events.append((completed, ticker, outcome["status"]))
+    for _, _, status in sorted(events):
+        cycle = advance_budget_cycle(cycle, status)
+    if cycle != existing:
+        journal.data["budget_cycle_v2"] = cycle
+        journal.save()
+        event("M9_BUDGET_CYCLE_CHANGED", policy=BUDGET_CYCLE_POLICY,
+              phase=cycle["phase"], phase_wins=cycle["phase_wins"],
+              qualifying_outcomes=len(events))
+    return cycle
+
+
+def ensure_budget_cycle(journal, *, now=None):
+    """Migrate live journal once without relabeling old results as new wins."""
+    current = journal.data.get("budget_cycle_v2")
+    if current is None:
+        current = new_budget_cycle(time.time() if now is None else now)
+        journal.data["budget_cycle_v2"] = current
+        journal.save()
+        event("M9_BUDGET_CYCLE_STARTED", policy=BUDGET_CYCLE_POLICY,
+              started_at=current["started_at"], phase="full")
+    validate_budget_cycle(current)
+    return rebuild_budget_cycle(journal)
+
+
+def trade_budget(streak, base_budget, *, budget_cycle=None):
+    """Active phase allocation. Without a cycle retain test/legacy semantics."""
     amount = D(str(base_budget))
     if not amount.is_finite() or amount <= 0:
         raise ValueError("Trade budget must be positive")
-    return amount / D(3) if streak["reduced_budget"] else amount
+    if budget_cycle is not None:
+        phase = validate_budget_cycle(budget_cycle)["phase"]
+        return (amount if phase == "full" else
+                amount / D(3) if phase == "third" else amount / D(2))
+    return amount if streak["reduced_budget"] else amount / D(3)
 
 
-def budgeted_quantity(budget, ask, cap=100):
+def budget_for_series(active_budget, series):
+    """SOL receives half the active allocation in BOTH trading zones."""
+    allocation = D(str(active_budget))
+    if not allocation.is_finite() or allocation <= 0:
+        raise ValueError("Invalid allocation")
+    return allocation * SOL_BUDGET_FACTOR if series == "KXSOL15M" else allocation
+
+
+def budgeted_quantity(budget, ask, cap=100, *, min_price=None):
     """Protect against exceeding the allocation including fee allowance."""
     amount, price = D(str(budget)), D(str(ask))
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
     if (not amount.is_finite() or not price.is_finite() or amount <= 0
-            or price < MIN_PRICE or price > MAX_PRICE or type(cap) is not int or not 1 <= cap <= 100):
+            or not min_price.is_finite() or min_price < RELAXED_MIN_PRICE
+            or min_price > MAX_PRICE or price < min_price or price > MAX_PRICE
+            or type(cap) is not int or not 1 <= cap <= 100):
         raise ValueError("Invalid budget, entry price or quantity cap")
     return min(cap, int((amount / (price + FEE_RESERVE)).to_integral_value(rounding=ROUND_FLOOR)))
 
 
-def apply_new_outcomes(journal):
-    """Count each completed trade once, in verified completion-time order."""
-    pending = sorted(
-        (r for r in journal.data["windows"].values()
-         if isinstance(r.get("outcome"), dict) and not r["outcome"].get("counted")),
-        key=lambda r: (r["outcome"]["completed_at"], r["ticker"]))
-    for record in pending:
-        status = record["outcome"]["status"]
-        if status not in {"win", "loss", "flat", "no_fill"}:
+def completed_outcomes_in_order(windows):
+    """Return recorded trade results in real completion-time order.
+
+    Include already-counted results: a late-discovered fill or settlement can
+    predate the most recently counted trade. No-fills have no streak effect.
+    """
+    results = []
+    for record in windows.values():
+        outcome = record.get("outcome")
+        if not outcome:
+            continue
+        status = outcome.get("status")
+        if status == "no_fill" or record.get("entry_kind") == "late_basket_rank":
+            # Extra near-settlement positions contribute to account P&L,
+            # but not the regular trade budget's win/loss progression.
+            continue
+        if status not in {"win", "loss", "flat"}:
             raise RuntimeError("Invalid trade outcome; streak not advanced")
-        if status != "no_fill":
-            journal.data["streak"] = next_streak(journal.data["streak"], status)
+        completed_at = outcome.get("completed_at")
+        if (isinstance(completed_at, bool)
+                or not isinstance(completed_at, (int, float))
+                or not math.isfinite(completed_at) or completed_at < 0):
+            raise RuntimeError("Invalid trade completion time; streak not advanced")
+        ticker = record.get("ticker")
+        if not isinstance(ticker, str) or not ticker:
+            raise RuntimeError("Invalid trade identity; streak not advanced")
+        results.append((completed_at, ticker, status))
+    return sorted(results)
+
+
+def chronological_streak(windows):
+    """Rebuild from verified trade results; return None for unseeded journals."""
+    completed = completed_outcomes_in_order(windows)
+    if not completed:
+        return None  # Preserve legacy seeded state if there is no trade ledger.
+    streak = starting_streak()
+    for _, _, status in completed:
+        streak = next_streak(streak, status)
+    return streak
+
+
+def apply_new_outcomes(journal):
+    """Count results once while keeping live budget chronology correct."""
+    pending = [
+        record for record in journal.data["windows"].values()
+        if isinstance(record.get("outcome"), dict)
+        and not record["outcome"].get("counted")
+    ]
+    if not pending:
+        return
+    # Recompute using ALL historical results, not merely new arrivals.
+    # Without this, an old SOL win reconciled after a newer XRP loss would
+    # incorrectly reopen the win streak and change the next cash allocation.
+    resolved = chronological_streak(journal.data["windows"])
+    if resolved is not None:
+        journal.data["streak"] = resolved
+    for record in pending:
+        if record["outcome"].get("status") not in {"win", "loss", "flat", "no_fill"}:
+            raise RuntimeError("Invalid trade outcome; streak not advanced")
         record["outcome"]["counted"] = True
-        journal.save()  # atomic outcome + streak update (restart-safe)
+    journal.save()  # Atomic journal/streak update; no historical order edits.
+    rebuild_budget_cycle(journal)
+    for record in sorted(pending, key=lambda r: (r["outcome"].get("completed_at", 0),
+                                                 r.get("ticker", ""))):
+        status = record["outcome"]["status"]
         event("M9_TRADE_RESULT", ticker=record["ticker"], result=status,
               net_pnl_dollars=record["outcome"].get("net_pnl_dollars"),
+              entry_kind=record.get("entry_kind", "regular"),
+              entry_zone=record.get("entry_zone", ZONE1),
+              result_completed_at=record["outcome"].get("completed_at"),
+              streak_replayed_in_completion_order=True,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
-              reduced_budget=journal.data["streak"]["reduced_budget"])
+              reduced_budget=journal.data["streak"]["reduced_budget"],
+              full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
+              entry_floor_cents=int(entry_min_price(journal.data["streak"]) * 100),
+              budget_phase=(journal.data.get("budget_cycle_v2") or {}).get("phase"),
+              budget_phase_wins=(journal.data.get("budget_cycle_v2") or {}).get("phase_wins"))
 
 
 def fill_fee(row):
@@ -191,6 +466,66 @@ def fill_timestamp(row):
     if row.get("ts") is not None:
         return float(row["ts"])
     raise ValueError("Cannot establish completion time from fill")
+
+
+def emit_exit_summary(record, *, source):
+    """Log only saved reconciliation facts; no API reads or order actions."""
+    outcome = record.get("outcome") or {}
+    sells = record.get("sells") or []
+    if not outcome or not sells:
+        return
+    event("M9_EXIT_SUMMARY", ticker=record.get("ticker"), source=source,
+          result=outcome.get("status"), net_pnl_dollars=outcome.get("net_pnl_dollars"),
+          entry_zone=record.get("entry_zone", ZONE1),
+          bought=outcome.get("bought"), sold=outcome.get("sold"),
+          remaining_at_settlement=outcome.get("remaining_at_settlement"),
+          completed_at=outcome.get("completed_at"), exit_attempts=len(sells),
+          attempts=[{"created_at": x.get("created_at"), "quantity": x.get("quantity"),
+                     "target": x.get("target"), "purpose": x.get("purpose"),
+                     "execution": x.get("execution"),
+                     "acknowledged": bool(x.get("order_id"))} for x in sells])
+
+
+def observe_trade_mae(journal, record, cost, bid, now):
+    """Save the lowest observed executable bid for a verified owned entry.
+
+    No extra exchange requests or order actions. This gives an observed MAE
+    lower bound, not the exact intrapoll low or a guaranteed executable exit.
+    Persist only a fresh low-water mark, so ordinary polling adds no writes.
+    """
+    cost, bid = D(str(cost)), D(str(bid))
+    if (not cost.is_finite() or not D(0) < cost < D(1)
+            or not bid.is_finite() or not D(0) <= bid <= D(1)
+            or isinstance(now, bool) or not isinstance(now, (int, float))
+            or not math.isfinite(now)):
+        return False
+    old = record.get("observed_mae")
+    if isinstance(old, dict):
+        try:
+            previous = D(str(old["lowest_bid"]))
+        except (ValueError, KeyError, TypeError, ArithmeticError):
+            return False  # Preserve suspect history rather than overwrite.
+        if not previous.is_finite() or bid >= previous:
+            return False
+        first = old.get("first_observed_at", now)
+    else:
+        first = now
+    adverse = max(D(0), cost - bid) * D(100)
+    record["observed_mae"] = {
+        "entry_cost": str(cost),
+        "lowest_bid": str(bid),
+        "mae_cents_lower_bound": str(adverse),
+        "lowest_bid_observed_at": now,
+        "first_observed_at": first,
+        "basis": "polled_executable_bid",
+        "coverage": "not_continuous",
+    }
+    journal.save()
+    event("M9_MAE_LOW_OBSERVED", ticker=record.get("ticker"),
+          entry_zone=record.get("entry_zone", ZONE1),
+          lowest_bid=str(bid), entry_cost=str(cost),
+          mae_cents_lower_bound=str(adverse), observed_at=now)
+    return True
 
 
 def verify_completed_trade(client, journal, record, now):
@@ -247,6 +582,7 @@ def verify_completed_trade(client, journal, record, now):
     if sold > bought:
         raise RuntimeError("Exit quantity exceeds verified purchases")
     # A manual fill or another worker's order compromises ownership accounting.
+    valid_order_ids |= verified_previous_zone1_fill_ids(journal, record, fills)
     if any(row.get("order_id") not in valid_order_ids for row in fills):
         return
     sign = 1 if record["side"] == "YES" else -1
@@ -278,6 +614,17 @@ def verify_completed_trade(client, journal, record, now):
                           "bought": str(bought), "sold": str(sold),
                           "remaining_at_settlement": str(remaining)}
     journal.save()
+    mae = record.get("observed_mae")
+    if isinstance(mae, dict):
+        event("M9_TRADE_MAE", ticker=ticker,
+              entry_zone=record.get("entry_zone", ZONE1),
+              result=status, net_pnl_dollars=str(pnl),
+              entry_cost=mae.get("entry_cost"),
+              lowest_observed_bid=mae.get("lowest_bid"),
+              mae_cents_lower_bound=mae.get("mae_cents_lower_bound"),
+              lowest_bid_observed_at=mae.get("lowest_bid_observed_at"),
+              coverage="polled_executable_bid_not_continuous")
+    emit_exit_summary(record, source="live_reconciliation")
 
 
 class Journal:
@@ -301,6 +648,16 @@ class Journal:
                             record["reduced_budget_at_entry"] = record.pop("half_budget_at_entry")
                     self.save()
                 next_streak(saved_streak, "flat")  # validate before trading
+            # Repair a streak poisoned by an older result arriving after
+            # a newer loss. Only use already-verified historical outcomes.
+            repaired = chronological_streak(self.data["windows"])
+            if repaired is not None and repaired != self.data["streak"]:
+                self.data["streak"] = repaired
+                self.save()
+                event("M9_STREAK_CHRONOLOGY_REPAIRED",
+                      consecutive_wins=repaired["consecutive_wins"],
+                      reduced_budget=repaired["reduced_budget"],
+                      full_budget_wins=repaired.get("full_budget_wins", 0))
         else:
             self.data = {"schema": 1, "windows": {}, "streak": starting_streak()}
             self.save()
@@ -330,7 +687,24 @@ def find_order(client, ticker, intent):
     if not isinstance(expected_client_id, str) or not expected_client_id:
         raise RuntimeError("Missing saved order ownership identity")
     if intent.get("order_id"):
-        order = client.order(intent["order_id"], ticker)
+        try:
+            order = client.order(intent["order_id"], ticker)
+        except KalshiAPIError as error:
+            if error.status_code != 404:
+                raise
+            # Live GetOrder/GetOrders can lose terminal orders at Kalshi's
+            # archive handoff. Recover only an exact historic ID; never assume
+            # a missing live order was canceled or had zero fills.
+            recover = getattr(client, "archived_order", None)
+            order = (recover(ticker, intent.get("created_at"),
+                             order_id=intent["order_id"])
+                     if callable(recover) else None)
+            if order is None:
+                event("M9_ORDER_VISIBILITY_PENDING", ticker=ticker,
+                      http_status=404, order_id=intent["order_id"])
+                return None
+            event("M9_ARCHIVED_ORDER_RECOVERED", ticker=ticker,
+                  order_id=intent["order_id"], lookup="order_id")
         if (order.get("ticker") != ticker
                 or order.get("order_id") != intent["order_id"]
                 or order.get("client_order_id") != expected_client_id):
@@ -339,6 +713,15 @@ def find_order(client, ticker, intent):
     # Lost acknowledgement: reconcile by durable client_order_id. Never repeat POST.
     matching = [row for row in client.all_orders(ticker)
                 if row.get("client_order_id") == intent["client_id"]]
+    if not matching:
+        recover = getattr(client, "archived_order", None)
+        archived = (recover(ticker, intent.get("created_at"),
+                            client_id=intent["client_id"])
+                    if callable(recover) else None)
+        if archived is not None:
+            matching = [archived]
+            event("M9_ARCHIVED_ORDER_RECOVERED", ticker=ticker,
+                  order_id=archived.get("order_id"), lookup="client_order_id")
     if len(matching) > 1:
         raise RuntimeError("Multiple orders matched one client id")
     if matching:
@@ -349,11 +732,52 @@ def find_order(client, ticker, intent):
     return None
 
 
+def reconciliation_error_code(error):
+    # Only static known messages are exposed; never log arbitrary API bodies.
+    known = {
+        "Unsupported or invalid fill quantity": "invalid_fill_quantity",
+        "Order ownership mismatch": "order_ownership_mismatch",
+        "Order lookup identity mismatch": "order_lookup_identity_mismatch",
+        "Buy quantity exceeds saved authorization": "buy_above_authorization",
+        "Bought more contracts than authorized": "buy_above_authorization",
+        "Exit quantity exceeds verified purchases": "sell_above_purchases",
+        "Exit fill exceeds requested quantity": "sell_above_authorization",
+        "Ambiguous primary-account positions": "ambiguous_positions",
+        "Multiple orders matched one client id": "ambiguous_client_id",
+        "Order pagination cursor repeated": "order_cursor_repeated",
+        "Fill pagination cursor repeated": "fill_cursor_repeated",
+        "Historical pagination cursor repeated": "archive_cursor_repeated",
+        "Multiple archived orders matched one identity": "archive_identity_ambiguous",
+        "Historical order subaccount mismatch": "archive_subaccount_mismatch",
+        "Historical fill identity mismatch": "archive_fill_identity_mismatch",
+        "Historical fill missing identity": "archive_fill_missing_identity",
+        "Invalid Kalshi historical cutoff": "archive_cutoff_invalid",
+    }
+    return known.get(str(error), "unclassified") if type(error) is RuntimeError else "unclassified"
+
+
+def fill_contract_quantity(row):
+    """Parse Kalshi fixed-point contract counts without rounding inventory.
+
+    Kalshi may report fractional fills in hundredths of a contract. Never
+    truncate a 0.25 fill to zero or silently accept missing/invalid counts.
+    """
+    value = row.get("count_fp", row.get("count"))
+    if isinstance(value, bool) or value is None:
+        raise RuntimeError("Unsupported or invalid fill quantity")
+    try:
+        amount = D(str(value))
+    except (ValueError, TypeError, ArithmeticError) as error:
+        raise RuntimeError("Unsupported or invalid fill quantity") from error
+    if (not amount.is_finite() or amount < 0
+            or amount != amount.quantize(D("0.01"))):
+        raise RuntimeError("Unsupported or invalid fill quantity")
+    return amount
+
+
 def filled_quantity(fills, order_id):
     rows = [f for f in fills if f.get("order_id") == order_id]
-    qty = sum((D(str(row.get("count_fp", row.get("count", "0")))) for row in rows), D(0))
-    if qty < 0 or qty != qty.to_integral_value():
-        raise RuntimeError("Unsupported or invalid fill quantity")
+    qty = sum((fill_contract_quantity(row) for row in rows), D(0))
     return qty, rows
 
 
@@ -372,18 +796,151 @@ def entry_market_occupied(client, ticker):
                 or client.all_fills(ticker))
 
 
+def cancel_stale_zone1_buy(client, journal, record, now, *, order=None):
+    """Cancel only the bot-owned UNFILLED remainder after 120s.
+
+    Regular entries remain immediate-or-cancel. This is a watchdog for an
+    unexpectedly pending/resting or unknown-status order, NOT permission to
+    adopt another order or place a replacement. Partial fills remain owned
+    and are reconciled for normal stop / take-profit after the buy terminates.
+    """
+    if (record.get("entry_zone", ZONE1) != ZONE1
+            or record.get("entry_kind") == "late_basket_rank"
+            or record.get("outcome")):
+        return False
+    intent = record.get("buy")
+    if not isinstance(intent, dict):
+        return False
+    stamp = intent.get("created_at")
+    if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+            or not math.isfinite(stamp) or stamp < 0
+            or not math.isfinite(now)):
+        event("M9_ZONE1_BUY_TIMEOUT_INVALID_TIMESTAMP", ticker=record["ticker"])
+        return False
+    if now < stamp + ZONE1_BUY_TIMEOUT_SECONDS:
+        return False
+    ticker = record["ticker"]
+    if order is None:
+        order = find_order(client, ticker, intent)
+    if order is None:
+        event("M9_ZONE1_BUY_TIMEOUT_ACK_UNRESOLVED", ticker=ticker,
+              age_seconds=round(now - stamp, 1))
+        return False
+    if order.get("status") in TERMINAL:
+        return False
+    # A fully filled order may have a delayed terminal status. Do not cancel
+    # a known fully filled order; continue reconciling its terminal receipt.
+    filled = order.get("fill_count_fp", order.get("fill_count"))
+    if filled is not None:
+        count = D(str(filled))
+        if not count.is_finite() or count < 0 or count > D(str(record["quantity"])):
+            raise RuntimeError("Invalid entry fill receipt")
+        if count == D(str(record["quantity"])):
+            event("M9_ZONE1_BUY_TIMEOUT_FULL_FILL_WAIT", ticker=ticker,
+                  order_id=intent["order_id"])
+            return False
+    previous = record.get("zone1_cancel") or {}
+    last = previous.get("attempted_at")
+    if last is not None:
+        if (isinstance(last, bool) or not isinstance(last, (int, float))
+                or not math.isfinite(last) or last < 0):
+            raise RuntimeError("Invalid saved Zone 1 cancellation time")
+        if 0 <= now - last < ZONE1_CANCEL_RETRY_SECONDS:
+            return False
+    record["zone1_cancel"] = {
+        "attempted_at": now, "order_id": intent["order_id"],
+        "client_id": intent["client_id"], "reason": "unfilled_remainder_after_120s",
+    }
+    journal.save()  # Retry-safe intent saved BEFORE cancellation request.
+    event("M9_ZONE1_BUY_CANCEL_SUBMIT", ticker=ticker,
+          order_id=intent["order_id"], age_seconds=round(now - stamp, 1),
+          entry_zone=ZONE1, reason="unfilled_remainder_after_120s")
+    client.cancel(intent["order_id"], ticker)
+    event("M9_ZONE1_BUY_CANCEL_ACCEPTED", ticker=ticker,
+          order_id=intent["order_id"], entry_zone=ZONE1)
+    return True
+
+
+def maybe_arm_sol_20c_kill(journal, record, bid, now):
+    """Latch a SOL-only absolute 20c executable-bid emergency exit.
+
+    This is an additional stop, NOT a replacement for the entry-relative
+    21c stop. The exchange is never guaranteed to fill at the trigger.
+    """
+    if (record.get("series") != "KXSOL15M"
+            and not str(record.get("ticker", "")).startswith("KXSOL15M-")):
+        return False
+    price = D(str(bid))
+    if not price.is_finite() or not D(0) <= price <= SOL_ABSOLUTE_KILL_BID:
+        return False
+    if not record.get("sol_20c_kill"):
+        record["sol_20c_kill"] = {
+            "at": now, "trigger_bid": str(price),
+            "threshold": str(SOL_ABSOLUTE_KILL_BID),
+            "kind": "absolute_contract_price",
+        }
+        journal.save()
+        event("M9_SOL_20C_KILL_TRIGGERED", ticker=record["ticker"],
+              entry_zone=record.get("entry_zone", ZONE1),
+              trigger_bid=str(price), threshold=str(SOL_ABSOLUTE_KILL_BID))
+    return True
+
+
+def verified_previous_zone1_fill_ids(journal, record, fills):
+    """Recognize only the journal-verified, completely exited Zone 1 lot.
+
+    Kalshi's fill history includes earlier purchases and TP sales of the
+    *same ticker* when Zone 2 reenters. They are not outside trades, but no
+    other journal, manual fill, unresolved lot, or partial close is trusted.
+    Always verify the historical fill quantities, not just saved IDs.
+    """
+    if (record.get("entry_zone") != ZONE2
+            or record.get("entry_kind") != "late_basket_rank"):
+        return set()
+    ticker = record.get("ticker")
+    earlier = journal.data["windows"].get(zone_record_key(ticker, ZONE1))
+    if (not isinstance(earlier, dict) or earlier is record
+            or earlier.get("ticker") != ticker
+            or earlier.get("entry_zone", ZONE1) != ZONE1
+            or earlier.get("entry_kind") == "late_basket_rank"):
+        return set()
+    outcome = earlier.get("outcome") or {}
+    if outcome.get("status") not in {"win", "loss", "flat"}:
+        return set()
+    try:
+        purchased = D(str(outcome["bought"]))
+        exited = D(str(outcome["sold"]))
+        remaining = D(str(outcome["remaining_at_settlement"]))
+        if (not all(amount.is_finite() for amount in (purchased, exited, remaining))
+                or purchased <= 0 or exited != purchased or remaining != 0):
+            return set()
+        prior_buy = earlier["buy"]["order_id"]
+        prior_sells = [entry["order_id"] for entry in earlier["sells"]]
+        ids = [prior_buy] + prior_sells
+        if (not prior_sells or any(not isinstance(i, str) or not i for i in ids)
+                or len(ids) != len(set(ids))
+                or prior_buy == record.get("buy", {}).get("order_id")):
+            return set()
+        if filled_quantity(fills, prior_buy)[0] != purchased:
+            return set()
+        if sum((filled_quantity(fills, order_id)[0]
+                for order_id in prior_sells), D(0)) != exited:
+            return set()
+    except (KeyError, TypeError, ValueError, ArithmeticError, RuntimeError):
+        return set()
+    return set(ids)
+
+
 def reconcile_exit(client, journal, record, now):
     ticker = record["ticker"]
-    market = client.market(ticker)
-    if parse_time(market["close_time"]) <= now or market.get("status") not in {"active", "open"}:
-        return
     buy = find_order(client, ticker, record["buy"])
     if buy is None:
         event("M9_BUY_ACK_UNRESOLVED", ticker=ticker)
         return
     journal.save()
     if buy.get("status") not in TERMINAL:
-        return  # IOC must terminate before attempting exits
+        cancel_stale_zone1_buy(client, journal, record, now, order=buy)
+        return  # Never sell or assume zero-fill before terminal order proof.
     all_fills = client.all_fills(ticker)
     bought, buy_rows = filled_quantity(all_fills, record["buy"]["order_id"])
     if bought == 0:
@@ -395,12 +952,57 @@ def reconcile_exit(client, journal, record, now):
     if receipt is None or D(str(receipt)) != bought:
         event("M9_BUY_FILL_RECONCILING", ticker=ticker)
         return
+    # Use exactly the same verified weighted-average entry cost for both
+    # the resting TP cancellation path and the normal stop-order path.
+    sign = 1 if record["side"] == "YES" else -1
+    cost = sum((D(str(f.get("count_fp", f.get("count")))) * _outcome_cost(f, sign)
+                for f in buy_rows), D(0)) / bought
+    threshold = stop_threshold_for_entry(cost)
     sold = D(0)
     for intent in record["sells"]:
         order = find_order(client, ticker, intent)
-        if order is None or order.get("status") not in TERMINAL:
+        if order is None:
             event("M9_SELL_ACK_PENDING", ticker=ticker)
-            return  # Never duplicate ambiguous or resting sells
+            return  # Never duplicate an ambiguous sell.
+        if order.get("status") not in TERMINAL:
+            if (intent.get("purpose") == "take_profit"
+                    and intent.get("execution") == "gtc"
+                    and order.get("status") == "resting"):
+                market = client.market(ticker)
+                bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+                observe_trade_mae(journal, record, cost, bid, now)
+                sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+                if bid.is_finite() and (bid <= threshold or record.get("stop_armed") or sol_kill):
+                    if not record.get("stop_armed"):
+                        record["stop_armed"] = {"at": now, "trigger_bid": str(bid),
+                                                "threshold": str(threshold),
+                                                "entry_cost": str(cost)}
+                        journal.save()  # Latch before cancel; do not re-arm after restart.
+                        event("M9_STOP_TRIGGERED", ticker=ticker, entry_cost=str(cost),
+                              trigger_bid=str(bid), threshold=str(threshold))
+                    client.cancel(intent["order_id"], ticker)
+                    event("M9_TP_CANCEL_FOR_STOP", ticker=ticker, order_id=intent["order_id"])
+            elif (intent.get("purpose") == "stop_loss"
+                  and intent.get("execution") == "reduce_only_gtc"
+                  and order.get("status") == "resting"):
+                # A triggered GTC stop-limit is not an exchange-native stop.
+                # It can sit unfilled; follow falling executable bids, but
+                # never post a second sell until this exact ID is terminal.
+                market = client.market(ticker)
+                bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+                observe_trade_mae(journal, record, cost, bid, now)
+                last_limit = D(str(intent["target"]))
+                if bid.is_finite() and D(0) < bid < last_limit:
+                    client.cancel(intent["order_id"], ticker)
+                    event("M9_GTC_STOP_REPRICE_REQUESTED", ticker=ticker,
+                          order_id=intent["order_id"], prior_limit=str(last_limit),
+                          current_bid=str(bid))
+                else:
+                    event("M9_GTC_STOP_RESTING", ticker=ticker,
+                          order_id=intent["order_id"], limit=str(last_limit),
+                          executable_bid=str(bid))
+            event("M9_SELL_ACK_PENDING", ticker=ticker)
+            return  # Re-read terminal status AND fills before selling any remainder.
         journal.save()
         count, _ = filled_quantity(all_fills, intent["order_id"])
         if count > D(intent["quantity"]):
@@ -410,10 +1012,22 @@ def reconcile_exit(client, journal, record, now):
         if expected is None or D(str(expected)) != count:
             event("M9_SELL_FILL_RECONCILING", ticker=ticker)
             return
+        audited = getattr(journal, "_exit_receipts_logged", None)
+        if audited is None:
+            audited = set()
+            journal._exit_receipts_logged = audited
+        receipt_key = (ticker, intent["order_id"])
+        if receipt_key not in audited:
+            event("M9_EXIT_TERMINAL", ticker=ticker, order_id=intent["order_id"],
+                  status=order.get("status"), quantity=intent["quantity"],
+                  filled=str(count), target=intent.get("target"),
+                  purpose=intent.get("purpose"), execution=intent.get("execution"))
+            audited.add(receipt_key)
         sold += count
     owned_ids = {record["buy"]["order_id"]} | {
         intent["order_id"] for intent in record["sells"]
     }
+    owned_ids |= verified_previous_zone1_fill_ids(journal, record, all_fills)
     if any(row.get("order_id") not in owned_ids for row in all_fills):
         # Account positions are netted. Do not assume matching net quantity
         # proves ownership after an outside trade on this same contract.
@@ -423,7 +1037,6 @@ def reconcile_exit(client, journal, record, now):
     if remaining <= 0:
         return
     held = position_for(client, ticker)
-    sign = 1 if record["side"] == "YES" else -1
     if held != sign * remaining:  # No netting/over-selling any manual inventory
         event("M9_EXIT_OWNERSHIP_WAIT", ticker=ticker, bought=str(bought),
               sold=str(sold), held=str(held))
@@ -434,36 +1047,82 @@ def reconcile_exit(client, journal, record, now):
     if competing:
         event("M9_EXIT_OTHER_ORDER_WAIT", ticker=ticker)
         return
-    cost = sum((D(str(f.get("count_fp", f.get("count")))) * _outcome_cost(f, sign)
-                for f in buy_rows), D(0)) / bought
-    bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
-    purpose, limit = exit_decision(cost, bid, stop_armed=bool(record.get("stop_armed")))
-    if purpose is None:
+    # Price the exit only after the potentially slow ownership/history reads.
+    # Repeated zero-fill exits grow that history; an earlier quote can be stale.
+    market = client.market(ticker)
+    if parse_time(market["close_time"]) <= now or market.get("status") not in {"active", "open"}:
         return
+    bid = D(str(market[record["side"].lower() + "_bid_dollars"]))
+    observe_trade_mae(journal, record, cost, bid, now)
+    sol_kill = maybe_arm_sol_20c_kill(journal, record, bid, now)
+    # Existing regular entries retain their durable original +5c or +10c spread;
+    # new entries use the configured spread without repricing already-owned TPs.
+    # Zone 2 continues to use its separate 98c absolute take-profit target.
+    tp_spread = D(str(record.get("take_profit_spread", ".05")))
+    if record.get("entry_kind") != "late_basket_rank" and tp_spread not in (D(".05"), D(".10"), PROFIT):
+        raise RuntimeError("Unknown regular take-profit spread")
+    purpose, limit = exit_decision(
+        cost, bid, stop_armed=bool(record.get("stop_armed")) or sol_kill,
+        profit=tp_spread)
+    if purpose != "stop_loss" and record.get("entry_kind") == "late_basket_rank":
+        # Zone 2 is an independent near-close 98c exit, never the regular
+        # target. Post a resting order as soon as inventory is verified,
+        # without waiting for the market bid to reach the 98c target.
+        target = D(str(record.get("take_profit_target", ".98")))
+        if target != D(".98"):
+            raise RuntimeError("Invalid Zone 2 take-profit target")
+        if cost >= target:
+            # Legacy Zone 2 positions may have entered at 98c or 99c.
+            # Never post a 98c sell below their confirmed purchase price.
+            event("M9_ZONE2_TP_NOT_PROFITABLE", ticker=ticker,
+                  entry_cost=str(cost), target=str(target))
+            return
+        purpose, limit = "take_profit", target
+    elif purpose is None:
+        target = (cost + tp_spread).quantize(D(".01"), rounding=ROUND_CEILING)
+        if target > D(".99"):
+            return
+        purpose, limit = "take_profit", target
     if purpose == "stop_loss" and not record.get("stop_armed"):
         # Latch the trigger even if the book temporarily loses its best bid.
         record["stop_armed"] = {
-            "at": now, "trigger_bid": str(bid), "threshold": str(STOP_BID)
+            "at": now, "trigger_bid": str(bid), "threshold": str(threshold),
+            "entry_cost": str(cost)
         }
         journal.save()
         event("M9_STOP_TRIGGERED", ticker=ticker, entry_cost=str(cost),
-              trigger_bid=str(bid), threshold=str(STOP_BID))
+              trigger_bid=str(bid), threshold=str(threshold))
     if limit is None:
         event("M9_STOP_NO_EXECUTABLE_BID", ticker=ticker)
         return
     intent = {"client_id": str(uuid.uuid4()), "quantity": str(remaining),
-              "target": str(limit), "purpose": purpose, "created_at": now}
+              "target": str(limit), "purpose": purpose, "created_at": now,
+              "execution": ("gtc" if purpose == "take_profit" else
+                            "reduce_only_gtc" if stop_exit_order_mode() == "gtc"
+                            else "reduce_only_ioc")}
     record["sells"].append(intent)
     journal.save()  # Intent is durable before any POST
     event("M9_STOP_SUBMIT" if purpose == "stop_loss" else "M9_TP_SUBMIT",
-          ticker=ticker, quantity=str(remaining), target=str(limit),
-          entry_cost=str(cost), trigger_bid=str(bid), execution="reduce_only_ioc")
-    response = client.place_take_profit(ticker, sign * remaining, limit,
-                                        client_order_id=intent["client_id"])
+          ticker=ticker, entry_zone=record.get("entry_zone", ZONE1),
+          quantity=str(remaining), target=str(limit),
+          entry_cost=str(cost), trigger_bid=str(bid), execution=intent["execution"])
+    if purpose == "take_profit":
+        response = client.place_resting_take_profit(ticker, sign * remaining, limit,
+            expiration_time=parse_time(market["close_time"]), client_order_id=intent["client_id"])
+    elif intent["execution"] == "reduce_only_gtc":
+        response = client.place_resting_stop(
+            ticker, sign * remaining, limit,
+            expiration_time=parse_time(market["close_time"]),
+            client_order_id=intent["client_id"])
+    else:
+        response = client.place_take_profit(ticker, sign * remaining, limit,
+                                            client_order_id=intent["client_id"])
     row = response.get("order", response)
     if row.get("order_id"):
         intent["order_id"] = row["order_id"]
         journal.save()
+        event("M9_EXIT_ACCEPTED", ticker=ticker, order_id=row["order_id"],
+              target=str(limit), execution=intent["execution"], purpose=purpose)
 
 
 def entry_slot_released(record):
@@ -485,13 +1144,15 @@ def window_entry_count(journal, window_start_ms):
         raise ValueError("Invalid 15-minute window start")
     return sum(1 for record in journal.data["windows"].values()
                if record.get("window_start_ms") == window_start_ms
+               and record.get("entry_kind") != "late_basket_rank"
                and isinstance(record.get("buy"), dict)
                and not entry_slot_released(record))
 
 
 
-def queue_skip(client_market, now, series):
+def queue_skip(client_market, now, series, *, min_price=None):
     """Explain in-window quote skips; do not spam logs for future markets."""
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
     try:
         start = parse_time(client_market["close_time"]) - 900
         if not ENTRY_START_SECONDS <= now - start < ENTRY_END_SECONDS:
@@ -505,17 +1166,21 @@ def queue_skip(client_market, now, series):
             asks[side] = str(value) if value.is_finite() else None
         except (KeyError, TypeError, ValueError, ArithmeticError):
             asks[side] = None
-    eligible = [v for v in asks.values() if v is not None and MIN_PRICE <= D(v) <= MAX_PRICE]
+    eligible = [v for v in asks.values() if v is not None and min_price <= D(v) <= MAX_PRICE]
     reason = ("market_not_active" if client_market.get("status") not in {"active", "open"}
               else "ambiguous_sides" if len(eligible) > 1
               else "missing_quote" if None in asks.values()
-              else "outside_59_91_price_band")
+              else f"outside_{int(min_price * 100)}_{int(MAX_PRICE * 100)}_price_band")
     event("M9_QUEUE_SKIP", ticker=client_market.get("ticker"), series=series,
           reason=reason, yes_ask=asks["yes"], no_ask=asks["no"])
 
 
-def candidate_queue(client, series_list, now):
+def candidate_queue(client, series_list, now, *, min_price=None):
     """Price-eligible single coins in configured order, not basket ranking."""
+    min_price = MIN_PRICE if min_price is None else D(str(min_price))
+    setter = getattr(client, "set_entry_min_price", None)
+    if callable(setter):
+        setter(min_price)
     candidates = []
     for series in series_list:
         try:
@@ -524,9 +1189,9 @@ def candidate_queue(client, series_list, now):
             event("M9_MARKET_DISCOVERY_PAUSED", series=series, error_type=type(error).__name__)
             continue
         for market in markets:
-            plan = plan_single_coin(market, now, series)
+            plan = plan_single_coin(market, now, series, min_price=min_price)
             if plan is None:
-                queue_skip(market, now, series)
+                queue_skip(market, now, series, min_price=min_price)
             else:
                 candidates.append(plan)
     return candidates
@@ -536,19 +1201,47 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
     # Preview must never send exits, even if pointed at an existing live journal.
     # Live exits operate only on this runner's durable order identities.
     if live:
+        closed_checked = getattr(journal, "_closed_reconciliation_checked", None)
+        if closed_checked is None:
+            closed_checked = {}
+            journal._closed_reconciliation_checked = closed_checked
+        active, closed = [], []
         for record in list(journal.data["windows"].values()):
-            if record.get("buy") and not record.get("outcome"):
-                try:
+            if not record.get("buy") or record.get("outcome"):
+                continue
+            start_ms = record.get("window_start_ms")
+            is_closed = (type(start_ms) is int and start_ms % 900000 == 0
+                         and start_ms / 1000 + 900 <= now)
+            (closed if is_closed else active).append(record)
+        # Active exits get API capacity first. Closed records only need payout
+        # reconciliation, at most once per minute, including failed attempts.
+        for record in active + closed:
+            ticker = record["ticker"]
+            is_closed = record in closed
+            if is_closed:
+                previous = closed_checked.get(ticker)
+                if previous is not None and 0 <= now - previous < 60:
+                    continue
+                closed_checked[ticker] = now
+            try:
+                if is_closed:
+                    # Rare delayed pending orders still need cancellation even
+                    # after the market window has ended.
+                    cancel_stale_zone1_buy(client, journal, record, now)
+                else:
                     reconcile_exit(client, journal, record, now)
-                    verify_completed_trade(client, journal, record, now)
-                except Exception as error:
-                    event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=record["ticker"],
-                          error_type=type(error).__name__)
+                verify_completed_trade(client, journal, record, now)
+            except Exception as error:
+                event("M9_EXIT_OR_RESULT_RECONCILIATION_PAUSED", ticker=ticker,
+                      error_type=type(error).__name__,
+                      error_code=reconciliation_error_code(error),
+                      http_status=getattr(error, "status_code", None))
         apply_new_outcomes(journal)
     # Queue order is unchanged (M9_SERIES). Refresh each candidate before use;
     # never reuse a backup's stale snapshot as an executable quote.
     preview_windows = set()
-    candidates = candidate_queue(client, series_list, now)
+    min_price = entry_min_price(journal.data["streak"])
+    candidates = candidate_queue(client, series_list, now, min_price=min_price)
     if candidates:
         event("M9_ENTRY_QUEUE", tickers=[p["ticker"] for p in candidates],
               policy=ENTRY_QUEUE_POLICY)
@@ -563,8 +1256,12 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         if entry_market_occupied(client, ticker):
             event("M9_ENTRY_BLOCKED_EXISTING_INVENTORY", ticker=ticker)
             continue
-        allocation = trade_budget(journal.data["streak"], base_budget)
-        quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts)
+        base_allocation = trade_budget(
+            journal.data["streak"], base_budget,
+            budget_cycle=journal.data.get("budget_cycle_v2"))
+        allocation = budget_for_series(base_allocation, series)
+        quantity = budgeted_quantity(allocation, D(plan["limit"]), max_contracts,
+                                     min_price=min_price)
         if quantity < 1:
             event("M9_ENTRY_BUDGET_TOO_SMALL", ticker=ticker,
                   allocated_dollars=str(allocation), limit=plan["limit"])
@@ -575,16 +1272,18 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
                   allocated_dollars=str(allocation),
                   reduced_budget=journal.data["streak"]["reduced_budget"],
                   consecutive_wins=journal.data["streak"]["consecutive_wins"],
+                  entry_floor_cents=int(min_price * 100),
                   target_example=str(D(plan["limit"]) + PROFIT))
             continue
         market = client.market(ticker)
-        current = plan_single_coin(market, time.time(), series)
+        current = plan_single_coin(market, time.time(), series, min_price=min_price)
         if (current is None or current["side"] != plan["side"]
                 or current["window_start_ms"] != start_ms):
-            queue_skip(market, time.time(), series)
+            queue_skip(market, time.time(), series, min_price=min_price)
             event("M9_QUEUE_ADVANCE", ticker=ticker, reason="fresh_quote_not_eligible")
             continue
-        quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts)
+        quantity = budgeted_quantity(allocation, D(current["limit"]), max_contracts,
+                                     min_price=min_price)
         if quantity < 1:
             continue
         if entry_market_occupied(client, ticker):
@@ -597,14 +1296,20 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
         intent = {"client_id": str(uuid.uuid4()), "limit": current["limit"],
                   "created_at": time.time()}
         record = {"ticker": ticker, "series": series, "side": current["side"],
-                  "window_start_ms": start_ms,
+                  "entry_zone": ZONE1, "window_start_ms": start_ms,
                   "quantity": str(quantity), "allocated_dollars": str(allocation),
+                  "budget_phase_at_entry": (journal.data.get("budget_cycle_v2") or {}).get("phase"),
+                  "sol_budget_factor_at_entry": str(SOL_BUDGET_FACTOR) if series == "KXSOL15M" else "1",
                   "reduced_budget_at_entry": journal.data["streak"]["reduced_budget"],
+                  "entry_floor_at_entry": str(min_price),
+                  "take_profit_spread": str(PROFIT),
                   "buy": intent, "sells": []}
         journal.data["windows"][ticker] = record
         journal.save()  # A pending/ambiguous POST consumes the slot durably.
-        event("M9_BUY_SUBMIT", ticker=ticker, side=current["side"],
-              quantity=str(quantity), price=current["limit"])
+        event("M9_BUY_SUBMIT", ticker=ticker, entry_zone=ZONE1, side=current["side"],
+              quantity=str(quantity), price=current["limit"],
+              entry_floor_cents=int(min_price * 100),
+              take_profit_cents=int((D(current["limit"]) + PROFIT) * 100))
         try:
             response = client.place_entry(ticker, current["side"], quantity, D(current["limit"]),
                 parse_time(market["close_time"]), submit_before=start_ms / 1000 + ENTRY_END_SECONDS,
@@ -626,6 +1331,7 @@ def run_pass(client, journal, series_list, base_budget, max_contracts, live, now
             try:
                 # Do not infer a miss from a quote or a missing acknowledgement.
                 # Only an exact terminal-order read + fills can release this slot.
+                reconcile_exit(client, journal, record, time.time())
                 verify_completed_trade(client, journal, record, time.time())
             except Exception as error:
                 event("M9_ENTRY_CONFIRMATION_PENDING", ticker=ticker,
@@ -679,6 +1385,12 @@ def main(argv=None):
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         session.mount("https://", requests.adapters.HTTPAdapter(max_retries=0))
         journal = Journal(state)
+        ensure_budget_cycle(journal)
+        # Bounded read-only replay lets diagnostics inspect prior exit incidents.
+        completed = [r for r in journal.data["windows"].values()
+                     if r.get("outcome") and r.get("sells")]
+        for record in completed[-24:]:
+            emit_exit_summary(record, source="startup_journal")
         client = KalshiClient(os.getenv("KALSHI_API_KEY_ID", ""),
             os.getenv("KALSHI_PRIVATE_KEY_PATH", ""), os.getenv("KALSHI_PRIVATE_KEY_B64", ""),
             timeout=5, role="entry", quote_ttl=0.1, session=session)
@@ -688,12 +1400,25 @@ def main(argv=None):
               base_budget_dollars=str(base_budget), max_contracts=max_contracts,
               max_entries_per_window=max_entries_per_window,
               entry_queue_policy=ENTRY_QUEUE_POLICY,
+              zone1_unfilled_buy_timeout_seconds=ZONE1_BUY_TIMEOUT_SECONDS,
               entry_start_seconds=ENTRY_START_SECONDS,
               entry_end_seconds=ENTRY_END_SECONDS,
               consecutive_wins=journal.data["streak"]["consecutive_wins"],
               reduced_budget=journal.data["streak"]["reduced_budget"],
-              price_range_cents="59-91", take_profit_cents=5,
-              stop_bid_cents=int(STOP_BID * 100), stop_execution="bid_limited_reduce_only_ioc")
+              full_budget_wins=journal.data["streak"].get("full_budget_wins", 0),
+              active_budget_dollars=str(trade_budget(
+                  journal.data["streak"], base_budget,
+                  budget_cycle=journal.data.get("budget_cycle_v2"))),
+              budget_cycle_policy=BUDGET_CYCLE_POLICY,
+              budget_phase=journal.data["budget_cycle_v2"]["phase"],
+              budget_phase_wins=journal.data["budget_cycle_v2"]["phase_wins"],
+              sol_budget_factor=str(SOL_BUDGET_FACTOR),
+              price_range_cents=f"{int(entry_min_price(journal.data['streak']) * 100)}-{int(MAX_PRICE * 100)}",
+              floor_relaxes_after_consecutive_wins=RELAX_FLOOR_AFTER_WINS,
+              relaxed_floor_cents=int(RELAXED_MIN_PRICE * 100), take_profit_cents=int(PROFIT * 100), take_profit_execution="gtc_after_confirmed_fill",
+              stop_drop_cents=int(STOP_DROP * 100), stop_basis="verified_average_entry_cost",
+              sol_absolute_kill_bid_cents=int(SOL_ABSOLUTE_KILL_BID * 100),
+              stop_execution="bid_limited_reduce_only_" + stop_exit_order_mode())
         while not stop:
             started = time.monotonic()
             try:
@@ -708,3 +1433,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+

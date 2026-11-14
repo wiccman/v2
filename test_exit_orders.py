@@ -1,3 +1,4 @@
+import pytest
 from decimal import Decimal
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -285,3 +286,6 @@ def test_manage_exit_does_not_stop_out_at_low_bid(monkeypatch):
     assert bot.manage_exit(record, "MARKET", market, {}, closed) is False
     assert fake.actions == []
     assert all(action[0] != "close" for action in fake.actions)
+
+
+pytestmark = pytest.mark.usefixtures("early_entry_scenario")

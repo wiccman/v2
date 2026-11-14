@@ -7,6 +7,7 @@ on:
     paths:
       - minute8_top2.py
       - test_minute8_top2.py
+      - tests/test_crypto_leader_only_routing.py
       - .github/workflows/minute8-top2-tests.yml
 
 permissions:
@@ -26,7 +27,7 @@ jobs:
       - name: Install pinned test dependencies
         run: python -m pip install -r requirements.txt
       - name: Offline policy and existing execution checks
-        run: python tools/run_offline_tests.py -q test_single_coin_minute9.py test_minute9_queue.py test_performance_ranked_minute9.py test_cash_checked_minute9.py test_minute9_until_close.py test_minute8_top2.py
+        run: python tools/run_offline_tests.py -q test_single_coin_minute9.py test_minute9_queue.py test_performance_ranked_minute9.py test_cash_checked_minute9.py test_minute9_until_close.py test_minute8_top2.py tests/test_crypto_leader_only_routing.py
       - name: Explicit production cutoff with new policy
         env:
           M9_ENTRY_END_SECONDS: "900"

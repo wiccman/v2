@@ -52,7 +52,7 @@ def test_funded_ranked_entry_after_nine_and_exact_close_deadline(tmp_path,monkey
     run(c,j,now)
     assert len(c.posted)==1
     assert c.posted[0][0].startswith('KXETH15M-')
-    assert c.posted[0][2]==12 and c.posted[0][3]==D('.75')
+    assert c.posted[0][2]==4 and c.posted[0][3]==D('.75')
     assert c.deadlines==[(START+900,START+900)]
     # The longer window must not allow a second market after an uncertain first.
     now[0]=START+899.75
@@ -114,11 +114,13 @@ def test_partial_fill_cannot_use_backup_late(tmp_path,monkeypatch):
     assert len(c.posted)==1 and core.window_entry_count(j,START*1000)==1
 
 
-def test_stop_take_profit_and_reduced_budget_unchanged():
+def test_stop_take_profit_and_inverted_budget_sequence():
     assert core.exit_decision('.75','.45')[0]=='stop_loss'
-    assert core.exit_decision('.75','.80')[0]=='take_profit'
-    assert core.exit_decision('.75','.46')==(None,None)
+    assert core.exit_decision('.75','.85')[0]=='take_profit'
+    assert core.exit_decision('.75','.55')==(None,None)
     streak=core.starting_streak()
-    for _ in range(3):streak=core.next_streak(streak,'win')
     assert core.trade_budget(streak,D(10))==D(10)/3
-    assert core.trade_budget(core.next_streak(streak,'loss'),D(10))==D(10)
+    streak=core.next_streak(streak,'loss')
+    assert core.trade_budget(streak,D(10))==D(10)
+    streak=core.next_streak(core.next_streak(streak,'win'),'win')
+    assert core.trade_budget(streak,D(10))==D(10)/3
