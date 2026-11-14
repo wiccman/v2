@@ -3,7 +3,7 @@ from decimal import Decimal as D
 import pytest
 import leader_mean15 as leader
 import performance_ranked_minute9 as ranked
-from test_leader_mean15 import START, Feed, Exchange, observations
+from test_leader_mean15 import START, Feed, Exchange, market, observations
 
 
 def test_eth_remains_selected_after_quote_skip_and_restart(tmp_path):
@@ -14,7 +14,7 @@ def test_eth_remains_selected_after_quote_skip_and_restart(tmp_path):
     runner = leader.LeaderRunner(path, provider=Feed(lambda: at[0]), clock=lambda: at[0])
     runner.run(venue, live=True)
     assert not venue.submissions
-    assert runner.journal.data['leader_minute_four_signals'][str(START)]['coin'] == 'ETH'
+    assert runner.journal.data['leader_minute_four_mean_signals'][str(START)]['coin'] == 'ETH'
     class MustNotReselect:
         def snapshot(self, *args):
             raise AssertionError('A saved signal must not be recomputed')
@@ -29,14 +29,14 @@ def test_eth_remains_selected_after_quote_skip_and_restart(tmp_path):
     assert record['entry_signal_source'] == leader.SIGNAL_SOURCE
 
 
-def test_lowest_return_selects_hype():
-    # 2026-11-09 00:30 CST first closed Coinbase candle, before the HYPE loss.
+def test_mean_rank_orders_known_window():
+    # Use a recorded basket of returns to check absolute distance on either side.
     values = {'BTC': '.022870656933671185', 'ETH': '-.0184205554505934',
               'SOL': '.06959749449020336', 'XRP': '.04577497024627064',
               'HYPE': '-.13468013468013185'}
     rows = [ranked.Observation(leader.COINS[k], START, D(100), D(100)+D(v), START+240)
             for k, v in values.items()]
-    assert leader.lowest_return_choice(rows, START, START+240)[0] == 'HYPE'
+    assert leader.mean_rank_choices(rows, START, START+240)[:2] == ('BTC', 'ETH')
 
 
 @pytest.mark.parametrize('kind', ['live_tick', 'missing', 'wrong_window', 'tie'])
@@ -114,10 +114,31 @@ def test_quote_remains_ineligible_no_substitute_or_late_entry(tmp_path):
     assert not venue.submissions
 
 
-def test_lowest_return_keeps_five_coin_mean():
+def test_mean_rank_includes_sol():
     # SOL is on the mean and BTC is last.
     vals = {'BTC': -4, 'ETH': .5, 'SOL': 0, 'XRP': 1, 'HYPE': 2.5}
     rows = [ranked.Observation(leader.COINS[k], START, D(100), D(100)+D(str(v)), START+240)
             for k,v in vals.items()]
-    coin, mean, _ = leader.lowest_return_choice(rows, START, START+240)
-    assert mean == 0 and coin == 'BTC'
+    coin, fallback, mean, _ = leader.mean_rank_choices(rows, START, START+240)
+    assert mean == 0 and (coin, fallback) == ('ETH', 'SOL')
+
+
+@pytest.mark.parametrize("price,lose_ack,expected", [
+    (".75", False, "ETH"), ("1.00", False, "HYPE"), (".75", True, "ETH"),
+])
+def test_mean_fallback_only_before_submission(tmp_path, price, lose_ack, expected):
+    class Quotes(Exchange):
+        def markets(self, **kwargs):
+            return [market("ETH", price), market("HYPE", ".75")]
+
+        def market(self, ticker):
+            return next(row for row in self.markets() if row["ticker"] == ticker)
+
+    now = lambda: START + 245
+    venue = Quotes()
+    venue.lose_ack = lose_ack
+    path = tmp_path / "leader.json"
+    for _ in range(2):
+        leader.LeaderRunner(path, provider=Feed(now), clock=now).run(venue, live=True)
+    assert len(venue.submissions) == 1
+    assert venue.submissions[0][1].endswith("-" + expected)
